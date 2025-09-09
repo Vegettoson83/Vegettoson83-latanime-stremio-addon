@@ -5,19 +5,22 @@ const addonInterface = require("./addon");
 
 const PORT = process.env.PORT || 7000;
 
-// Start server
+// Serve the addon
 const server = serveHTTP(addonInterface, { port: PORT });
 
-// Inject CORS headers
+// Add CORS headers
 server.on("request", (req, res) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, Accept, Origin, X-Requested-With"
+  );
 
-    if (req.method === "OPTIONS") {
-        res.writeHead(200);
-        res.end();
-    }
+  if (req.method === "OPTIONS") {
+    res.writeHead(200);
+    res.end();
+  }
 });
 
 console.log(`Addon running on http://localhost:${PORT}`);
