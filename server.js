@@ -1,29 +1,22 @@
 #!/usr/bin/env node
+const { serveHTTP } = require("stremio-addon-sdk");
+const addonInterface = require("./addon");
 
-const http = require('http');
-const addon = require('./addon');
 const PORT = process.env.PORT || 7000;
 
-const server = http.createServer((req, res) => {
-  // Add CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin, X-Requested-With');
+// Wrap the AddonInterface to inject CORS headers
+function corsWrapper(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With");
 
-  if (req.method === 'OPTIONS') {
+  if (req.method === "OPTIONS") {
     res.writeHead(200);
     return res.end();
   }
 
-  try {
-    return addon(req, res);
-  } catch (err) {
-    console.error('Error delegating request to addon interface:', err);
-    res.writeHead(500);
-    res.end('Internal Server Error');
-  }
-});
+  return addonInterface(req, res); // call original addon interface
+}
 
-server.listen(PORT, () => {
-  console.log(`Addon server listening on port ${PORT}`);
-});
+serveHTTP(corsWrapper, { port: PORT });
+console.log(`Latanime Stremio addon running on port ${PORT} with CORS enabled`);
