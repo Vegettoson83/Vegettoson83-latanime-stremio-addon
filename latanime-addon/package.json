@@ -1,0 +1,12 @@
+{
+    "name": "stremio-addon-latanime",
+    "version": "0.0.1",
+    "description": "Stremio addon for latanime.org",
+    "scripts": {
+        "start": "node server.js"
+    },
+    "dependencies": {
+        "stremio-addon-sdk": "1.1.x",
+        "cheerio": "^1.0.0-rc.10"
+    }
+}
