@@ -48,68 +48,28 @@ app.get('/manifest.json', (req, res) => {
   res.json(addonInterface.manifest);
 });
 
-// Catalog endpoint
-app.get('/catalog/:type/:id.json', async (req, res) => {
-  try {
-    console.log(`📚 Catalog: ${req.params.type}/${req.params.id}`);
-    
-    // Call the catalog handler from our addon
-    const result = await new Promise((resolve) => {
-      // Simulate the addon interface call
-      const handlers = addonInterface;
-      if (handlers && handlers.get) {
-        handlers.get(req.path).then(resolve).catch(() => resolve({ metas: [] }));
-      } else {
-        resolve({ metas: [] });
-      }
-    });
-    
-    res.json(result);
-  } catch (error) {
-    console.error('❌ Catalog error:', error);
-    res.status(500).json({ error: error.message });
+// Use the addon interface directly for all other requests
+app.use('/', (req, res, next) => {
+  // Skip health and manifest routes
+  if (req.path === '/health' || req.path === '/manifest.json') {
+    return next();
   }
-});
-
-// Meta endpoint  
-app.get('/meta/:type/:id.json', async (req, res) => {
-  try {
-    console.log(`📄 Meta: ${req.params.type}/${req.params.id}`);
-    
-    const result = await new Promise((resolve) => {
-      const handlers = addonInterface;
-      if (handlers && handlers.get) {
-        handlers.get(req.path).then(resolve).catch(() => resolve({ meta: null }));
-      } else {
-        resolve({ meta: null });
-      }
-    });
-    
-    res.json(result);
-  } catch (error) {
-    console.error('❌ Meta error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Stream endpoint
-app.get('/stream/:type/:id.json', async (req, res) => {
-  try {
-    console.log(`🎬 Stream: ${req.params.type}/${req.params.id}`);
-    
-    const result = await new Promise((resolve) => {
-      const handlers = addonInterface;
-      if (handlers && handlers.get) {
-        handlers.get(req.path).then(resolve).catch(() => resolve({ streams: [] }));
-      } else {
-        resolve({ streams: [] });
-      }
-    });
-    
-    res.json(result);
-  } catch (error) {
-    console.error('❌ Stream error:', error);
-    res.status(500).json({ error: error.message });
+  
+  // Call the addon interface directly
+  if (addonInterface && typeof addonInterface === 'function') {
+    return addonInterface(req, res);
+  } else if (addonInterface && addonInterface.get) {
+    // Handle newer SDK format
+    addonInterface.get(req.path)
+      .then(result => {
+        res.json(result);
+      })
+      .catch(error => {
+        console.error('❌ Addon error:', error);
+        res.status(500).json({ error: error.message });
+      });
+  } else {
+    res.status(404).json({ error: 'Handler not found' });
   }
 });
 
@@ -124,4 +84,18 @@ app.listen(PORT, () => {
   console.log(`📺 Manifest: http://localhost:${PORT}/manifest.json`);
   console.log(`❤️  Health: http://localhost:${PORT}/health`);
   console.log(`🔗 Add to Stremio: http://localhost:${PORT}/manifest.json`);
+  
+  // Test the catalog endpoint
+  setTimeout(async () => {
+    console.log('\n🔍 Testing catalog endpoint...');
+    try {
+      const testReq = { path: '/catalog/series/latanime-top.json' };
+      if (addonInterface.get) {
+        const result = await addonInterface.get(testReq.path);
+        console.log(`✅ Catalog test: Found ${result.metas?.length || 0} items`);
+      }
+    } catch (error) {
+      console.error('❌ Catalog test failed:', error.message);
+    }
+  }, 2000);
 });
