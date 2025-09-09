@@ -1,83 +1,44 @@
 #!/usr/bin/env node
 const { serveHTTP } = require("stremio-addon-sdk");
-const addonInterface = require("./addon");
 
 const PORT = process.env.PORT || 7000;
 
-// Simple CORS middleware function
-function addCORS(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With");
-  
-  if (req.method === "OPTIONS") {
-    res.writeHead(200);
-    res.end();
-    return true;
-  }
-  
-  // Handle health check
-  if (req.url === '/health' || req.url === '/ping') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      status: 'ok', 
-      timestamp: new Date().toISOString(),
-      service: 'latanime-addon'
-    }));
-    return true;
-  }
-  
-  return false;
-}
-
-// Create a wrapper that preserves the AddonInterface
-const corsAddonInterface = function(req, res) {
-  // Log requests
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-  
-  // Handle CORS and health checks first
-  if (addCORS(req, res)) {
-    return; // Request was handled by CORS/health check
-  }
-  
-  // Pass to the original addon interface
-  return addonInterface(req, res);
-};
-
-// Copy the manifest property to maintain AddonInterface compatibility
-corsAddonInterface.manifest = addonInterface.manifest;
-
-// Start the server
+// First, let's test if the addon loads correctly
+let addonInterface;
 try {
-  serveHTTP(corsAddonInterface, { port: PORT });
-  
-  console.log(`🚀 Latanime Stremio addon running on port ${PORT}`);
-  console.log(`📺 Addon URL: http://localhost:${PORT}/manifest.json`);
-  console.log(`❤️  Health check: http://localhost:${PORT}/health`);
-  console.log(`🌐 CORS enabled for all origins`);
+  addonInterface = require("./addon");
+  console.log("✅ Addon loaded successfully");
+  console.log("✅ Manifest exists:", !!addonInterface.manifest);
+  if (addonInterface.manifest) {
+    console.log("✅ Addon ID:", addonInterface.manifest.id);
+    console.log("✅ Addon Name:", addonInterface.manifest.name);
+  }
 } catch (error) {
-  console.error('Failed to start server:', error);
+  console.error("❌ Failed to load addon:", error.message);
+  console.error("Full error:", error);
   process.exit(1);
 }
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('Received SIGTERM, shutting down gracefully...');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('Received SIGINT, shutting down gracefully...');
-  process.exit(0);
-});
-
-// Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught exception:', error);
+// Check if it's actually an AddonInterface
+if (!addonInterface || typeof addonInterface !== 'function') {
+  console.error("❌ addonInterface is not a function:", typeof addonInterface);
   process.exit(1);
-});
+}
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled rejection at:', promise, 'reason:', reason);
+if (!addonInterface.manifest) {
+  console.error("❌ addonInterface is missing manifest property");
   process.exit(1);
-});
+}
+
+// Start the server directly with the addon interface
+try {
+  console.log("🚀 Starting server...");
+  serveHTTP(addonInterface, { port: PORT });
+  
+  console.log(`✅ Latanime Stremio addon running on port ${PORT}`);
+  console.log(`📺 Addon URL: http://localhost:${PORT}/manifest.json`);
+  console.log(`🔗 Add to Stremio: http://localhost:${PORT}/manifest.json`);
+} catch (error) {
+  console.error('❌ Failed to start server:', error);
+  process.exit(1);
+}
