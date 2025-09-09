@@ -166,4 +166,18 @@ builder.defineStreamHandler(async ({ type, id }) => {
     }
 });
 
-module.exports = builder.getInterface();
+const addonInterface = builder.getInterface();
+
+module.exports = (req, res) => {
+    // Add CORS headers for Stremio Web
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin, X-Requested-With');
+
+    if (req.method === 'OPTIONS') {
+        res.writeHead(200);
+        return res.end();
+    }
+
+    return addonInterface(req, res);
+};
