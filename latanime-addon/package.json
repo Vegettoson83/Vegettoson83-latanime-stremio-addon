@@ -1,83 +1,24 @@
-#!/usr/bin/env node
-const { serveHTTP } = require("stremio-addon-sdk");
-const addonInterface = require("./addon");
-
-const PORT = process.env.PORT || 7000;
-
-// Simple CORS middleware function
-function addCORS(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With");
-  
-  if (req.method === "OPTIONS") {
-    res.writeHead(200);
-    res.end();
-    return true;
-  }
-  
-  // Handle health check
-  if (req.url === '/health' || req.url === '/ping') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      status: 'ok', 
-      timestamp: new Date().toISOString(),
-      service: 'latanime-addon'
-    }));
-    return true;
-  }
-  
-  return false;
+{
+  "name": "stremio-addon-latanime",
+  "version": "0.0.1",
+  "description": "Stremio addon for latanime.org",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "stremio-addon-sdk": "^1.6.10",
+    "cheerio": "^1.0.0-rc.12"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "stremio",
+    "addon",
+    "latanime",
+    "anime"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
 }
-
-// Create a wrapper that preserves the AddonInterface
-const corsAddonInterface = function(req, res) {
-  // Log requests
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-  
-  // Handle CORS and health checks first
-  if (addCORS(req, res)) {
-    return; // Request was handled by CORS/health check
-  }
-  
-  // Pass to the original addon interface
-  return addonInterface(req, res);
-};
-
-// Copy the manifest property to maintain AddonInterface compatibility
-corsAddonInterface.manifest = addonInterface.manifest;
-
-// Start the server
-try {
-  serveHTTP(corsAddonInterface, { port: PORT });
-  
-  console.log(`🚀 Latanime Stremio addon running on port ${PORT}`);
-  console.log(`📺 Addon URL: http://localhost:${PORT}/manifest.json`);
-  console.log(`❤️  Health check: http://localhost:${PORT}/health`);
-  console.log(`🌐 CORS enabled for all origins`);
-} catch (error) {
-  console.error('Failed to start server:', error);
-  process.exit(1);
-}
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('Received SIGTERM, shutting down gracefully...');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('Received SIGINT, shutting down gracefully...');
-  process.exit(0);
-});
-
-// Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught exception:', error);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled rejection at:', promise, 'reason:', reason);
-  process.exit(1);
-});
