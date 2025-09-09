@@ -97,7 +97,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
             const href = a.attr('href');
             if (episodeTitle && href) {
                 const episodeId = href.split('/').pop();
-                const match = episodeTitle.match(/Capitulo (\d+)/);
+                const match = episodeTitle.match(/Capitulo (\\d+)/);
                 const episodeNumber = match ? parseInt(match[1]) : i + 1;
 
                 videos.push({
@@ -168,7 +168,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
 const addonInterface = builder.getInterface();
 
-// Create a wrapper that adds CORS headers but preserves all properties of the original interface
+// Create a wrapper that adds CORS headers but preserves all properties (including non-enumerable) and prototype of the original interface
 function addonWithCors(req, res) {
     // Add CORS headers for Stremio Web
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -183,9 +183,34 @@ function addonWithCors(req, res) {
     return addonInterface(req, res);
 }
 
-// Copy any properties (like .manifest) from the original interface to the wrapper
-Object.keys(addonInterface).forEach((key) => {
-    try { addonWithCors[key] = addonInterface[key]; } catch (e) { /* ignore */ }
-});
+// Ensure the wrapper has the same prototype chain so instanceof checks succeed
+try {
+    Object.setPrototypeOf(addonWithCors, Object.getPrototypeOf(addonInterface));
+    // also preserve constructor reference if present
+    if (addonInterface.constructor) {
+        try { addonWithCors.constructor = addonInterface.constructor; } catch (e) { /* ignore */ }
+    }
+} catch (e) { /* ignore */ }
+
+// Copy all own property descriptors (including non-enumerable and symbols) from the original interface
+;(() => {
+    try {
+        // names
+        Object.getOwnPropertyNames(addonInterface).forEach((name) => {
+            const desc = Object.getOwnPropertyDescriptor(addonInterface, name);
+            try { Object.defineProperty(addonWithCors, name, desc); } catch (e) { /* ignore */ }
+        });
+        // symbols
+        Object.getOwnPropertySymbols(addonInterface).forEach((sym) => {
+            const desc = Object.getOwnPropertyDescriptor(addonInterface, sym);
+            try { Object.defineProperty(addonWithCors, sym, desc); } catch (e) { /* ignore */ }
+        });
+    } catch (e) {
+        // As a fallback, explicitly copy manifest if present
+        if (addonInterface && addonInterface.manifest) {
+            try { addonWithCors.manifest = addonInterface.manifest; } catch (err) { /* ignore */ }
+        }
+    }
+})();
 
 module.exports = addonWithCors;
