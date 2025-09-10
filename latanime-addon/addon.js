@@ -2,10 +2,17 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const https = require("https");
 const cheerio = require("cheerio");
 
-// HTTPS GET function with timeout and redirect handling
+// HTTPS GET function with User-Agent header
 function get(url) {
+  const options = {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    },
+    timeout: 15000
+  };
+
   return new Promise((resolve, reject) => {
-    const request = https.get(url, { timeout: 15000 }, (res) => {
+    const request = https.get(url, options, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         return resolve(get(res.headers.location));
       }
@@ -30,7 +37,7 @@ function get(url) {
 // Addon Manifest
 const manifest = {
   id: "community.latanime",
-  version: "0.0.7",
+  version: "0.0.8",
   name: "Latanime",
   description: "Stremio addon for latanime.org - Watch anime with Spanish subtitles",
   resources: ["catalog", "stream", "meta"],
