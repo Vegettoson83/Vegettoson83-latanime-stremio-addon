@@ -2,178 +2,202 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const https = require("https");
 const cheerio = require("cheerio");
 
+// HTTPS GET function with timeout and redirect handling
 function get(url) {
-    return new Promise((resolve, reject) => {
-        const request = https.get(url, (response) => {
-            if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-                // handle redirect
-                resolve(get(response.headers.location));
-            } else if (response.statusCode < 200 || response.statusCode >= 300) {
-                reject(new Error('Failed to load page, status code: ' + response.statusCode));
-            } else {
-                const body = [];
-                response.on('data', (chunk) => body.push(chunk));
-                response.on('end', () => resolve(body.join('')));
-            }
-        }).on('error', (err) => reject(err));
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, { timeout: 15000 }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return resolve(get(res.headers.location));
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        return reject(new Error(`Failed to load page, status code: ${res.statusCode}`));
+      }
+
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => resolve(body));
+    }).on('error', (err) => {
+      reject(err);
     });
+
+    request.on('timeout', () => {
+      request.destroy();
+      reject(new Error('Request timeout'));
+    });
+  });
 }
 
+// Addon Manifest
 const manifest = {
-    "id": "community.latanime",
-    "version": "0.0.1",
-    "name": "Latanime",
-    "description": "Stremio addon for latanime.org",
-    "resources": [
-        "catalog",
-        "stream",
-        "meta"
-    ],
-    "types": ["series"],
-    "catalogs": [
-        {
-            "type": "series",
-            "id": "latanime-top",
-            "name": "Latanime"
-        }
-    ]
+  id: "community.latanime",
+  version: "0.0.7",
+  name: "Latanime",
+  description: "Stremio addon for latanime.org - Watch anime with Spanish subtitles",
+  resources: ["catalog", "stream", "meta"],
+  types: ["series"],
+  catalogs: [{
+    type: "series",
+    id: "latanime-top",
+    name: "Latanime - Recent"
+  }]
 };
 
 const builder = new addonBuilder(manifest);
 
-builder.defineCatalogHandler(async ({ type, id, extra }) => {
-    console.log("request for catalogs: " + type + " " + id);
+// Catalog Handler
+builder.defineCatalogHandler(async ({ type, id }) => {
+  if (type !== "series" || id !== "latanime-top") {
+    return Promise.resolve({ metas: [] });
+  }
 
-    if (type === 'series' && id === 'latanime-top') {
-        const url = 'https://latanime.org/animes';
-        const html = await get(url);
-        const $ = cheerio.load(html);
+  try {
+    const html = await get("https://latanime.org/animes");
+    const $ = cheerio.load(html);
+    const metas = [];
 
-        const metas = [];
-        $('.animes .col-6').each((i, el) => {
-            const a = $(el).find('a');
-            const title = a.attr('title');
-            const href = a.attr('href');
-            const img = a.find('img').attr('src');
+    const selector = '.col-md-4.col-lg-3.col-xl-2.col-6.my-3';
+    $(selector).each((i, el) => {
+      const $el = $(el);
+      const link = $el.find('a').attr('href');
+      const title = $el.find('h3.my-1').text().trim();
+      const poster = $el.find('img.lozad').attr('data-src');
 
-            if (title && href && img) {
-                const id = href.split('/').pop();
-                metas.push({
-                    id: id,
-                    type: 'series',
-                    name: title,
-                    poster: img
-                });
-            }
-        });
-
-        return Promise.resolve({ metas: metas });
-    } else {
-        return Promise.resolve({ metas: [] });
-    }
-});
-
-builder.defineMetaHandler(async ({ type, id }) => {
-    console.log("request for meta: " + type + " " + id);
-
-    if (type === 'series') {
-        const url = `https://latanime.org/anime/${id}`;
-        const html = await get(url);
-        const $ = cheerio.load(html);
-
-        const title = $('.titulo-anime').text();
-        const description = $('.sinopsis').text().trim();
-        const poster = $('.anime-single-left img').attr('src');
-
-        const genres = [];
-        $('.anime-single-right .generos a').each((i, el) => {
-            genres.push($(el).text());
-        });
-
-        const videos = [];
-        $('.episodes-list .col-6').each((i, el) => {
-            const a = $(el).find('a');
-            const episodeTitle = a.attr('title');
-            const href = a.attr('href');
-            if (episodeTitle && href) {
-                const episodeId = href.split('/').pop();
-                const match = episodeTitle.match(/cap[íi]tulo (\d+)/i); // more robust regex
-                const episodeNumber = match ? parseInt(match[1]) : i + 1;
-
-                videos.push({
-                    id: episodeId,
-                    title: episodeTitle,
-                    season: 1,
-                    episode: episodeNumber,
-                    released: new Date()
-                });
-            }
-        });
-
-        const meta = {
-            id: id,
-            type: 'series',
+      if (link && title) {
+        const animeId = link.split('/').pop();
+        if (animeId && !metas.some(m => m.id === animeId)) {
+          metas.push({
+            id: animeId,
+            type: "series",
             name: title,
-            poster: poster,
-            description: description,
-            genres: genres,
-            videos: videos.reverse()
-        };
+            poster: poster
+          });
+        }
+      }
+    });
 
-        return Promise.resolve({ meta: meta });
-    } else {
-        return Promise.resolve({ meta: null });
-    }
+    return Promise.resolve({ metas });
+  } catch (error) {
+    console.error('Catalog error:', error);
+    return Promise.resolve({ metas: [] });
+  }
 });
 
+// Meta Handler
+builder.defineMetaHandler(async ({ type, id }) => {
+  if (type !== "series") {
+    return Promise.resolve({ meta: null });
+  }
+
+  try {
+    const html = await get(`https://latanime.org/anime/${id}`);
+    const $ = cheerio.load(html);
+
+    const title = $('div.col-lg-9.col-md-8 h2').text().trim();
+    const description = $('p.my-2.opacity-75').text().trim();
+    const poster = $('div.serieimgficha img').attr('src');
+
+    const genres = [];
+    $('a[href^="/genero/"]').each((i, el) => {
+      genres.push($(el).text().trim());
+    });
+
+    const videos = [];
+    $('div[style*="overflow-y: auto"] a.cap-layout').each((i, el) => {
+      const $link = $(el);
+      const href = $link.attr('href');
+      const episodeTitle = $link.text().trim().replace(/\s+/g, ' ');
+
+      if (href) {
+        const episodeId = href.split('/').pop();
+        const match = episodeTitle.match(/cap[íi]tulo (\d+)/i);
+        const episodeNumber = match ? parseInt(match[1], 10) : i + 1;
+
+        videos.push({
+          id: episodeId,
+          title: episodeTitle,
+          season: 1,
+          episode: episodeNumber,
+          released: new Date()
+        });
+      }
+    });
+
+    const meta = {
+      id: id,
+      type: "series",
+      name: title,
+      description: description,
+      poster: poster,
+      genres: genres,
+      videos: videos.reverse()
+    };
+
+    return Promise.resolve({ meta });
+  } catch (error) {
+    console.error('Meta error:', error);
+    return Promise.resolve({ meta: null });
+  }
+});
+
+// Stream Handler
 builder.defineStreamHandler(async ({ type, id }) => {
-    console.log("request for streams: " + type + " " + id);
+  if (type !== "series") {
+    return Promise.resolve({ streams: [] });
+  }
 
-    if (type === 'series') {
-        const url = `https://latanime.org/ver/${id}`;
-        const html = await get(url);
-        const $ = cheerio.load(html);
+  try {
+    const html = await get(`https://latanime.org/ver/${id}`);
+    const $ = cheerio.load(html);
 
-        const streams = [];
-        const providers = $('.cap_repro .play-video');
+    const providers = $('ul.cap_repro li#play-video > a.play-video');
 
-        for (let i = 0; i < providers.length; i++) {
-            const provider = providers.eq(i);
-            const encodedUrl = provider.attr('data-player');
-            if (encodedUrl) {
-                try {
-                    const decodedUrl = Buffer.from(encodedUrl, 'base64').toString('utf8');
+    const promises = providers.map(async (i, el) => {
+      const $provider = $(el);
+      const encodedUrl = $provider.attr('data-player');
+      const providerName = $provider.text().trim();
 
-                    const playerHtml = await get(decodedUrl);
-                    const $$ = cheerio.load(playerHtml);
+      if (!encodedUrl) return null;
 
-                    let videoUrl = $$('source').attr('src');
+      try {
+        const decodedUrl = Buffer.from(encodedUrl, 'base64').toString('utf8');
+        if (!decodedUrl.startsWith('http')) return null;
 
-                    if (!videoUrl) {
-                        const iframeSrc = $$('iframe').attr('src');
-                        if (iframeSrc) {
-                            const iframeHtml = await get(iframeSrc);
-                            const $$$ = cheerio.load(iframeHtml);
-                            videoUrl = $$$('source').attr('src');
-                        }
-                    }
+        const playerHtml = await get(decodedUrl);
+        const $player = cheerio.load(playerHtml);
 
-                    if (videoUrl) {
-                        streams.push({
-                            url: videoUrl,
-                            title: provider.text().trim()
-                        });
-                    }
-                } catch (e) {
-                    console.error("Error getting stream from provider:", e);
-                }
-            }
+        let videoUrl = $player('source').attr('src') || $player('video').attr('src');
+
+        if (!videoUrl) {
+          const iframeSrc = $player('iframe').attr('src');
+          if (iframeSrc) {
+            const iframeHtml = await get(iframeSrc);
+            const $iframe = cheerio.load(iframeHtml);
+            videoUrl = $iframe('source').attr('src') || $iframe('video').attr('src');
+          }
         }
 
-        return Promise.resolve({ streams: streams });
-    } else {
-        return Promise.resolve({ streams: [] });
-    }
+        if (videoUrl) {
+          if (!videoUrl.startsWith('http')) {
+            const baseUrl = new URL(decodedUrl).origin;
+            videoUrl = new URL(videoUrl, baseUrl).href;
+          }
+          return { url: videoUrl, title: providerName };
+        }
+        return null;
+      } catch (err) {
+        console.error(`Error processing provider ${providerName}:`, err);
+        return null;
+      }
+    }).get();
+
+    const results = await Promise.all(promises);
+    const streams = results.filter(stream => stream !== null);
+
+    return Promise.resolve({ streams });
+  } catch (error) {
+    console.error('Stream error:', error);
+    return Promise.resolve({ streams: [] });
+  }
 });
 
 module.exports = builder.getInterface();
