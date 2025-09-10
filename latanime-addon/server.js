@@ -51,19 +51,9 @@ app.get('/manifest.json', (req, res) => {
 // Catalog endpoint
 app.get('/catalog/:type/:id.json', async (req, res) => {
   try {
-    console.log(`📚 Catalog: ${req.params.type}/${req.params.id}`);
-    
-    // Call the catalog handler from our addon
-    const result = await new Promise((resolve) => {
-      // Simulate the addon interface call
-      const handlers = addonInterface;
-      if (handlers && handlers.get) {
-        handlers.get(req.path).then(resolve).catch(() => resolve({ metas: [] }));
-      } else {
-        resolve({ metas: [] });
-      }
-    });
-    
+    const { type, id } = req.params;
+    console.log(`📚 Catalog: ${type}/${id}`);
+    const result = await addonInterface.get({ resource: 'catalog', type, id, extra: req.query });
     res.json(result);
   } catch (error) {
     console.error('❌ Catalog error:', error);
@@ -74,17 +64,9 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
 // Meta endpoint  
 app.get('/meta/:type/:id.json', async (req, res) => {
   try {
-    console.log(`📄 Meta: ${req.params.type}/${req.params.id}`);
-    
-    const result = await new Promise((resolve) => {
-      const handlers = addonInterface;
-      if (handlers && handlers.get) {
-        handlers.get(req.path).then(resolve).catch(() => resolve({ meta: null }));
-      } else {
-        resolve({ meta: null });
-      }
-    });
-    
+    const { type, id } = req.params;
+    console.log(`📄 Meta: ${type}/${id}`);
+    const result = await addonInterface.get({ resource: 'meta', type, id, extra: req.query });
     res.json(result);
   } catch (error) {
     console.error('❌ Meta error:', error);
@@ -95,17 +77,9 @@ app.get('/meta/:type/:id.json', async (req, res) => {
 // Stream endpoint
 app.get('/stream/:type/:id.json', async (req, res) => {
   try {
-    console.log(`🎬 Stream: ${req.params.type}/${req.params.id}`);
-    
-    const result = await new Promise((resolve) => {
-      const handlers = addonInterface;
-      if (handlers && handlers.get) {
-        handlers.get(req.path).then(resolve).catch(() => resolve({ streams: [] }));
-      } else {
-        resolve({ streams: [] });
-      }
-    });
-    
+    const { type, id } = req.params;
+    console.log(`🎬 Stream: ${type}/${id}`);
+    const result = await addonInterface.get({ resource: 'stream', type, id, extra: req.query });
     res.json(result);
   } catch (error) {
     console.error('❌ Stream error:', error);
