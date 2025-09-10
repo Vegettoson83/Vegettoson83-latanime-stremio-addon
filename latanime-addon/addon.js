@@ -355,7 +355,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
   }
 });
 
-// Enhanced stream handler
+// Enhanced stream handler with correct selectors
 builder.defineStreamHandler(async ({ type, id }) => {
   console.log(`🎬 Stream request: ${type}/${id}`);
   
@@ -368,68 +368,152 @@ builder.defineStreamHandler(async ({ type, id }) => {
     const $ = cheerio.load(html);
     const streams = [];
 
-    // Look for video players
-    const playerSelectors = [
-      '.cap_repro .play-video',
-      '.video-players .player',
-      '.players .player-option',
-      '[data-player]',
-      '[data-url]',
-      '.server-item'
-    ];
+    console.log('🔍 Looking for video providers...');
+
+    // Use the correct selectors from the site structure
+    const providers = $('ul.cap_repro li#play-video > a.play-video');
+    console.log(`📺 Found ${providers.length} video providers`);
+
+    if (providers.length === 0) {
+      // Fallback selectors in case structure changes
+      const fallbackSelectors = [
+        '.cap_repro .play-video',
+        '.video-players .player',
+        '[data-player]',
+        '.server-item'
+      ];
+      
+      for (const selector of fallbackSelectors) {
+        const fallbackProviders = $(selector);
+        if (fallbackProviders.length > 0) {
+          console.log(`📺 Found ${fallbackProviders.length} providers with fallback selector: ${selector}`);
+          providers = fallbackProviders;
+          break;
+        }
+      }
+    }
 
     const promises = [];
     
-    for (const selector of playerSelectors) {
-      $(selector).each((i, el) => {
-        const $el = $(el);
-        const encodedUrl = $el.attr('data-player') || $el.attr('data-url');
-        const playerName = $el.text().trim() || `Player ${i + 1}`;
-        
-        if (encodedUrl) {
-          const promise = (async () => {
-            try {
-              const decodedUrl = Buffer.from(encodedUrl, 'base64').toString('utf8');
-              if (decodedUrl.startsWith('http')) {
-                const playerHtml = await get(decodedUrl);
-                const $player = cheerio.load(playerHtml);
+    providers.each((i, el) => {
+      const $provider = $(el);
+      const encodedUrl = $provider.attr('data-player');
+      const providerName = $provider.text().trim() || `Server ${i + 1}`;
+      
+      console.log(`🔍 Processing provider: ${providerName}`);
+      
+      if (!encodedUrl) {
+        console.warn(`⚠️  No data-player found for provider: ${providerName}`);
+        return;
+      }
+      
+      const promise = (async () => {
+        try {
+          console.log(`🔓 Decoding URL for ${providerName}...`);
+          const decodedUrl = Buffer.from(encodedUrl, 'base64').toString('utf8');
+          console.log(`🔗 Decoded URL: ${decodedUrl.substring(0, 50)}...`);
+          
+          if (!decodedUrl.startsWith('http')) {
+            console.warn(`⚠️  Invalid decoded URL for ${providerName}: ${decodedUrl}`);
+            return;
+          }
+          
+          console.log(`📡 Fetching player page for ${providerName}...`);
+          const playerHtml = await get(decodedUrl);
+          const $player = cheerio.load(playerHtml);
+          
+          // Look for video sources with multiple approaches
+          const videoSelectors = [
+            'video source[src]',     // Standard HTML5 video source
+            'source[src]',           // Generic source tag
+            'video[src]',            // Direct video src
+            '[data-src*=".mp4"]',    // Data-src with mp4
+            '[data-src*=".m3u8"]',   // Data-src with m3u8
+            'iframe[src]'            // Embedded iframe
+          ];
+          
+          let foundVideo = false;
+          
+          for (const videoSelector of videoSelectors) {
+            $player(videoSelector).each((j, videoEl) => {
+              const $video = $player(videoEl);
+              let videoUrl = $video.attr('src') || $video.attr('data-src');
+              
+              if (videoUrl) {
+                // Handle relative URLs
+                if (!videoUrl.startsWith('http')) {
+                  if (videoUrl.startsWith('/')) {
+                    const baseUrl = new URL(decodedUrl).origin;
+                    videoUrl = baseUrl + videoUrl;
+                  } else {
+                    const baseUrl = decodedUrl.split('/').slice(0, -1).join('/');
+                    videoUrl = baseUrl + '/' + videoUrl;
+                  }
+                }
                 
-                // Look for video sources
-                const videoSelectors = ['source[src]', 'video[src]', '[data-src]'];
-                
-                for (const videoSelector of videoSelectors) {
-                  $player(videoSelector).each((j, videoEl) => {
-                    const videoUrl = $player(videoEl).attr('src') || $player(videoEl).attr('data-src');
-                    if (videoUrl && videoUrl.startsWith('http')) {
-                      streams.push({
-                        url: videoUrl,
-                        title: `${playerName} - Quality ${j + 1}`,
-                        behaviorHints: {
-                          bingeGroup: `latanime-${id.split('-')[0]}`
-                        }
-                      });
+                // Validate video URL
+                if (videoUrl.startsWith('http') && (
+                  videoUrl.includes('.mp4') || 
+                  videoUrl.includes('.m3u8') || 
+                  videoUrl.includes('video') ||
+                  videoUrl.includes('stream')
+                )) {
+                  const qualityInfo = $video.attr('data-quality') || 
+                                    $video.attr('label') || 
+                                    (videoUrl.includes('720') ? '720p' : 
+                                     videoUrl.includes('480') ? '480p' : 
+                                     videoUrl.includes('1080') ? '1080p' : 'Auto');
+                  
+                  streams.push({
+                    url: videoUrl,
+                    title: `${providerName} - ${qualityInfo}`,
+                    behaviorHints: {
+                      bingeGroup: `latanime-${id.split('-')[0]}`,
+                      countryWhitelist: ['MX', 'ES', 'AR', 'CO', 'PE', 'VE', 'CL', 'EC', 'UY', 'PY', 'BO']
                     }
                   });
+                  
+                  console.log(`✅ Found stream: ${providerName} - ${qualityInfo}`);
+                  foundVideo = true;
                 }
               }
-            } catch (err) {
-              console.warn(`⚠️  Player error: ${err.message}`);
-            }
-          })();
-          promises.push(promise);
+            });
+            
+            if (foundVideo) break;
+          }
+          
+          if (!foundVideo) {
+            console.warn(`⚠️  No video sources found for ${providerName}`);
+          }
+          
+        } catch (err) {
+          console.error(`❌ Error processing ${providerName}:`, err.message);
         }
-      });
+      })();
       
-      if (promises.length > 0) break;
-    }
+      promises.push(promise);
+    });
 
+    // Wait for all providers to be processed
     await Promise.all(promises);
     
-    console.log(`🎬 Found ${streams.length} streams for ${id}`);
-    return { streams: streams.slice(0, 10) };
+    console.log(`🎬 Final result: Found ${streams.length} streams for episode ${id}`);
+    
+    // Log stream details for debugging
+    if (streams.length > 0) {
+      console.log('📋 Available streams:');
+      streams.forEach((stream, i) => {
+        console.log(`  ${i + 1}. ${stream.title} - ${stream.url.substring(0, 50)}...`);
+      });
+    } else {
+      console.warn('⚠️  No streams found - this might indicate a parsing issue');
+    }
+    
+    return { streams: streams.slice(0, 10) }; // Limit to 10 streams max
 
   } catch (error) {
     console.error(`❌ Stream error for ${id}:`, error.message);
+    console.error('❌ Stack trace:', error.stack);
     return { streams: [] };
   }
 });
