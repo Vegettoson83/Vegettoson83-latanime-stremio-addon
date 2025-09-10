@@ -25,4 +25,4 @@ app.get('/meta/:type/:id.json', async (req, res) => { try { const { type, id } =
 
 // Catch all other requests app.get('*', (req, res) => { res.status(404).json({ error: 'Not found' }); });
 
-// Start server app.listen(PORT, () => { console.log(🚀 Latanime addon running on port ${PORT}); console.log(📺 Manifest: http://localhost:${PORT}/manifest.json); console.log(❤️ Health: http://localhost:${PORT}/health); console.log(🔗 Add to Stremio: http://localhost:${PORT}/manifest.json); })
+// Start server app.listen(PORT, () => { console.log(🚀 Latanime addon running on port ${PORT}); console.log(📺 Manifest: http://localhost:${PORT}/manifest.json); console.log(❤️ Health: http://localhost:${PORT}/health); console.log(🔗 Add to Stremio: http://localhost:${PORT}/manifest.json); });
