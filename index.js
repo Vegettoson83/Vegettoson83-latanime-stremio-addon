@@ -1,11 +1,11 @@
-const { addonBuilder } = require('stremio-addon-sdk');
+const { addonBuilder, getRouter } = require('stremio-addon-sdk');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { URL } = require('url');
-const express = require('express');
-const cors = require('cors');
 
-// --- Addon Manifest ---
+// --------------------
+// Addon Manifest
+// --------------------
 const manifest = {
     id: 'org.latanime.stremio',
     version: '1.0.0',
@@ -22,7 +22,7 @@ const manifest = {
             id: 'latanime-anime',
             name: 'Anime Series',
             extra: [
-                { name: 'genre', options: getGenres() },
+                { name: 'genre', options: getGenreOptions() },
                 { name: 'skip', isRequired: false },
                 { name: 'search', isRequired: false }
             ]
@@ -32,7 +32,7 @@ const manifest = {
             id: 'latanime-movies',
             name: 'Anime Movies',
             extra: [
-                { name: 'genre', options: getGenres() },
+                { name: 'genre', options: getGenreOptions() },
                 { name: 'skip', isRequired: false },
                 { name: 'search', isRequired: false }
             ]
@@ -40,7 +40,7 @@ const manifest = {
     ]
 };
 
-function getGenres() {
+function getGenreOptions() {
     return [
         'Acción', 'Aventura', 'Carreras', 'Ciencia Ficción', 'Comedia',
         'Cyberpunk', 'Deportes', 'Drama', 'Ecchi', 'Escolares', 'Fantasía',
@@ -51,23 +51,33 @@ function getGenres() {
     ];
 }
 
-// --- Initialize Addon Builder ---
+// --------------------
+// Initialize Addon Builder
+// --------------------
 const builder = new addonBuilder(manifest);
 
-// --- Latanime API Class ---
+// --------------------
+// Latanime API Utility
+// --------------------
 class LatanimeAPI {
     constructor() {
         this.baseURL = 'https://latanime.org';
+        this.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
         this.client = axios.create({
             timeout: 15000,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'User-Agent': this.userAgent,
                 'Referer': this.baseURL,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate'
             }
         });
     }
 
+    // --------------------
+    // Catalog
+    // --------------------
     async getCatalog(type, genre, skip = 0, search = '') {
         try {
             let url = `${this.baseURL}/animes`;
@@ -81,19 +91,18 @@ class LatanimeAPI {
             const $ = cheerio.load(response.data);
             const items = [];
 
-            $('.anime-item, .content-item, .series-item').each((i, el) => {
-                const $el = $(el);
-                const title = $el.find('.title, h3, .name').text().trim();
-                const link = $el.find('a').attr('href');
-                const poster = $el.find('img').attr('src') || $el.find('img').attr('data-src');
-                const year = $el.find('.year, .date').text().match(/\d{4}/)?.[0];
-                const genres = $el.find('.genre, .tags').text().trim();
+            $('.anime-item, .content-item, .series-item').each((i, element) => {
+                const $item = $(element);
+                const title = $item.find('.title, h3, .name').text().trim();
+                const link = $item.find('a').attr('href');
+                const poster = $item.find('img').attr('src') || $item.find('img').attr('data-src');
+                const year = $item.find('.year, .date').text().match(/\d{4}/)?.[0];
+                const genres = $item.find('.genre, .tags').text().trim();
 
                 if (title && link) {
                     const id = this.extractIdFromUrl(link);
                     const itemType = this.determineType(title, genres);
-                    if (type === 'series' && itemType !== 'series') return;
-                    if (type === 'movie' && itemType !== 'movie') return;
+                    if ((type === 'series' && itemType !== 'series') || (type === 'movie' && itemType !== 'movie')) return;
 
                     items.push({
                         id: `latanime:${id}`,
@@ -105,17 +114,22 @@ class LatanimeAPI {
                     });
                 }
             });
+
             return items;
         } catch (err) {
-            console.error('Catalog error:', err.message);
+            console.error('Error fetching catalog:', err.message);
             return [];
         }
     }
 
+    // --------------------
+    // Meta
+    // --------------------
     async getMeta(id) {
         try {
             const animeId = id.replace('latanime:', '');
-            const response = await this.client.get(`${this.baseURL}/anime/${animeId}`);
+            const url = `${this.baseURL}/anime/${animeId}`;
+            const response = await this.client.get(url);
             const $ = cheerio.load(response.data);
 
             const title = $('.anime-title, .title, h1').first().text().trim();
@@ -127,23 +141,26 @@ class LatanimeAPI {
             const rating = parseFloat($('.rating, .score').text().match(/[\d.]+/)?.[0]) || undefined;
 
             const videos = [];
-            $('.episode-list .episode, .episodes .episode').each((i, el) => {
-                const $ep = $(el);
+            $('.episode-list .episode, .episodes .episode').each((i, element) => {
+                const $ep = $(element);
                 const epNumber = $ep.find('.episode-number, .ep-num').text().match(/\d+/)?.[0];
                 const epTitle = $ep.find('.episode-title, .ep-title').text().trim();
                 const epId = $ep.find('a').attr('href');
-                if (epNumber && epId) videos.push({
-                    id: `latanime:${animeId}:${epNumber}`,
-                    title: epTitle || `Episode ${epNumber}`,
-                    season: 1,
-                    episode: parseInt(epNumber),
-                    overview: epTitle
-                });
+                if (epNumber && epId) {
+                    videos.push({
+                        id: `latanime:${animeId}:${epNumber}`,
+                        title: epTitle || `Episode ${epNumber}`,
+                        season: 1,
+                        episode: parseInt(epNumber),
+                        overview: epTitle
+                    });
+                }
             });
 
+            const type = this.determineType(title, genres.join(' '));
             return {
                 id: `latanime:${animeId}`,
-                type: this.determineType(title, genres.join(' ')),
+                type,
                 name: title,
                 poster: this.resolveURL(poster),
                 background: this.resolveURL(background),
@@ -151,18 +168,21 @@ class LatanimeAPI {
                 year: year ? parseInt(year) : undefined,
                 genres,
                 imdbRating: rating,
-                videos: videos.length ? videos : undefined
+                videos: type === 'series' ? videos : undefined
             };
         } catch (err) {
-            console.error('Meta error:', err.message);
+            console.error('Error fetching meta:', err.message);
             return null;
         }
     }
 
+    // --------------------
+    // Streams
+    // --------------------
     async getStreams(id) {
         try {
             const [_, animeId, episodeNum = '1'] = id.split(':');
-            const possibleUrls = [
+            const urls = [
                 `${this.baseURL}/ver/${animeId}-episodio-${episodeNum}`,
                 `${this.baseURL}/ver/${animeId}-${episodeNum}`,
                 `${this.baseURL}/ver/${animeId}/episodio-${episodeNum}`,
@@ -170,74 +190,88 @@ class LatanimeAPI {
             ];
 
             let response;
-            for (const url of possibleUrls) {
-                try { response = await this.client.get(url); break; } 
-                catch { continue; }
+            for (const url of urls) {
+                try {
+                    response = await this.client.get(url);
+                    break;
+                } catch {}
             }
 
-            if (!response) return [];
+            if (!response) throw new Error('Episode page not found');
 
             const $ = cheerio.load(response.data);
             const streams = [];
-            await this.extractVideoLinks($, streams);
+            await this.extractMegaLinks($, streams);
+            await this.extractGoogleDriveLinks($, streams);
+            await this.extractMediaFireLinks($, streams);
+            await this.extractGenericVideoLinks($, streams);
             return streams;
         } catch (err) {
-            console.error('Streams error:', err.message);
+            console.error('Error fetching streams:', err.message);
             return [];
         }
     }
 
-    async extractVideoLinks($, streams) {
+    // --------------------
+    // Extraction Helpers
+    // --------------------
+    async extractMegaLinks($, streams) {
+        $('a[href*="mega.nz"], iframe[src*="mega.nz"]').each((i, el) => {
+            const $e = $(el);
+            const url = $e.attr('href') || $e.attr('src');
+            if (url) streams.push({ url, title: 'MEGA', quality: '720p', behaviorHints: { bingeGroup: 'latanime-mega' } });
+        });
+    }
+
+    async extractGoogleDriveLinks($, streams) {
+        $('iframe[src*="drive.google.com"]').each((i, el) => {
+            const $e = $(el);
+            let url = $e.attr('src');
+            if (!url) return;
+            if (url.includes('/preview')) url = url.replace('/preview', '/view');
+            streams.push({ url, title: 'Google Drive', quality: '720p', behaviorHints: { bingeGroup: 'latanime-gdrive' } });
+        });
+    }
+
+    async extractMediaFireLinks($, streams) {
+        $('a[href*="mediafire.com"]').each((i, el) => {
+            const $e = $(el);
+            const url = $e.attr('href');
+            if (url) streams.push({ url, title: 'MediaFire', quality: '720p', behaviorHints: { bingeGroup: 'latanime-mediafire' } });
+        });
+    }
+
+    async extractGenericVideoLinks($, streams) {
         const selectors = [
-            'a[href*="mega.nz"]', 'iframe[src*="mega.nz"]',
-            'iframe[src*="drive.google.com"]', 'iframe[src*="googleusercontent.com"]',
-            'a[href*="mediafire.com"]', 'iframe[src*="streamtape.com"]',
-            'iframe[src*="doodstream.com"]', 'iframe[src*="upstream.to"]',
-            'iframe[src*="fembed"]', 'iframe[src*="embed"]', 'video source', 'video'
+            'iframe[src*="streamtape.com"]',
+            'iframe[src*="doodstream.com"]',
+            'iframe[src*="upstream.to"]',
+            'iframe[src*="fembed"]'
         ];
-
-        selectors.forEach(selector => {
-            $(selector).each((i, el) => {
-                const $el = $(el);
-                let url = $el.attr('href') || $el.attr('src') || $el.attr('data-src');
-                if (!url) return;
-                if (url.startsWith('//')) url = 'https:' + url;
-                if (url.startsWith('/')) url = this.baseURL + url;
-
-                streams.push({
-                    url,
-                    title: this.extractHostName(url),
-                    quality: this.extractQuality($el.text() || '720p'),
-                    behaviorHints: { bingeGroup: 'latanime' }
-                });
+        selectors.forEach(sel => {
+            $(sel).each((i, el) => {
+                const url = $(el).attr('src');
+                if (url) streams.push({ url, title: 'Embed', quality: '720p', behaviorHints: { bingeGroup: 'latanime-embed' } });
             });
+        });
+
+        $('video source, video').each((i, el) => {
+            const url = $(el).attr('src');
+            if (url) streams.push({ url: this.resolveURL(url), title: 'Direct', quality: '720p', behaviorHints: { bingeGroup: 'latanime-direct' } });
         });
     }
 
     extractIdFromUrl(url) {
+        if (!url) return null;
         const match = url.match(/\/(?:ver|anime)\/([^\/\?]+)/);
         return match ? match[1] : url.split('/').pop();
     }
 
     determineType(title, genres) {
-        const keywords = ['película', 'movie', 'film', 'pelicula'];
-        const lower = (title + ' ' + (genres || '')).toLowerCase();
-        return keywords.some(k => lower.includes(k)) ? 'movie' : 'series';
-    }
-
-    extractQuality(text) {
-        const m = text.match(/(\d{3,4}p|HD|4K|1080|720|480)/i);
-        if (!m) return '720p';
-        let q = m[1].toUpperCase();
-        if (q === 'HD') q = '720p';
-        if (q === '4K') q = '2160p';
-        if (!q.includes('p')) q += 'p';
-        return q;
-    }
-
-    extractHostName(url) {
-        try { return new URL(url).hostname.replace('www.', '').split('.')[0]; }
-        catch { return 'unknown'; }
+        const movieKeywords = ['película', 'movie', 'film', 'pelicula'];
+        const lowerTitle = title.toLowerCase();
+        const lowerGenres = (genres || '').toLowerCase();
+        return movieKeywords.some(k => lowerTitle.includes(k) || lowerGenres.includes(k)) ? 'movie' : 'series';
     }
 
     resolveURL(url) {
@@ -249,10 +283,14 @@ class LatanimeAPI {
     }
 }
 
-// --- Initialize API ---
+// --------------------
+// Initialize API
+// --------------------
 const api = new LatanimeAPI();
 
-// --- Handlers ---
+// --------------------
+// Define Addon Handlers
+// --------------------
 builder.defineCatalogHandler(async ({ type, extra }) => {
     const metas = await api.getCatalog(type, extra?.genre, parseInt(extra?.skip) || 0, extra?.search);
     return { metas };
@@ -268,14 +306,27 @@ builder.defineStreamHandler(async ({ id }) => {
     return { streams };
 });
 
-// --- Export addon interface ---
+// --------------------
+// Export Addon
+// --------------------
 module.exports = builder.getInterface();
 
-// --- Standalone server for Render ---
+// --------------------
+// Standalone Express Server
+// --------------------
 if (require.main === module) {
+    const express = require('express');
+    const cors = require('cors');
+
     const app = express();
     app.use(cors());
-    app.use('/', builder.getInterface());
+
+    const addonInterface = builder.getInterface();
+    app.use('/', getRouter(addonInterface)); // ✅ Fixed middleware
+
     const port = process.env.PORT || 3000;
-    app.listen(port, () => console.log(`Latanime addon running on port ${port}`));
+    app.listen(port, () => {
+        console.log(`Latanime Stremio addon running on port ${port}`);
+        console.log(`Manifest: http://localhost:${port}/manifest.json`);
+    });
 }
