@@ -1,14 +1,13 @@
 const { addonBuilder } = require("stremio-addon-sdk");
-const puppeteer = require("puppeteer");
-const cheerio = require("cheerio");
 const axios = require("axios");
+const cheerio = require("cheerio");
 
 // --- 1. MANIFEST ---
 const manifest = {
-  id: "org.latanime.stremio",
-  version: "1.1.0",
+  id: "org.latanime.dynamic",
+  version: "1.0.0",
   name: "Latanime Dynamic",
-  description: "Anime streaming from latanime.org with full catalog, meta, and stream support.",
+  description: "Anime streaming from latanime.org, fully dynamic without Puppeteer.",
   catalogs: [
     {
       type: "series",
@@ -21,21 +20,19 @@ const manifest = {
   types: ["series"],
   idPrefixes: ["latanime_"]
 };
+
 const builder = new addonBuilder(manifest);
 
-// --- 2. Shared Puppeteer Browser ---
-let sharedBrowser = null;
-async function getBrowser() {
-  if (!sharedBrowser) {
-    sharedBrowser = await puppeteer.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
-    });
+// --- 2. Helper: decode Base64 ---
+function decodeBase64(str) {
+  try {
+    return Buffer.from(str, "base64").toString("utf8");
+  } catch {
+    return null;
   }
-  return sharedBrowser;
 }
 
-// --- 3. Catalog Handler (dynamic + search) ---
+// --- 3. Catalog Handler ---
 builder.defineCatalogHandler(async ({ extra }) => {
   try {
     const searchQuery = extra?.search?.toLowerCase() || null;
@@ -63,14 +60,14 @@ builder.defineCatalogHandler(async ({ extra }) => {
       }
     });
 
-    return { metas: metas.slice(0, 50) }; // limit for performance
+    return { metas: metas.slice(0, 50) };
   } catch (err) {
     console.error("Catalog extraction failed:", err.message);
     return { metas: [] };
   }
 });
 
-// --- 4. Meta Handler (scrape episodes dynamically) ---
+// --- 4. Meta Handler ---
 builder.defineMetaHandler(async ({ id }) => {
   const slug = id.replace("latanime_", "");
   const animeUrl = `https://latanime.org/anime/${slug}/`;
@@ -87,6 +84,7 @@ builder.defineMetaHandler(async ({ id }) => {
 
       const epNum = parseInt(epNumMatch[1]);
       const title = $(el).text().trim() || `Episodio ${epNum}`;
+
       videos.push({
         id: `${id}_ep${epNum}`,
         title,
@@ -108,7 +106,7 @@ builder.defineMetaHandler(async ({ id }) => {
   }
 });
 
-// --- 5. Stream Handler (dynamic Puppeteer extraction) ---
+// --- 5. Stream Handler ---
 builder.defineStreamHandler(async ({ id }) => {
   const m = id.match(/latanime_(.+)_ep(\d+)/);
   if (!m) return { streams: [] };
@@ -117,36 +115,25 @@ builder.defineStreamHandler(async ({ id }) => {
   const epUrl = `https://latanime.org/ver/${animeSlug}-episodio-${epNum}`;
 
   try {
-    const browser = await getBrowser();
-    const page = await browser.newPage();
-    await page.goto(epUrl, { waitUntil: "networkidle2", timeout: 30000 });
+    const res = await axios.get(epUrl);
+    const $ = cheerio.load(res.data);
+    const streams = [];
 
-    const sources = await page.evaluate(() => {
-      function decodeBase64(str) { try { return atob(str); } catch { return null; } }
-      const streams = [];
-
-      document.querySelectorAll("[data-player]").forEach(el => {
-        const url = decodeBase64(el.getAttribute("data-player"));
-        if (url && url.startsWith("http")) streams.push({ url, name: el.textContent.trim() || "embed" });
-      });
-
-      document.querySelectorAll("a, iframe").forEach(el => {
-        const url = el.href || el.src;
-        if (!url || streams.some(s => s.url === url)) return;
-        if (/pixeldrain|mega|mediafire|gofile|cloud|filemoon|mp4upload|lulu|dsvplay|listeamed|voe|uqload|ok|bembed/.test(url))
-          streams.push({ url, name: el.textContent.trim() || "direct" });
-      });
-
-      return streams;
+    // Extract Base64 players
+    $("[data-player]").each((_, el) => {
+      const src = decodeBase64($(el).attr("data-player"));
+      if (src) streams.push({ url: src, name: $(el).text().trim() || "embed" });
     });
 
-    await page.close();
+    // Extract iframe and known hosts
+    $("a, iframe").each((_, el) => {
+      const url = $(el).attr("href") || $(el).attr("src");
+      if (!url) return;
+      if (/pixeldrain|mega|mediafire|gofile|cloud|filemoon|mp4upload|lulu|dsvplay|listeamed|voe|uqload|ok|bembed/.test(url))
+        streams.push({ url, name: $(el).text().trim() || "direct" });
+    });
 
-    // Filter to known hosts (optional, safer)
-    const allowedHosts = ["ok.ru","streamtape.com","vivo.sx","dood.yt","mixdrop.co","fembed.com"];
-    const filtered = (sources || []).filter(s => allowedHosts.some(h => s.url.includes(h)));
-
-    return { streams: filtered.map(s => ({ name: s.name, url: s.url })) };
+    return { streams };
   } catch (err) {
     console.error("Stream extraction failed:", err.message);
     return { streams: [] };
