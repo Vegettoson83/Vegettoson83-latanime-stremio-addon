@@ -1,63 +1,114 @@
 const { addonBuilder } = require("stremio-addon-sdk");
 const puppeteer = require("puppeteer");
+const cheerio = require("cheerio");
+const axios = require("axios");
 
 // --- 1. MANIFEST ---
 const manifest = {
   id: "org.latanime.stremio",
-  version: "1.0.0",
-  name: "Latanime Enhanced",
-  description: "Anime streaming (dynamic extraction) from latanime.org.",
-  catalogs: [{ type: "series", id: "latanime" }],
+  version: "1.1.0",
+  name: "Latanime Dynamic",
+  description: "Anime streaming from latanime.org with full catalog, meta, and stream support.",
+  catalogs: [
+    {
+      type: "series",
+      id: "latanime",
+      name: "Latanime Anime",
+      extra: [{ name: "search", isRequired: false }]
+    }
+  ],
   resources: ["catalog", "meta", "stream"],
   types: ["series"],
   idPrefixes: ["latanime_"]
 };
 const builder = new addonBuilder(manifest);
 
-// --- 2. Shared Browser for Puppeteer ---
+// --- 2. Shared Puppeteer Browser ---
 let sharedBrowser = null;
 async function getBrowser() {
   if (!sharedBrowser) {
     sharedBrowser = await puppeteer.launch({
-      headless: true,  // stable headless mode
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu"
-      ]
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
     });
   }
   return sharedBrowser;
 }
 
-// --- 3. Catalog Handler ---
-builder.defineCatalogHandler(async () => {
-  return { metas: [
-      { id: "latanime_un-go-latino", type: "series", name: "Un-Go Latino" },
-      { id: "latanime_hello-world", type: "series", name: "Hello World" }
-  ]};
+// --- 3. Catalog Handler (dynamic + search) ---
+builder.defineCatalogHandler(async ({ extra }) => {
+  try {
+    const searchQuery = extra?.search?.toLowerCase() || null;
+    const res = await axios.get("https://latanime.org/");
+    const $ = cheerio.load(res.data);
+    const metas = [];
+
+    $("a.item.capa").each((_, el) => {
+      const url = $(el).attr("href");
+      const slugMatch = url.match(/\/anime\/(.+?)\/$/);
+      if (!slugMatch) return;
+
+      const slug = slugMatch[1];
+      const name = $(el).find(".text-center").text().trim();
+      const poster = $(el).find("img").attr("data-src");
+
+      if (!searchQuery || name.toLowerCase().includes(searchQuery)) {
+        metas.push({
+          id: `latanime_${slug}`,
+          type: "series",
+          name: name || slug.replace(/-/g, " "),
+          poster,
+          description: `Anime from Latanime.org`
+        });
+      }
+    });
+
+    return { metas: metas.slice(0, 50) }; // limit for performance
+  } catch (err) {
+    console.error("Catalog extraction failed:", err.message);
+    return { metas: [] };
+  }
 });
 
-// --- 4. Meta Handler ---
+// --- 4. Meta Handler (scrape episodes dynamically) ---
 builder.defineMetaHandler(async ({ id }) => {
-  const slug = id.replace(/latanime_/, "");
-  return {
-    meta: {
-      id,
-      type: "series",
-      name: slug.replace(/-/g, " "),
-      poster: "",
-      description: `Dynamic extraction for ${slug}`,
-      videos: Array.from({ length: 3 }).map((_, i) => ({
-        id: `${id}_ep${i + 1}`,
-        title: `Episodio ${i + 1}`
-      }))
-    }
-  };
+  const slug = id.replace("latanime_", "");
+  const animeUrl = `https://latanime.org/anime/${slug}/`;
+
+  try {
+    const res = await axios.get(animeUrl);
+    const $ = cheerio.load(res.data);
+    const videos = [];
+
+    $("ul.list_series li a").each((_, el) => {
+      const epLink = $(el).attr("href");
+      const epNumMatch = epLink.match(/episodio-(\d+)/);
+      if (!epNumMatch) return;
+
+      const epNum = parseInt(epNumMatch[1]);
+      const title = $(el).text().trim() || `Episodio ${epNum}`;
+      videos.push({
+        id: `${id}_ep${epNum}`,
+        title,
+        episode: epNum,
+        season: 1,
+        released: new Date().toISOString()
+      });
+    });
+
+    videos.reverse();
+    const name = $(".header h1").text().trim() || slug.replace(/-/g, " ");
+    const poster = $(".capa img").attr("data-src");
+    const description = $("p.sinopsis").text().trim() || "Sinopsis no disponible.";
+
+    return { meta: { id, type: "series", name, poster, description, videos } };
+  } catch (err) {
+    console.error(`Meta extraction failed for ${slug}:`, err.message);
+    return { meta: { id, type: "series", name: slug.replace(/-/g, " "), videos: [] } };
+  }
 });
 
-// --- 5. Stream Handler ---
+// --- 5. Stream Handler (dynamic Puppeteer extraction) ---
 builder.defineStreamHandler(async ({ id }) => {
   const m = id.match(/latanime_(.+)_ep(\d+)/);
   if (!m) return { streams: [] };
@@ -91,7 +142,7 @@ builder.defineStreamHandler(async ({ id }) => {
 
     await page.close();
 
-    // Optional: filter only allowed hosts
+    // Filter to known hosts (optional, safer)
     const allowedHosts = ["ok.ru","streamtape.com","vivo.sx","dood.yt","mixdrop.co","fembed.com"];
     const filtered = (sources || []).filter(s => allowedHosts.some(h => s.url.includes(h)));
 
@@ -102,5 +153,5 @@ builder.defineStreamHandler(async ({ id }) => {
   }
 });
 
-// --- 6. Export for Stremio ---
+// --- 6. Export ---
 module.exports = builder.getInterface();
