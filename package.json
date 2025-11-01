@@ -1,14 +1,6 @@
-{
-  "name": "latanime-complete-addon",
-  "version": "1.1.0",
-  "description": "A complete Stremio addon for Latanime using Cheerio and Axios.",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "stremio-addon-sdk": "^1.6.9",
-    "axios": "^1.7.7",
-    "cheerio": "^1.0.0-rc.12"
-  }
+"dependencies": {
+  "stremio-addon-sdk": "^1.6.9",
+  "axios": "^1.7.7",
+  "cheerio": "^1.0.0-rc.12",
+  "puppeteer": "^24.26.1"
 }
