@@ -1,7 +1,7 @@
 const { addonBuilder } = require("stremio-addon-sdk");
 const puppeteer = require("puppeteer");
 
-// Will use puppeteer for dynamic stream extraction
+// --- 1. MANIFEST ---
 const manifest = {
   id: "org.latanime.stremio",
   version: "1.0.0",
@@ -14,7 +14,24 @@ const manifest = {
 };
 const builder = new addonBuilder(manifest);
 
-// Catalog Handler — basic static HTML parsing (adjust selectors as needed)
+// --- 2. Shared Browser for Puppeteer ---
+let sharedBrowser = null;
+async function getBrowser() {
+  if (!sharedBrowser) {
+    sharedBrowser = await puppeteer.launch({
+      headless: true,  // stable headless mode
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+      ]
+    });
+  }
+  return sharedBrowser;
+}
+
+// --- 3. Catalog Handler ---
 builder.defineCatalogHandler(async () => {
   return { metas: [
       { id: "latanime_un-go-latino", type: "series", name: "Un-Go Latino" },
@@ -22,10 +39,9 @@ builder.defineCatalogHandler(async () => {
   ]};
 });
 
-// Meta Handler — stubbed for demonstration (suggest course: scrape /anime/[slug] and parse episodes)
+// --- 4. Meta Handler ---
 builder.defineMetaHandler(async ({ id }) => {
   const slug = id.replace(/latanime_/, "");
-  // Episodes are mapped 1, 2, ..., up to N (could scrape this in production)
   return {
     meta: {
       id,
@@ -38,56 +54,53 @@ builder.defineMetaHandler(async ({ id }) => {
         title: `Episodio ${i + 1}`
       }))
     }
+  };
+});
+
+// --- 5. Stream Handler ---
+builder.defineStreamHandler(async ({ id }) => {
+  const m = id.match(/latanime_(.+)_ep(\d+)/);
+  if (!m) return { streams: [] };
+
+  const [_, animeSlug, epNum] = m;
+  const epUrl = `https://latanime.org/ver/${animeSlug}-episodio-${epNum}`;
+
+  try {
+    const browser = await getBrowser();
+    const page = await browser.newPage();
+    await page.goto(epUrl, { waitUntil: "networkidle2", timeout: 30000 });
+
+    const sources = await page.evaluate(() => {
+      function decodeBase64(str) { try { return atob(str); } catch { return null; } }
+      const streams = [];
+
+      document.querySelectorAll("[data-player]").forEach(el => {
+        const url = decodeBase64(el.getAttribute("data-player"));
+        if (url && url.startsWith("http")) streams.push({ url, name: el.textContent.trim() || "embed" });
+      });
+
+      document.querySelectorAll("a, iframe").forEach(el => {
+        const url = el.href || el.src;
+        if (!url || streams.some(s => s.url === url)) return;
+        if (/pixeldrain|mega|mediafire|gofile|cloud|filemoon|mp4upload|lulu|dsvplay|listeamed|voe|uqload|ok|bembed/.test(url))
+          streams.push({ url, name: el.textContent.trim() || "direct" });
+      });
+
+      return streams;
+    });
+
+    await page.close();
+
+    // Optional: filter only allowed hosts
+    const allowedHosts = ["ok.ru","streamtape.com","vivo.sx","dood.yt","mixdrop.co","fembed.com"];
+    const filtered = (sources || []).filter(s => allowedHosts.some(h => s.url.includes(h)));
+
+    return { streams: filtered.map(s => ({ name: s.name, url: s.url })) };
+  } catch (err) {
+    console.error("Stream extraction failed:", err.message);
+    return { streams: [] };
   }
 });
 
-// Stream Handler — plug in dynamic enhanced logic
-builder.defineStreamHandler(async ({ id }) => {
-  // Parse anime and episode number
-  const m = id.match(/latanime_(.+)_ep(\d+)/);
-  if (!m) return [];
-
-  const animeSlug = m[1];
-  const epNum = m[2];
-  const epUrl = `https://latanime.org/ver/${animeSlug}-episodio-${epNum}`;
-
-  // Use puppeteer to dynamically extract sources per your enhanced logic
-  const browser = await puppeteer.launch({ headless: "new" });
-  const page = await browser.newPage();
-  await page.goto(epUrl, { waitUntil: "networkidle2" });
-
-  // Wait and extract sources: base64 player, iframe, download links
-  const sources = await page.evaluate(() => {
-    // --- BEGIN logic ported and condensed from your enhanced_stremio_scraper.js ---
-    function decodeBase64(str) {
-      try { return atob(str); } catch (e) { return null; }
-    }
-    let streams = [];
-    document.querySelectorAll("[data-player]").forEach(el => {
-      const src = decodeBase64(el.getAttribute("data-player"));
-      if (src) streams.push({ url: src, name: el.textContent.trim() || "embed" });
-    });
-    document.querySelectorAll("a").forEach(el => {
-      const href = el.href;
-      if (/(pixeldrain|mega|mediafire|gofile|cloud|filemoon|mp4upload|lulu|dsvplay|listeamed|voe|uqload|ok|bembed)/.test(href))
-        streams.push({ url: href, name: el.textContent.trim() || "direct" });
-    });
-    document.querySelectorAll("iframe").forEach(el => {
-      const src = el.src;
-      if (src && !streams.some(s => s.url === src))
-        streams.push({ url: src, name: "iframe" });
-    });
-    return streams;
-    // --- END logic ported ---
-  });
-  await browser.close();
-
-  // Map to Stremio stream format
-  return (sources || []).map(s => ({
-    name: s.name,
-    url: s.url
-  }));
-});
-
-// Export for Stremio
+// --- 6. Export for Stremio ---
 module.exports = builder.getInterface();
