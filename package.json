@@ -1,16 +1,29 @@
 {
-  "name": "latanime-complete-addon",
-  "version": "1.1.0",
-  "description": "A complete Stremio addon for Latanime using Cheerio, Axios, and Puppeteer.",
+  "name": "app",
+  "version": "1.0.0",
+  "description": "![AEE](app/src/main/res/mipmap-xxxhdpi/ic_launcher.png?raw=true)",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "test": "jest"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Vegettoson83/APK-Explorer-Editor.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Vegettoson83/APK-Explorer-Editor/issues"
+  },
+  "homepage": "https://github.com/Vegettoson83/APK-Explorer-Editor#readme",
   "dependencies": {
-    "stremio-addon-sdk": "^1.6.9",
-    "axios": "^1.7.7",
-    "cheerio": "^1.0.0-rc.12",
-    "puppeteer": "^24.26.1"
+    "axios": "^1.13.2",
+    "cheerio": "^1.1.2",
+    "express": "^5.1.0",
+    "jest": "^30.2.0",
+    "nock": "^14.0.10",
+    "stremio-addon-sdk": "^1.6.10"
   }
 }
-
