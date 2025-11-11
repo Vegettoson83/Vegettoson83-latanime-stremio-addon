@@ -1,144 +1,120 @@
-const { addonBuilder } = require("stremio-addon-sdk");
-const axios = require("axios");
-const cheerio = require("cheerio");
+const { addonBuilder } = require('stremio-addon-sdk');
+const axios = require('axios');
+const cheerio = require('cheerio');
 
-// --- 1. MANIFEST ---
+/* -------------- 1. CONFIGURATION -------------- */
+const BASE = 'https://latanime.org';
+const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+const axiosCfg = { headers: { 'User-Agent': UA }, timeout: 8000 };
+
+/* -------------- 2. HELPERS -------------- */
+const log = (...a) => console.log('[Latanime]', ...a);
+
+const $get = async url => {
+  const { data } = await axios.get(url, axiosCfg);
+  return cheerio.load(data);
+};
+
 const manifest = {
-  id: "org.latanime.dynamic",
-  version: "1.0.0",
-  name: "Latanime Dynamic",
-  description: "Anime streaming from latanime.org, fully dynamic without Puppeteer.",
-  catalogs: [
-    {
-      type: "series",
-      id: "latanime",
-      name: "Latanime Anime",
-      extra: [{ name: "search", isRequired: false }]
-    }
-  ],
-  resources: ["catalog", "meta", "stream"],
-  types: ["series"],
-  idPrefixes: ["latanime_"]
+    "id": "org.latanime-sdk.stremio",
+    "version": "1.0.0",
+    "name": "Latanime (SDK)",
+    "description": "Stremio addon for Latanime, providing streams from all available hosts.",
+    "types": ["series"],
+    "catalogs": [
+        {
+            "type": "series",
+            "id": "latanime-latest",
+            "name": "Latanime Latest"
+        }
+    ],
+    "resources": ["catalog", "meta", "stream"],
+    "idPrefixes": ["latanime-"]
 };
 
 const builder = new addonBuilder(manifest);
 
-// --- 2. Helper: decode Base64 ---
-function decodeBase64(str) {
-  try {
-    return Buffer.from(str, "base64").toString("utf8");
-  } catch {
-    return null;
-  }
-}
+/* -------------- 3. CATALOG -------------- */
+builder.defineCatalogHandler(async ({ type, id }) => {
+  if (type !== 'series' || id !== 'latanime-latest') return { metas: [] };
 
-// --- 3. Catalog Handler ---
-builder.defineCatalogHandler(async ({ extra }) => {
-  try {
-    const searchQuery = extra?.search?.toLowerCase() || null;
-    const res = await axios.get("https://latanime.org/");
-    const $ = cheerio.load(res.data);
-    const metas = [];
+  const $ = await $get(BASE).catch(() => { log('homepage unreachable'); return null; });
+  if (!$) return { metas: [] };
 
-    $("a.item.capa").each((_, el) => {
-      const url = $(el).attr("href");
-      const slugMatch = url.match(/\/anime\/(.+?)\/$/);
-      if (!slugMatch) return;
-
-      const slug = slugMatch[1];
-      const name = $(el).find(".text-center").text().trim();
-      const poster = $(el).find("img").attr("data-src");
-
-      if (!searchQuery || name.toLowerCase().includes(searchQuery)) {
-        metas.push({
-          id: `latanime_${slug}`,
-          type: "series",
-          name: name || slug.replace(/-/g, " "),
-          poster,
-          description: `Anime from Latanime.org`
-        });
-      }
+  const metas = [];
+  $('article').each((_, el) => {
+    const href = $(el).find('a').attr('href');
+    if (!href?.includes('/anime/')) return;
+    const animeId = href.split('/').pop();
+    const title   = $(el).find('h3').text().trim();
+    const poster  = $(el).find('img').attr('data-src');
+    if (animeId && title) metas.push({
+      id: `latanime-${animeId}`,
+      type: 'series',
+      name: title,
+      poster: poster || null
     });
-
-    return { metas: metas.slice(0, 50) };
-  } catch (err) {
-    console.error("Catalog extraction failed:", err.message);
-    return { metas: [] };
-  }
+  });
+  log(`catalog: ${metas.length} items`);
+  return { metas };
 });
 
-// --- 4. Meta Handler ---
-builder.defineMetaHandler(async ({ id }) => {
-  const slug = id.replace("latanime_", "");
-  const animeUrl = `https://latanime.org/anime/${slug}/`;
+/* -------------- 4. META -------------- */
+builder.defineMetaHandler(async ({ type, id }) => {
+  if (type !== 'series') return { meta: {} };
+  const slug = id.replace('latanime-', '');
+  const $ = await $get(`${BASE}/anime/${slug}`).catch(() => null);
+  if (!$) return { meta: {} };
 
-  try {
-    const res = await axios.get(animeUrl);
-    const $ = cheerio.load(res.data);
-    const videos = [];
+  const videos = [];
+  $('a[href*="/ver/"]').each((_, el) => {
+    const txt = $(el).text().trim();
+    const m   = txt.match(/Cap[ií]tulo\s+(\d+)/i);
+    if (m) videos.push({
+      season : 1,
+      episode: parseInt(m[1], 10),
+      title  : txt,
+      id     : `${id}:1:${m[1]}`
+    });
+  });
 
-    $("ul.list_series li a").each((_, el) => {
-      const epLink = $(el).attr("href");
-      const epNumMatch = epLink.match(/episodio-(\d+)/);
-      if (!epNumMatch) return;
+  const meta = {
+    id,
+    type: 'series',
+    name: $('h2').first().text().trim() || slug,
+    poster: $('.serieimgficha img').attr('src') || null,
+    videos: videos.reverse()
+  };
+  log(`meta: ${slug} -> ${videos.length} episodes`);
+  return { meta };
+});
 
-      const epNum = parseInt(epNumMatch[1]);
-      const title = $(el).text().trim() || `Episodio ${epNum}`;
+/* -------------- 5. STREAMS -------------- */
+builder.defineStreamHandler(async ({ type, id }) => {
+  if (type !== 'series') return { streams: [] };
+  const [animeId, season, episode] = id.split(':');
+  const slug = animeId.replace('latanime-', '');
+  const url  = `${BASE}/ver/${slug}-episodio-${episode}`;
 
-      videos.push({
-        id: `${id}_ep${epNum}`,
-        title,
-        episode: epNum,
-        season: 1,
-        released: new Date().toISOString()
+  const $ = await $get(url).catch(() => null);
+  if (!$) return { streams: [] };
+
+  const streams = [];
+  $('a.play-video').each((_, el) => {
+    const enc = $(el).attr('data-player');
+    if (!enc) return;
+    try {
+      const raw = Buffer.from(enc, 'base64').toString('utf-8').trim();
+      if (!raw) return;
+      streams.push({
+        name : 'Latanime',
+        title: $(el).text().trim() || `Server ${streams.length + 1}`,
+        url  : raw
       });
-    });
-
-    videos.reverse();
-    const name = $(".header h1").text().trim() || slug.replace(/-/g, " ");
-    const poster = $(".capa img").attr("data-src");
-    const description = $("p.sinopsis").text().trim() || "Sinopsis no disponible.";
-
-    return { meta: { id, type: "series", name, poster, description, videos } };
-  } catch (err) {
-    console.error(`Meta extraction failed for ${slug}:`, err.message);
-    return { meta: { id, type: "series", name: slug.replace(/-/g, " "), videos: [] } };
-  }
+    } catch (_) { /* ignore b64 garbage */ }
+  });
+  log(`streams: ${slug} E${episode} -> ${streams.length} links`);
+  return { streams };
 });
 
-// --- 5. Stream Handler ---
-builder.defineStreamHandler(async ({ id }) => {
-  const m = id.match(/latanime_(.+)_ep(\d+)/);
-  if (!m) return { streams: [] };
-
-  const [_, animeSlug, epNum] = m;
-  const epUrl = `https://latanime.org/ver/${animeSlug}-episodio-${epNum}`;
-
-  try {
-    const res = await axios.get(epUrl);
-    const $ = cheerio.load(res.data);
-    const streams = [];
-
-    // Extract Base64 players
-    $("[data-player]").each((_, el) => {
-      const src = decodeBase64($(el).attr("data-player"));
-      if (src) streams.push({ url: src, name: $(el).text().trim() || "embed" });
-    });
-
-    // Extract iframe and known hosts
-    $("a, iframe").each((_, el) => {
-      const url = $(el).attr("href") || $(el).attr("src");
-      if (!url) return;
-      if (/pixeldrain|mega|mediafire|gofile|cloud|filemoon|mp4upload|lulu|dsvplay|listeamed|voe|uqload|ok|bembed/.test(url))
-        streams.push({ url, name: $(el).text().trim() || "direct" });
-    });
-
-    return { streams };
-  } catch (err) {
-    console.error("Stream extraction failed:", err.message);
-    return { streams: [] };
-  }
-});
-
-// --- 6. Export ---
 module.exports = builder.getInterface();
