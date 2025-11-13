@@ -1,120 +1,139 @@
-const { addonBuilder } = require('stremio-addon-sdk');
-const axios = require('axios');
-const cheerio = require('cheerio');
-
-/* -------------- 1. CONFIGURATION -------------- */
-const BASE = 'https://latanime.org';
-const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-const axiosCfg = { headers: { 'User-Agent': UA }, timeout: 8000 };
-
-/* -------------- 2. HELPERS -------------- */
-const log = (...a) => console.log('[Latanime]', ...a);
-
-const $get = async url => {
-  const { data } = await axios.get(url, axiosCfg);
-  return cheerio.load(data);
-};
+const { addonBuilder } = require("stremio-addon-sdk");
+const axios = require("axios");
+const cheerio = require("cheerio");
 
 const manifest = {
-    "id": "org.latanime-sdk.stremio",
+    "id": "org.latanime.stremio",
     "version": "1.0.0",
-    "name": "Latanime (SDK)",
-    "description": "Stremio addon for Latanime, providing streams from all available hosts.",
+    "name": "Latanime",
+    "description": "Stremio addon for latanime.org",
+    "icon": "https://latanime.org/public/img/logito.png",
+    "resources": ["catalog", "stream", "meta"],
     "types": ["series"],
     "catalogs": [
         {
             "type": "series",
-            "id": "latanime-latest",
-            "name": "Latanime Latest"
+            "id": "latanime-series",
+            "name": "Latanime"
         }
     ],
-    "resources": ["catalog", "meta", "stream"],
     "idPrefixes": ["latanime-"]
 };
 
 const builder = new addonBuilder(manifest);
 
-/* -------------- 3. CATALOG -------------- */
-builder.defineCatalogHandler(async ({ type, id }) => {
-  if (type !== 'series' || id !== 'latanime-latest') return { metas: [] }; 
+const LATANIME_URL = "https://latanime.org";
 
-  const $ = await $get(BASE).catch(() => { log('homepage unreachable'); return null; });
-  if (!$) return { metas: [] };
-
-  const metas = [];
-  $('article').each((_, el) => {
-    const href = $(el).find('a').attr('href');
-    if (!href?.includes('/anime/')) return;
-    const animeId = href.split('/').pop();
-    const title   = $(el).find('h3').text().trim();
-    const poster  = $(el).find('img').attr('data-src');
-    if (animeId && title) metas.push({
-      id: `latanime-${animeId}`,
-      type: 'series',
-      name: title,
-      poster: poster || null
-    });
-  });
-  log(`catalog: ${metas.length} items`);
-  return { metas };
-});
-
-/* -------------- 4. META -------------- */
-builder.defineMetaHandler(async ({ type, id }) => {
-  if (type !== 'series') return { meta: {} };
-  const slug = id.replace('latanime-', '');
-  const $ = await $get(`${BASE}/anime/${slug}`).catch(() => null);
-  if (!$) return { meta: {} };
-
-  const videos = [];
-  $('a[href*="/ver/"]').each((_, el) => {
-    const txt = $(el).text().trim();
-    const m   = txt.match(/Cap[ií]tulo\s+(\d+)/i);
-    if (m) videos.push({
-      season : 1,
-      episode: parseInt(m[1], 10),
-      title  : txt,
-      id     : `${id}:1:${m[1]}`
-    });
-  });
-
-  const meta = {
-    id,
-    type: 'series',
-    name: $('h2').first().text().trim() || slug,
-    poster: $('.serieimgficha img').attr('src') || null,
-    videos: videos.reverse()
-  };
-  log(`meta: ${slug} -> ${videos.length} episodes`);
-  return { meta };
-});
-
-/* -------------- 5. STREAMS -------------- */
-builder.defineStreamHandler(async ({ type, id }) => {
-  if (type !== 'series') return { streams: [] };
-  const [animeId, season, episode] = id.split(':');
-  const slug = animeId.replace('latanime-', '');
-  const url  = `${BASE}/ver/${slug}-episodio-${episode}`;
-
-  const $ = await $get(url).catch(() => null);
-  if (!$) return { streams: [] };
-
-  const streams = [];
-  $('a.play-video').each((_, el) => {
-    const enc = $(el).attr('data-player');
-    if (!enc) return;
+builder.defineCatalogHandler(async ({type, id, extra}) => {
+    console.log("request for catalog: "+type+" "+id);
+    const url = `${LATANIME_URL}/animes`;
     try {
-      const raw = Buffer.from(enc, 'base64').toString('utf-8').trim();
-      if (!raw) return;
-      streams.push({
-        name : 'Latanime',
-        title: $(el).text().trim() || `Server ${streams.length + 1}`,
-        url  : raw
-      });
-    } catch (_) { /* ignore b64 garbage */ }
-  });
-  log(`streams: ${slug} E${episode} -> ${streams.length} links`);
-  return { streams };
-});
+        const response = await axios.get(url);
+        const $ = cheerio.load(response.data);
+        const metas = [];
 
-module.exports = builder.getInterface();
+        $('div[class^="col-"] a').each((i, el) => {
+            const href = $(el).attr('href');
+            if (href && href.includes('/anime/')) {
+                const title = $(el).find('h3').text();
+                const poster = $(el).find('img').attr('data-src');
+                const animeId = href.split('/').pop();
+                if (animeId) {
+                    metas.push({
+                        id: `latanime-${animeId}`,
+                        type: 'series',
+                        name: title,
+                        poster: poster,
+                    });
+                }
+            }
+        });
+
+        return Promise.resolve({ metas: metas });
+    } catch (error) {
+        console.error("Error fetching catalog:", error.message);
+        return Promise.resolve({ metas: [] });
+    }
+})
+
+
+builder.defineMetaHandler(async ({type, id}) => {
+    console.log("request for meta: "+type+" "+id);
+    const animeId = id.replace('latanime-', '');
+    const url = `${LATANIME_URL}/anime/${animeId}`;
+    try {
+        const response = await axios.get(url);
+        const $ = cheerio.load(response.data);
+        const title = $('h2').text();
+        const poster = $('.serieimgficha img').attr('src');
+        const description = $('p.my-2.opacity-75').text();
+
+        const videos = [];
+        $('.cap-layout').each((i, el) => {
+            const href = $(el).parent().attr('href');
+            if (href && href.includes('/ver/')) {
+                const episodeTitle = $(el).text().trim().replace(/\s\s+/g, ' ');
+                const episodeId = href.split('/').pop();
+                const episodeNumberMatch = episodeTitle.match(/Capitulo (\d+)/i);
+                const episodeNumber = episodeNumberMatch ? parseInt(episodeNumberMatch[1]) : i + 1;
+
+                if (episodeId) {
+                    videos.push({
+                        id: `latanime-${episodeId}`,
+                        title: episodeTitle,
+                        season: 1,
+                        episode: episodeNumber,
+                    });
+                }
+            }
+        });
+
+        const meta = {
+            id: id,
+            type: 'series',
+            name: title,
+            poster: poster,
+            description: description,
+            videos: videos.reverse()
+        };
+        return Promise.resolve({ meta: meta });
+    } catch (error) {
+        console.error(`Error fetching meta for ${id}:`, error.message);
+        return Promise.resolve({ meta: {} });
+    }
+})
+
+builder.defineStreamHandler(async ({type, id}) => {
+    console.log("request for streams: "+type+" "+id);
+    const episodeId = id.replace('latanime-', '');
+    const url = `${LATANIME_URL}/ver/${episodeId}`;
+    try {
+        const response = await axios.get(url);
+        const $ = cheerio.load(response.data);
+
+        const streams = [];
+        $('button[data-player]').each((i, el) => {
+            const encodedPlayerUrl = $(el).attr('data-player');
+            const providerName = $(el).text().trim();
+            if (encodedPlayerUrl) {
+                try {
+                    const decodedUrl = Buffer.from(encodedPlayerUrl, 'base64').toString('utf8');
+                    if (decodedUrl) {
+                        streams.push({
+                            url: decodedUrl,
+                            title: providerName
+                        });
+                    }
+                } catch (e) {
+                    console.error(`Error decoding base64 string for ${id}:`, e.message);
+                }
+            }
+        });
+        return Promise.resolve({ streams: streams });
+    } catch (error) {
+        console.error(`Error fetching streams for ${id}:`, error.message);
+        return Promise.resolve({ streams: [] });
+    }
+})
+
+module.exports = builder.getInterface()
