@@ -1,22 +1,14 @@
 {
-  "name": "latanime-stremio-addon",
+  "name": "latanime-addon",
   "version": "1.0.0",
-  "description": "A Stremio addon for Latanime",
-  "main": "index.js",
+  "description": "Provides streams from latanime.org",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "keywords": [
-    "stremio",
-    "stremio-addon",
-    "latanime"
-  ],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "axios": "^1.13.2",
-    "cheerio": "^1.1.2",
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0-rc.12",
     "stremio-addon-sdk": "^1.6.10"
   }
 }
