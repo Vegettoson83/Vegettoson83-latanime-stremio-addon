@@ -26,7 +26,8 @@ const LATANIME_URL = "https://latanime.org";
 
 builder.defineCatalogHandler(async ({type, id, extra}) => {
     console.log("request for catalog: "+type+" "+id);
-    const url = `${LATANIME_URL}/animes`;
+    const page = extra.skip ? Math.floor(extra.skip / 24) + 1 : 1;
+    const url = `${LATANIME_URL}/animes?p=${page}`;
     try {
         const response = await axios.get(url);
         const $ = cheerio.load(response.data);
@@ -49,7 +50,7 @@ builder.defineCatalogHandler(async ({type, id, extra}) => {
             }
         });
 
-        return Promise.resolve({ metas: metas });
+        return Promise.resolve({ metas: metas, hasMore: metas.length === 24 });
     } catch (error) {
         console.error("Error fetching catalog:", error.message);
         return Promise.resolve({ metas: [] });
@@ -74,10 +75,15 @@ builder.defineMetaHandler(async ({type, id}) => {
             if (href && href.includes('/ver/')) {
                 const episodeTitle = $(el).text().trim().replace(/\s\s+/g, ' ');
                 const episodeId = href.split('/').pop();
+                const match = episodeTitle.match(/(?:Capitulo|Episodio)\s*(\d+)/i);
+                const episodeNumber = match ? parseInt(match[1]) : i + 1;
+
                 if (episodeId) {
                     videos.push({
                         id: `latanime-${episodeId}`,
                         title: episodeTitle,
+                        season: 1,
+                        episode: episodeNumber,
                         released: new Date(),
                     });
                 }
@@ -107,25 +113,22 @@ builder.defineStreamHandler(async ({type, id}) => {
         const response = await axios.get(url);
         const $ = cheerio.load(response.data);
 
-        const streams = [];
-        $('button[data-player]').each((i, el) => {
-            const encodedPlayerUrl = $(el).attr('data-player');
-            const providerName = $(el).text().trim();
-            if (encodedPlayerUrl) {
-                try {
-                    const decodedUrl = Buffer.from(encodedPlayerUrl, 'base64').toString('utf8');
-                    if (decodedUrl) {
-                        streams.push({
-                            url: decodedUrl,
-                            title: providerName
-                        });
-                    }
-                } catch (e) {
-                    console.error(`Error decoding base64 string for ${id}:`, e.message);
-                }
+        let streams = [];
+        $('script').each((i, el) => {
+            const scriptContent = $(el).html();
+            if (scriptContent && scriptContent.includes('video = [')) {
+                const videoData = JSON.parse(scriptContent.match(/video = (\[.*?\])/)[1]);
+                streams = videoData.map(s => ({
+                    url: s.file,
+                    title: s.label
+                }));
             }
         });
-        return Promise.resolve({ streams: streams });
+
+        const whitelist = ["fembed", "ok.ru", "mega.nz", "drive.google.com", "streamsb"];
+        const filteredStreams = streams.filter(s => whitelist.some(w => s.url.includes(w)));
+
+        return Promise.resolve({ streams: filteredStreams.length ? filteredStreams : streams });
     } catch (error) {
         console.error(`Error fetching streams for ${id}:`, error.message);
         return Promise.resolve({ streams: [] });
