@@ -4,7 +4,7 @@ const cheerio = require("cheerio");
 
 const manifest = {
     "id": "org.latanime.stremio",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "name": "Latanime",
     "description": "Stremio addon for latanime.org",
     "icon": "https://latanime.org/public/img/logito.png",
@@ -27,7 +27,7 @@ const manifest = {
 const builder = new addonBuilder(manifest);
 
 const LATANIME_URL = "https://latanime.org";
-const ITEMS_PER_PAGE = 28; // Estimate based on typical grid
+const ITEMS_PER_PAGE = 28;
 
 builder.defineCatalogHandler(async ({type, id, extra}) => {
     console.log("request for catalog: " + type + " " + id);
@@ -87,27 +87,19 @@ builder.defineMetaHandler(async ({type, id}) => {
                 const episodeTitleRaw = $(el).text().trim().replace(/\s\s+/g, ' ');
                 const episodeId = href.split('/').pop();
 
-                // Parsing Season and Episode
-                // Default to Season 1
                 let season = 1;
-                let episode = videos.length + 1; // Default fallback
+                let episode = videos.length + 1;
 
-                // Try to extract numbers from title
-                // Example titles: "Episodio 1", "Season 2 Episode 3"
-                // Note: latanime titles are often just "Episodio X" or the anime title + "Episodio X"
                 const epMatch = episodeTitleRaw.match(/(?:episodio|capitulo)\s*(\d+)/i);
                 if (epMatch) {
                     episode = parseInt(epMatch[1], 10);
                 } else {
-                    // Fallback: try to extract last number
                      const numMatch = episodeTitleRaw.match(/(\d+)$/);
                      if (numMatch) {
                          episode = parseInt(numMatch[1], 10);
                      }
                 }
 
-                // Try to find season in the Anime Title or Episode Title (rare in this site, usually S1)
-                // But if the anime slug contains "temporada-2", we can infer season 2
                 const seasonMatch = animeId.match(/(?:temporada|season)-(\d+)/i);
                 if (seasonMatch) {
                     season = parseInt(seasonMatch[1], 10);
@@ -131,11 +123,7 @@ builder.defineMetaHandler(async ({type, id}) => {
             name: title,
             poster: poster,
             description: description,
-            videos: videos.reverse() // Usually listed newest first, Stremio likes predictable order but we just send them all.
-                                     // Actually, reversing might make them 1..N if they were N..1
-                                     // Let's check index. If we rely on parsing, order doesn't matter for numbering,
-                                     // but for display it should be 1 first.
-                                     // .reverse() is good if site lists newest first.
+            videos: videos.reverse()
         };
         return Promise.resolve({ meta: meta });
     } catch (error) {
@@ -153,45 +141,51 @@ builder.defineStreamHandler(async ({type, id}) => {
         const $ = cheerio.load(response.data);
 
         const streams = [];
-        // Updated selector to 'a[data-player]' based on inspection
-        // Also kept 'button' just in case they mix them, using comma
+
         $('a[data-player], button[data-player]').each((i, el) => {
             const encodedPlayerUrl = $(el).attr('data-player');
             const providerName = $(el).text().trim();
             if (encodedPlayerUrl) {
                 try {
-                    const decodedUrl = Buffer.from(encodedPlayerUrl, 'base64').toString('utf8');
+                    let decodedUrl = Buffer.from(encodedPlayerUrl, 'base64').toString('utf8');
                     if (decodedUrl) {
-                        // Check if it's a direct file or an embed
-                        // If it's an embed, Stremio might not play it directly unless we resolve it.
-                        // For now, we pass it as 'externalUrl' if it looks like a page,
-                        // or 'url' if it looks like a video file.
-                        // Most of these are embeds (filemoon, etc).
-                        // Stremio generally requires a direct stream or a supported embed.
-                        // We will just return it as 'url' for now, as some players handle standard embeds.
+                        // Clean URL
+                        decodedUrl = decodedUrl.trim();
 
-                        streams.push({
-                            url: decodedUrl,
-                            title: providerName,
-                            behaviorHints: {
-                                notWebReady: true // likely requires headers or specific player
-                            }
-                        });
+                        // Logic to determine if playable or external
+                        let isDirect = false;
+
+                        // Pixeldrain: Convert /u/ to /api/file/ for direct playback
+                        if (decodedUrl.includes('pixeldrain.com/u/')) {
+                            decodedUrl = decodedUrl.replace('/u/', '/api/file/');
+                            isDirect = true;
+                        } else if (decodedUrl.includes('pixeldrain.com/api/file/')) {
+                            isDirect = true;
+                        }
+
+                        // Construct Stream Object
+                        if (isDirect) {
+                            streams.push({
+                                url: decodedUrl,
+                                title: `🚀 ${providerName} [Direct]`,
+                                behaviorHints: {
+                                    notWebReady: false,
+                                    bingeGroup: `latanime-${providerName}`
+                                }
+                            });
+                        } else {
+                            // Fallback to external URL for embeds/unsupported players
+                            streams.push({
+                                externalUrl: decodedUrl,
+                                title: `🌐 ${providerName} [Browser]`,
+                            });
+                        }
                     }
                 } catch (e) {
                     console.error(`Error decoding base64 string for ${id}:`, e.message);
                 }
             }
         });
-
-        // Also look for download links which are often direct video files
-        // Selectors based on inspection: they seem to be just links, but maybe we can find them?
-        // The inspection showed "Pixeldrain", "Mega" buttons.
-        // They were <a href="...">...</a>.
-        // We can scrape those too if they are simple links.
-        // Based on curl:
-        // <a href="https://pixeldrain.com/u/..." ...>Pixeldrain</a>
-        // We can add a selector for these specific known hosts.
 
         const downloadSelectors = [
             'a[href*="pixeldrain.com"]',
@@ -204,10 +198,29 @@ builder.defineStreamHandler(async ({type, id}) => {
             const href = $(el).attr('href');
             const name = $(el).text().trim();
             if (href) {
-                streams.push({
-                    url: href,
-                    title: `[Download] ${name}`
-                });
+                let finalUrl = href.trim();
+                let isDirect = false;
+
+                if (finalUrl.includes('pixeldrain.com/u/')) {
+                    finalUrl = finalUrl.replace('/u/', '/api/file/');
+                    isDirect = true;
+                }
+
+                if (isDirect) {
+                    streams.push({
+                        url: finalUrl,
+                        title: `🚀 [Download] ${name} [Direct]`,
+                         behaviorHints: {
+                                    notWebReady: false,
+                                    bingeGroup: `latanime-download`
+                         }
+                    });
+                } else {
+                     streams.push({
+                        externalUrl: finalUrl,
+                        title: `🌐 [Download] ${name} [Browser]`
+                    });
+                }
             }
         });
 
