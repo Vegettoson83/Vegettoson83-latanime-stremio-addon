@@ -1,10 +1,11 @@
 const { addonBuilder } = require("stremio-addon-sdk");
-const axios = require("axios");
 const cheerio = require("cheerio");
+const { ScrapingBeeClient } = require("scrapingbee");
+const NodeCache = require("node-cache");
 
 const manifest = {
     "id": "org.latanime.stremio",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "name": "Latanime",
     "description": "Stremio addon for latanime.org",
     "icon": "https://latanime.org/public/img/logito.png",
@@ -32,11 +33,50 @@ const manifest = {
 const builder = new addonBuilder(manifest);
 
 const LATANIME_URL = "https://latanime.org";
-const ITEMS_PER_PAGE = 28; // Estimate based on typical grid
+const ITEMS_PER_PAGE = 28;
 
-const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
-};
+// Use environment variable for API key, fallback to provided key if not set (for testing)
+// In production, always set SCRAPINGBEE_API_KEY
+const SB_API_KEY = process.env.SCRAPINGBEE_API_KEY || '8MI4VBHDP2PUDO8WU39BC7P2LDSSJ69KX5L5ORQQS0YGKBM73JP46FSNT2DE0XJ6K9T3HHN1CF8E6CU9';
+
+const sbClient = new ScrapingBeeClient(SB_API_KEY);
+const cache = new NodeCache({ stdTTL: 86400 }); // 24 hours default TTL
+
+async function fetchWithScrapingBee(url) {
+    const cached = cache.get(url);
+    if (cached) {
+        console.log(`Cache hit for ${url}`);
+        return cached;
+    }
+
+    console.log(`Fetching ${url} via ScrapingBee`);
+    try {
+        const response = await sbClient.get({
+            url: url,
+            params: {
+                render_js: 'false',
+            },
+        });
+
+        if (response.status !== 200) {
+            throw new Error(`ScrapingBee returned status ${response.status}`);
+        }
+
+        let data = response.data;
+
+        // Handle potential buffer/string difference
+        if (typeof data !== 'string') {
+             const decoder = new TextDecoder();
+             data = decoder.decode(data);
+        }
+
+        cache.set(url, data);
+        return data;
+    } catch (error) {
+        console.error(`Error fetching ${url}:`, error.message);
+        throw error;
+    }
+}
 
 builder.defineCatalogHandler(async ({type, id, extra}) => {
     console.log("request for catalog: " + type + " " + id);
@@ -55,12 +95,11 @@ builder.defineCatalogHandler(async ({type, id, extra}) => {
     }
     
     try {
-        const response = await axios.get(url, { headers });
-        const $ = cheerio.load(response.data);
+        const html = await fetchWithScrapingBee(url);
+        const $ = cheerio.load(html);
         const metas = [];
 
         if (id === 'latanime-new' && !extra?.search) {
-             // Homepage "Series recientes" parsing
              const section = $('h2:contains("Series recientes")').next('ul');
              section.find('li article a').each((i, el) => {
                  const href = $(el).attr('href');
@@ -82,7 +121,6 @@ builder.defineCatalogHandler(async ({type, id, extra}) => {
              });
 
         } else {
-            // Standard catalog and search parsing
             $('div[class^="col-"] a').each((i, el) => {
                 const href = $(el).attr('href');
                 if (href && href.includes('/anime/')) {
@@ -115,8 +153,8 @@ builder.defineMetaHandler(async ({type, id}) => {
     const animeId = id.replace('latanime-', '');
     const url = `${LATANIME_URL}/anime/${animeId}`;
     try {
-        const response = await axios.get(url, { headers });
-        const $ = cheerio.load(response.data);
+        const html = await fetchWithScrapingBee(url);
+        const $ = cheerio.load(html);
         const title = $('h2').text().trim();
         const poster = $('.serieimgficha img').attr('src');
         const description = $('p.my-2.opacity-75').text().trim();
@@ -178,8 +216,8 @@ builder.defineStreamHandler(async ({type, id}) => {
     const episodeId = id.replace('latanime-', '');
     const url = `${LATANIME_URL}/ver/${episodeId}`;
     try {
-        const response = await axios.get(url, { headers });
-        const $ = cheerio.load(response.data);
+        const html = await fetchWithScrapingBee(url);
+        const $ = cheerio.load(html);
 
         const streams = [];
 
