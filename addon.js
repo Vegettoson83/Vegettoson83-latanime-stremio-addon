@@ -220,28 +220,42 @@ builder.defineStreamHandler(async ({type, id}) => {
         const $ = cheerio.load(html);
 
         const streams = [];
+        const processedUrls = new Set();
 
-        $('a[data-player], button[data-player]').each((i, el) => {
-            const encodedPlayerUrl = $(el).attr('data-player');
-            const providerName = $(el).text().trim();
-            if (encodedPlayerUrl) {
-                try {
-                    const decodedUrl = Buffer.from(encodedPlayerUrl, 'base64').toString('utf8');
-                    if (decodedUrl) {
-                        streams.push({
-                            url: decodedUrl,
-                            title: providerName,
-                            behaviorHints: {
-                                notWebReady: true
-                            }
-                        });
-                    }
-                } catch (e) {
-                    console.error(`Error decoding base64 string for ${id}:`, e.message);
-                }
+        const isValidUrl = (string) => {
+            try {
+                new URL(string);
+                return true;
+            } catch (_) {
+                return false;
             }
+        };
+
+        const potentialAttributes = ['data-player', 'data-src', 'data-stream', 'data-video'];
+        potentialAttributes.forEach(attr => {
+            $(`[${attr}]`).each((i, el) => {
+                const encodedPlayerUrl = $(el).attr(attr);
+                const providerName = $(el).text().trim() || $(el).attr('title') || `Stream from ${attr}`;
+                if (encodedPlayerUrl) {
+                    try {
+                        const decodedUrl = Buffer.from(encodedPlayerUrl, 'base64').toString('utf8');
+                        if (isValidUrl(decodedUrl) && !processedUrls.has(decodedUrl)) {
+                            streams.push({
+                                url: decodedUrl,
+                                title: providerName,
+                                behaviorHints: {
+                                    notWebReady: true
+                                }
+                            });
+                            processedUrls.add(decodedUrl);
+                        }
+                    } catch (e) {
+                        // Not a base64 string, or another error, ignore.
+                    }
+                }
+            });
         });
-        
+
         const downloadSelectors = [
             'a[href*="pixeldrain.com"]',
             'a[href*="mediafire.com"]',
@@ -252,11 +266,12 @@ builder.defineStreamHandler(async ({type, id}) => {
         $(downloadSelectors.join(',')).each((i, el) => {
             const href = $(el).attr('href');
             const name = $(el).text().trim();
-            if (href) {
+            if (href && !processedUrls.has(href)) {
                 streams.push({
                     url: href,
                     title: `[Download] ${name}`
                 });
+                processedUrls.add(href);
             }
         });
 
