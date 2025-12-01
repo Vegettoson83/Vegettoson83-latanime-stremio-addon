@@ -1,4 +1,4 @@
-const { addonBuilder } = require("stremio-addon-sdk");
+ const { addonBuilder } = require("stremio-addon-sdk");
 const cheerio = require("cheerio");
 const { ScrapingBeeClient } = require("scrapingbee");
 const NodeCache = require("node-cache");
@@ -155,17 +155,32 @@ builder.defineMetaHandler(async ({type, id}) => {
     try {
         const html = await fetchWithScrapingBee(url);
         const $ = cheerio.load(html);
-        const title = $('h2').text().trim();
-        const poster = $('.serieimgficha img').attr('src');
-        const description = $('p.my-2.opacity-75').text().trim();
+
+        const findFirst = (selectors) => {
+            for (const selector of selectors) {
+                const element = $(selector);
+                if (element.length > 0) {
+                    if (selector.endsWith('img') || selector.startsWith('meta')) {
+                        return element.attr('src') || element.attr('content');
+                    }
+                    return element.text().trim();
+                }
+            }
+            return '';
+        };
+
+        const title = findFirst(['h2', 'h1.title', '.serie-title']);
+        const poster = findFirst(['.serieimgficha img', '.poster img', 'meta[property="og:image"]']);
+        const description = findFirst(['p.my-2.opacity-75', '.description', 'meta[property="og:description"]']);
 
         const videos = [];
-        $('.cap-layout').each((i, el) => {
-            const href = $(el).parent().attr('href');
+        const episodeSelectors = ['.cap-layout', '.episode-item', '.video-list-item'];
+        $(episodeSelectors.join(', ')).each((i, el) => {
+            const href = $(el).parent().attr('href') || $(el).attr('href');
             if (href && href.includes('/ver/')) {
                 const episodeTitleRaw = $(el).text().trim().replace(/\s\s+/g, ' ');
                 const episodeId = href.split('/').pop();
-                
+
                 let season = 1;
                 let episode = videos.length + 1;
 
@@ -220,28 +235,42 @@ builder.defineStreamHandler(async ({type, id}) => {
         const $ = cheerio.load(html);
 
         const streams = [];
+        const processedUrls = new Set();
 
-        $('a[data-player], button[data-player]').each((i, el) => {
-            const encodedPlayerUrl = $(el).attr('data-player');
-            const providerName = $(el).text().trim();
-            if (encodedPlayerUrl) {
-                try {
-                    const decodedUrl = Buffer.from(encodedPlayerUrl, 'base64').toString('utf8');
-                    if (decodedUrl) {
-                        streams.push({
-                            url: decodedUrl,
-                            title: providerName,
-                            behaviorHints: {
-                                notWebReady: true
-                            }
-                        });
-                    }
-                } catch (e) {
-                    console.error(`Error decoding base64 string for ${id}:`, e.message);
-                }
+        const isValidUrl = (string) => {
+            try {
+                new URL(string);
+                return true;
+            } catch (_) {
+                return false;
             }
+        };
+
+        const potentialAttributes = ['data-player', 'data-src', 'data-stream', 'data-video'];
+        potentialAttributes.forEach(attr => {
+            $(`[${attr}]`).each((i, el) => {
+                const encodedPlayerUrl = $(el).attr(attr);
+                const providerName = $(el).text().trim() || $(el).attr('title') || `Stream from ${attr}`;
+                if (encodedPlayerUrl) {
+                    try {
+                        const decodedUrl = Buffer.from(encodedPlayerUrl, 'base64').toString('utf8');
+                        if (isValidUrl(decodedUrl) && !processedUrls.has(decodedUrl)) {
+                            streams.push({
+                                url: decodedUrl,
+                                title: providerName,
+                                behaviorHints: {
+                                    notWebReady: true
+                                }
+                            });
+                            processedUrls.add(decodedUrl);
+                        }
+                    } catch (e) {
+                        // Not a base64 string, or another error, ignore.
+                    }
+                }
+            });
         });
-        
+
         const downloadSelectors = [
             'a[href*="pixeldrain.com"]',
             'a[href*="mediafire.com"]',
@@ -252,11 +281,12 @@ builder.defineStreamHandler(async ({type, id}) => {
         $(downloadSelectors.join(',')).each((i, el) => {
             const href = $(el).attr('href');
             const name = $(el).text().trim();
-            if (href) {
+            if (href && !processedUrls.has(href)) {
                 streams.push({
                     url: href,
                     title: `[Download] ${name}`
                 });
+                processedUrls.add(href);
             }
         });
 
