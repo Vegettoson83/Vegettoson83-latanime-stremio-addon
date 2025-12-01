@@ -155,17 +155,32 @@ builder.defineMetaHandler(async ({type, id}) => {
     try {
         const html = await fetchWithScrapingBee(url);
         const $ = cheerio.load(html);
-        const title = $('h2').text().trim();
-        const poster = $('.serieimgficha img').attr('src');
-        const description = $('p.my-2.opacity-75').text().trim();
+
+        const findFirst = (selectors) => {
+            for (const selector of selectors) {
+                const element = $(selector);
+                if (element.length > 0) {
+                    if (selector.endsWith('img') || selector.startsWith('meta')) {
+                        return element.attr('src') || element.attr('content');
+                    }
+                    return element.text().trim();
+                }
+            }
+            return '';
+        };
+
+        const title = findFirst(['h2', 'h1.title', '.serie-title']);
+        const poster = findFirst(['.serieimgficha img', '.poster img', 'meta[property="og:image"]']);
+        const description = findFirst(['p.my-2.opacity-75', '.description', 'meta[property="og:description"]']);
 
         const videos = [];
-        $('.cap-layout').each((i, el) => {
-            const href = $(el).parent().attr('href');
+        const episodeSelectors = ['.cap-layout', '.episode-item', '.video-list-item'];
+        $(episodeSelectors.join(', ')).each((i, el) => {
+            const href = $(el).parent().attr('href') || $(el).attr('href');
             if (href && href.includes('/ver/')) {
                 const episodeTitleRaw = $(el).text().trim().replace(/\s\s+/g, ' ');
                 const episodeId = href.split('/').pop();
-                
+
                 let season = 1;
                 let episode = videos.length + 1;
 
