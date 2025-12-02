@@ -1,4 +1,4 @@
-onst { addonBuilder } = require("stremio-addon-sdk");
+const { addonBuilder } = require("stremio-addon-sdk");
 const cheerio = require("cheerio");
 const { ScrapingBeeClient } = require("scrapingbee");
 const NodeCache = require("node-cache");
