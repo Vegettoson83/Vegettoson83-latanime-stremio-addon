@@ -279,7 +279,7 @@ builder.defineStreamHandler(async ({type, id}) => {
         const playerAttributes = ['data-player', 'data-src', 'data-stream', 'data-video', 'data-url'];
         
         playerAttributes.forEach(attr => {
-            $(`[${attr}]`).each((i, el) => {
+            $(`*:not(img)[${attr}]`).each((i, el) => {
                 const encodedPlayerUrl = $(el).attr(attr);
                 let providerName = $(el).text().trim() || $(el).attr('title') || $(el).attr('data-title');
                 
