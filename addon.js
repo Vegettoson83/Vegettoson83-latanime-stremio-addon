@@ -35,7 +35,11 @@ const builder = new addonBuilder(manifest);
 const LATANIME_URL = "https://latanime.org";
 const ITEMS_PER_PAGE = 28;
 
-const SB_API_KEY = process.env.SCRAPINGBEE_API_KEY || '8MI4VBHDP2PUDO8WU39BC7P2LDSSJ69KX5L5ORQQS0YGKBM73JP46FSNT2DE0XJ6K9T3HHN1CF8E6CU9';
+const SB_API_KEY = process.env.SCRAPINGBEE_API_KEY;
+
+if (!SB_API_KEY) {
+    throw new Error("SCRAPINGBEE_API_KEY is not set. Please add it to your environment variables.");
+}
 
 const sbClient = new ScrapingBeeClient(SB_API_KEY);
 const cache = new NodeCache({ stdTTL: 86400 });
@@ -279,7 +283,7 @@ builder.defineStreamHandler(async ({type, id}) => {
         const playerAttributes = ['data-player', 'data-src', 'data-stream', 'data-video', 'data-url'];
         
         playerAttributes.forEach(attr => {
-            $(`[${attr}]`).each((i, el) => {
+            $(`*:not(img)[${attr}]`).each((i, el) => {
                 const encodedPlayerUrl = $(el).attr(attr);
                 let providerName = $(el).text().trim() || $(el).attr('title') || $(el).attr('data-title');
                 
