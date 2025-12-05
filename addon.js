@@ -35,7 +35,11 @@ const builder = new addonBuilder(manifest);
 const LATANIME_URL = "https://latanime.org";
 const ITEMS_PER_PAGE = 28;
 
-const SB_API_KEY = process.env.SCRAPINGBEE_API_KEY || '8MI4VBHDP2PUDO8WU39BC7P2LDSSJ69KX5L5ORQQS0YGKBM73JP46FSNT2DE0XJ6K9T3HHN1CF8E6CU9';
+const SB_API_KEY = process.env.SCRAPINGBEE_API_KEY;
+
+if (!SB_API_KEY) {
+    throw new Error("SCRAPINGBEE_API_KEY is not set. Please add it to your environment variables.");
+}
 
 const sbClient = new ScrapingBeeClient(SB_API_KEY);
 const cache = new NodeCache({ stdTTL: 86400 });
@@ -52,7 +56,7 @@ async function fetchWithScrapingBee(url) {
         const response = await sbClient.get({
             url: url,
             params: {
-                render_js: 'false',
+                render_js: 'true',
             },
         });
 
@@ -259,6 +263,13 @@ builder.defineStreamHandler(async ({type, id}) => {
     try {
         const html = await fetchWithScrapingBee(url);
         const $ = cheerio.load(html);
+        let searchScope = $('body');
+        if ($('.card-body').length > 0) {
+            searchScope = $('.card-body');
+            console.log("Found .card-body, confining search to this container.");
+        } else {
+            console.log("No .card-body found, searching entire document body.");
+        }
 
         console.log(`Fetching streams from: ${url}`);
         console.log(`HTML length: ${html.length} chars`);
@@ -279,7 +290,7 @@ builder.defineStreamHandler(async ({type, id}) => {
         const playerAttributes = ['data-player', 'data-src', 'data-stream', 'data-video', 'data-url'];
         
         playerAttributes.forEach(attr => {
-            $(`[${attr}]`).each((i, el) => {
+            searchScope.find(`*:not(img)[${attr}]`).each((i, el) => {
                 const encodedPlayerUrl = $(el).attr(attr);
                 let providerName = $(el).text().trim() || $(el).attr('title') || $(el).attr('data-title');
                 
@@ -315,7 +326,7 @@ builder.defineStreamHandler(async ({type, id}) => {
         });
 
         // Method 2: Look for iframe sources
-        $('iframe').each((i, el) => {
+        searchScope.find('iframe').each((i, el) => {
             const src = $(el).attr('src') || $(el).attr('data-src');
             if (src && isValidUrl(src) && !processedUrls.has(src)) {
                 streams.push({
@@ -331,7 +342,7 @@ builder.defineStreamHandler(async ({type, id}) => {
         });
 
         // Method 3: Look for video tags
-        $('video source, video').each((i, el) => {
+        searchScope.find('video source, video').each((i, el) => {
             const src = $(el).attr('src');
             if (src && isValidUrl(src) && !processedUrls.has(src)) {
                 streams.push({
@@ -353,7 +364,7 @@ builder.defineStreamHandler(async ({type, id}) => {
             'a[download]'
         ];
         
-        $(downloadSelectors.join(',')).each((i, el) => {
+        searchScope.find(downloadSelectors.join(',')).each((i, el) => {
             const href = $(el).attr('href');
             const name = $(el).text().trim() || 'Download';
             if (href && !processedUrls.has(href)) {
@@ -367,7 +378,7 @@ builder.defineStreamHandler(async ({type, id}) => {
         });
 
         // Method 5: Look for player buttons or links
-        $('button[data-player], .player-option, .server-item').each((i, el) => {
+        searchScope.find('button[data-player], .player-option, .server-item').each((i, el) => {
             const dataUrl = $(el).attr('data-player') || $(el).attr('data-url') || $(el).attr('data-link');
             const name = $(el).text().trim() || `Option ${i + 1}`;
             
