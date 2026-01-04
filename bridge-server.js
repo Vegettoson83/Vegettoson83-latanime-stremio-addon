@@ -6,9 +6,11 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
-// Cache extracted streams for 1 hour (not the m3u8 itself, just the URL)
 const streamCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
+
+let browser; // This will hold the persistent browser instance
 
 // Providers we know how to extract from
 const PROVIDERS = {
@@ -21,10 +23,8 @@ const PROVIDERS = {
         return videoSrc;
     },
     'mp4upload.com': async (page) => {
-        // Wait for the player script to load
         await page.waitForTimeout(3000);
         const sources = await page.evaluate(() => {
-            // mp4upload often has the source in a global var or script
             const scripts = Array.from(document.querySelectorAll('script'));
             for (const script of scripts) {
                 const match = script.textContent.match(/https?:\/\/[^"']+\.m3u8[^"']*/);
@@ -35,12 +35,9 @@ const PROVIDERS = {
         return sources;
     },
     'vidsrc.to': async (page) => {
-        // Well-known pattern
         await page.waitForSelector('iframe');
         const iframeSrc = await page.$eval('iframe', el => el.src);
         if (iframeSrc.includes('m3u8')) return iframeSrc;
-
-        // Or extract from scripts
         const m3u8 = await page.evaluate(() => {
             const scripts = document.querySelectorAll('script');
             for (const script of scripts) {
@@ -53,9 +50,6 @@ const PROVIDERS = {
     }
 };
 
-app.use(express.json());
-
-// Helper function to extract with Playwright
 async function extractVideoUrl(browser, url, referer = null) {
     const cacheKey = `video_url:${url}`;
     const cached = streamCache.get(cacheKey);
@@ -108,18 +102,16 @@ app.post('/extract-streams', async (req, res) => {
     if (!url) {
         return res.status(400).json({ error: 'URL parameter required' });
     }
+     if (!browser) {
+        return res.status(503).json({ error: 'Browser is not ready, please try again later.' });
+    }
+
 
     console.log(`Scraping latanime page: ${url}`);
-    let browser = null;
     try {
-        browser = await playwright.chromium.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
         const page = await browser.newPage();
         await page.goto(url, { waitUntil: 'domcontentloaded' });
 
-        // Scrape intermediate provider URLs from latanime
         const providers = await page.evaluate(() => {
             const results = [];
             const baseKey = document.querySelector('div.player')?.getAttribute('data-key');
@@ -141,7 +133,6 @@ app.post('/extract-streams', async (req, res) => {
 
         console.log(`Found ${providers.length} potential providers.`);
 
-        // Process each provider to get the final embed URL
         const finalEmbedUrls = await Promise.all(providers.map(async (provider) => {
             const providerPage = await browser.newPage();
             try {
@@ -162,7 +153,6 @@ app.post('/extract-streams', async (req, res) => {
         const validEmbeds = finalEmbedUrls.filter(p => p && p.finalUrl);
         console.log(`Found ${validEmbeds.length} valid final embed URLs.`);
 
-        // Extract the direct video URLs from the final embed URLs
         const streamPromises = validEmbeds.map(async (provider) => {
             try {
                 const videoUrl = await extractVideoUrl(browser, provider.finalUrl, provider.url);
@@ -190,7 +180,6 @@ app.post('/extract-streams', async (req, res) => {
 
         const resolvedStreams = (await Promise.all(streamPromises)).filter(Boolean);
 
-        // Scrape download links
         const downloadLinks = await page.evaluate(() => {
             const links = [];
             const selectors = [
@@ -213,12 +202,33 @@ app.post('/extract-streams', async (req, res) => {
     } catch (error) {
         console.error(`Scraping error on ${url}: ${error.message}`);
         res.status(500).json({ error: error.message, streams: [] });
-    } finally {
-        if (browser) await browser.close();
     }
 });
 
 const PORT = process.env.BRIDGE_PORT || 3001;
-app.listen(PORT, () => {
-    console.log(`Iframe Bridge running on http://localhost:${PORT}`);
-});
+
+(async () => {
+    console.log('Launching persistent browser instance...');
+    browser = await playwright.chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+    console.log('Browser instance launched successfully.');
+
+    app.listen(PORT, () => {
+        console.log(`Iframe Bridge running on http://localhost:${PORT}`);
+    });
+})();
+
+const cleanup = async () => {
+    if (browser) {
+        console.log('Closing browser instance...');
+        await browser.close();
+        browser = null;
+    }
+    process.exit(0);
+};
+
+process.on('SIGINT', cleanup);
+process.on('SIGTERM', cleanup);
+process.on('exit', cleanup);
