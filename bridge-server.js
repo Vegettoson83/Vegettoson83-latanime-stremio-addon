@@ -1,11 +1,12 @@
 // bridge-server.js
+
+// 🎯 CRITICAL: Set this BEFORE anything else
+process.env.PLAYWRIGHT_BROWSERS_PATH = '/opt/render/project/src/.cache/ms-playwright';
+
 const express = require('express');
 const playwright = require('playwright');
 const NodeCache = require('node-cache');
 const cors = require('cors');
-
-// 🎯 FIX: Tell Playwright where the browser is (persists between build & runtime)
-process.env.PLAYWRIGHT_BROWSERS_PATH = '/opt/render/project/src/.cache/ms-playwright';
 
 const app = express();
 app.use(cors());
@@ -24,16 +25,13 @@ const PROVIDERS = {
         return page.evaluate(() => document.querySelector('video')?.src || document.querySelector('video source')?.src);
     },
     'mp4upload.com': async (page) => {
-        // Final, more robust approach: wait for the video element to be ready
         await page.waitForSelector('video', { state: 'visible', timeout: 20000 });
         return page.evaluate(() => {
-            // First, try to get from player setup scripts, which is common
             const scripts = Array.from(document.querySelectorAll('script'));
             for (const script of scripts) {
                 const match = script.textContent.match(/https?:\/\/[^"']+\.(mp4|m3u8)[^"']*/);
                 if (match) return match[0];
             }
-            // Fallback to the video element itself if not in a script
             const video = document.querySelector('video');
             return video?.src || video?.querySelector('source')?.src;
         });
@@ -42,7 +40,6 @@ const PROVIDERS = {
         await page.waitForSelector('iframe');
         const iframeSrc = await page.$eval('iframe', el => el.src);
         if (iframeSrc.includes('m3u8')) return iframeSrc;
-
         return page.evaluate(() => {
             const scripts = document.querySelectorAll('script');
             for (const script of scripts) {
@@ -204,7 +201,7 @@ const PORT = process.env.BRIDGE_PORT || 3001;
 
 async function startServer() {
     try {
-        // 🎯 FIX: Add memory-saving args for Render free tier
+        // 🎯 FIX: Memory-saving args for Render
         browser = await playwright.chromium.launch({
             headless: true,
             args: [
