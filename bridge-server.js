@@ -4,6 +4,9 @@ const playwright = require('playwright');
 const NodeCache = require('node-cache');
 const cors = require('cors');
 
+// 🎯 FIX: Tell Playwright where the browser is (persists between build & runtime)
+process.env.PLAYWRIGHT_BROWSERS_PATH = '/opt/render/project/src/.cache/ms-playwright';
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -201,9 +204,16 @@ const PORT = process.env.BRIDGE_PORT || 3001;
 
 async function startServer() {
     try {
+        // 🎯 FIX: Add memory-saving args for Render free tier
         browser = await playwright.chromium.launch({
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process'
+            ]
         });
         console.log('Playwright browser launched successfully.');
 
