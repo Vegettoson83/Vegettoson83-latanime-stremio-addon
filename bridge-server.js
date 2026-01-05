@@ -25,13 +25,16 @@ const PROVIDERS = {
         return page.evaluate(() => document.querySelector('video')?.src || document.querySelector('video source')?.src);
     },
     'mp4upload.com': async (page) => {
+        // Final, more robust approach: wait for the video element to be ready
         await page.waitForSelector('video', { state: 'visible', timeout: 20000 });
         return page.evaluate(() => {
+            // First, try to get from player setup scripts, which is common
             const scripts = Array.from(document.querySelectorAll('script'));
             for (const script of scripts) {
                 const match = script.textContent.match(/https?:\/\/[^"']+\.(mp4|m3u8)[^"']*/);
                 if (match) return match[0];
             }
+            // Fallback to the video element itself if not in a script
             const video = document.querySelector('video');
             return video?.src || video?.querySelector('source')?.src;
         });
@@ -201,7 +204,7 @@ const PORT = process.env.BRIDGE_PORT || 3001;
 
 async function startServer() {
     try {
-        // 🎯 FIX: Memory-saving args for Render
+        // 🎯 FIX: Memory-saving args for Render + use persistent browser path
         browser = await playwright.chromium.launch({
             headless: true,
             args: [
