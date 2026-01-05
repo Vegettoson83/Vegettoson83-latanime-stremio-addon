@@ -21,14 +21,18 @@ const PROVIDERS = {
         return page.evaluate(() => document.querySelector('video')?.src || document.querySelector('video source')?.src);
     },
     'mp4upload.com': async (page) => {
-        await page.waitForResponse(response => response.url().includes('.m3u8'), { timeout: 15000 });
+        // Final, more robust approach: wait for the video element to be ready
+        await page.waitForSelector('video', { state: 'visible', timeout: 20000 });
         return page.evaluate(() => {
+            // First, try to get from player setup scripts, which is common
             const scripts = Array.from(document.querySelectorAll('script'));
             for (const script of scripts) {
-                const match = script.textContent.match(/https?:\/\/[^"']+\.m3u8[^"']*/);
+                const match = script.textContent.match(/https?:\/\/[^"']+\.(mp4|m3u8)[^"']*/);
                 if (match) return match[0];
             }
-            return null;
+            // Fallback to the video element itself if not in a script
+            const video = document.querySelector('video');
+            return video?.src || video?.querySelector('source')?.src;
         });
     },
     'vidsrc.to': async (page) => {
@@ -140,8 +144,8 @@ app.post('/extract-streams', async (req, res) => {
                 await providerPage.close();
             }
         }));
-        const validEmbeds = finalEmbedUrls.filter(p => p && p.finalUrl);
-        console.log(`Found ${validEmbeds.length} valid final embed URLs.`);
+        const validEmbeds = finalEmbedUrls.filter(p => p && p.finalUrl && !p.finalUrl.includes('listeamed.net'));
+        console.log(`Found ${validEmbeds.length} valid final embed URLs (after filtering).`);
 
         const streamPromises = validEmbeds.map(async (provider) => {
             try {
