@@ -197,10 +197,9 @@ const PORT = process.env.BRIDGE_PORT || 3001;
 
 async function startServer() {
     try {
-        // 🎯 FIX: Use Render's built-in Chromium + memory-saving args
+        // 🎯 Standard Playwright browser download (no env vars)
         browser = await playwright.chromium.launch({
             headless: true,
-            executablePath: '/usr/bin/chromium-browser',  // Use Render's Chromium
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
