@@ -21,16 +21,13 @@ const PROVIDERS = {
         return page.evaluate(() => document.querySelector('video')?.src || document.querySelector('video source')?.src);
     },
     'mp4upload.com': async (page) => {
-        // Final, more robust approach: wait for the video element to be ready
         await page.waitForSelector('video', { state: 'visible', timeout: 20000 });
         return page.evaluate(() => {
-            // First, try to get from player setup scripts, which is common
             const scripts = Array.from(document.querySelectorAll('script'));
             for (const script of scripts) {
                 const match = script.textContent.match(/https?:\/\/[^"']+\.(mp4|m3u8)[^"']*/);
                 if (match) return match[0];
             }
-            // Fallback to the video element itself if not in a script
             const video = document.querySelector('video');
             return video?.src || video?.querySelector('source')?.src;
         });
@@ -39,7 +36,6 @@ const PROVIDERS = {
         await page.waitForSelector('iframe');
         const iframeSrc = await page.$eval('iframe', el => el.src);
         if (iframeSrc.includes('m3u8')) return iframeSrc;
-
         return page.evaluate(() => {
             const scripts = document.querySelectorAll('script');
             for (const script of scripts) {
@@ -201,9 +197,16 @@ const PORT = process.env.BRIDGE_PORT || 3001;
 
 async function startServer() {
     try {
+        // 🎯 Standard Playwright browser download (no env vars)
         browser = await playwright.chromium.launch({
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process'
+            ]
         });
         console.log('Playwright browser launched successfully.');
 
