@@ -1,3 +1,4 @@
+require('dotenv').config();
 const { serveHTTP } = require("stremio-addon-sdk");
 const addonInterface = require("./addon");
 
