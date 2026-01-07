@@ -47,7 +47,7 @@ const PROVIDERS = {
     }
 };
 
-async function extractVideoUrl(url, referer = null) {
+async function extractVideoUrl(context, url, referer = null) {
     const cacheKey = `video_url:${url}`;
     const cached = streamCache.get(cacheKey);
     if (cached) {
@@ -55,7 +55,7 @@ async function extractVideoUrl(url, referer = null) {
         return cached;
     }
 
-    const page = await browser.newPage();
+    const page = await context.newPage();
     try {
         await page.setExtraHTTPHeaders({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -103,8 +103,9 @@ app.post('/extract-streams', async (req, res) => {
     }
 
     console.log(`Scraping latanime page: ${url}`);
-    const page = await browser.newPage();
+    const context = await browser.newContext();
     try {
+        const page = await context.newPage();
         await page.goto(url, { waitUntil: 'domcontentloaded' });
 
         const providers = await page.evaluate(() => {
@@ -125,7 +126,7 @@ app.post('/extract-streams', async (req, res) => {
         console.log(`Found ${providers.length} potential providers.`);
 
         const finalEmbedUrls = await Promise.all(providers.map(async (provider) => {
-            const providerPage = await browser.newPage();
+            const providerPage = await context.newPage();
             try {
                 await providerPage.goto(provider.url, { waitUntil: 'domcontentloaded' });
                 const finalUrl = await providerPage.evaluate(() => {
@@ -145,7 +146,7 @@ app.post('/extract-streams', async (req, res) => {
 
         const streamPromises = validEmbeds.map(async (provider) => {
             try {
-                const videoUrl = await extractVideoUrl(provider.finalUrl, provider.url);
+                const videoUrl = await extractVideoUrl(context, provider.finalUrl, provider.url);
                 if (videoUrl) {
                     console.log(`✅ Extracted: ${provider.title} -> ${videoUrl.substring(0, 60)}...`);
                     return {
@@ -189,7 +190,8 @@ app.post('/extract-streams', async (req, res) => {
         console.error(`Scraping error on ${url}: ${error.message}`);
         res.status(500).json({ error: error.message, streams: [] });
     } finally {
-        await page.close();
+        await context.close();
+        console.log(`Browser context closed for ${url}`);
     }
 });
 
