@@ -1,5 +1,3 @@
-# In your repository root, create Dockerfile
-cat > Dockerfile << 'EOF'
 # Use the official Playwright image which comes with browsers and dependencies
 FROM mcr.microsoft.com/playwright:v1.45.0-noble
 
@@ -23,4 +21,3 @@ EXPOSE 7000 3001 10000
 
 # Set the command to start the application
 CMD ["npm", "start"]
-EOF
