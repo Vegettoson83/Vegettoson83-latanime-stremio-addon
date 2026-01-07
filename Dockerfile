@@ -1,17 +1,12 @@
-# Use the official Playwright image which comes with browsers and dependencies
+# Use the official Playwright image
 FROM mcr.microsoft.com/playwright:v1.45.0-noble
 
-# Set the working directory
 WORKDIR /app
-
-# Copy application files
 COPY . .
-
-# Install Node.js dependencies
 RUN npm install
 
-# Expose the ports for the addon and the bridge server
-EXPOSE 7000 3001 10000
+# ADD THIS LINE ↓↓↓
+RUN npx playwright install chromium
 
-# Set the command to start the application
+EXPOSE 7000 3001 10000
 CMD ["npm", "start"]
