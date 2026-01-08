@@ -193,11 +193,10 @@ app.post('/extract-streams', async (req, res) => {
     }
 });
 
-const PORT = process.env.BRIDGE_PORT || 3001;
+const PORT = 3001;
 
 async function startServer() {
     try {
-        // 🎯 Standard Playwright browser download (no env vars)
         browser = await playwright.chromium.launch({
             headless: true,
             args: [
