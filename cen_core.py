@@ -3,6 +3,50 @@
 
 import uuid
 import math
+import copy
+
+class SymbolicRule:
+    """
+    Represents a formal logical constraint that the EntanglementGraph must obey.
+    """
+    def __init__(self, description: str, condition_func):
+        """
+        :param description: A human-readable explanation of the rule.
+        :param condition_func: A function that takes the graph as input and returns
+                               True if the rule is satisfied, False otherwise.
+        """
+        self.description = description
+        self.condition = condition_func
+
+    def __call__(self, graph):
+        return self.condition(graph)
+
+    def __repr__(self):
+        return f"SymbolicRule(description='{self.description}')"
+
+
+class FormalVerifier:
+    """
+    A stateless engine that verifies an EntanglementGraph against its symbolic rules.
+    """
+    @staticmethod
+    def verify(graph) -> (bool, SymbolicRule):
+        """
+        Checks the entire graph against all its registered symbolic rules.
+
+        :param graph: The EntanglementGraph instance to verify.
+        :return: A tuple (is_consistent, violated_rule).
+                 violated_rule is None if the graph is consistent.
+        """
+        # print("\n--- Running Formal Verification ---")
+        for rule in graph.rules:
+            if not rule(graph):
+                # print(f"Verification FAILED. Rule violated: '{rule.description}'")
+                return False, rule
+
+        # print("Verification PASSED. All rules satisfied.")
+        return True, None
+
 
 class CausalNode:
     """
@@ -72,6 +116,15 @@ class EntanglementGraph:
     """
     def __init__(self):
         self.nodes = {}
+        self.rules = []
+        self.candidate_distributions = {} # For transaction-like updates
+
+    def add_rule(self, rule: SymbolicRule):
+        """Adds a new symbolic rule to the graph's rule set."""
+        if not isinstance(rule, SymbolicRule):
+            raise TypeError("Can only add objects of type SymbolicRule.")
+        print(f"Adding rule: '{rule.description}'")
+        self.rules.append(rule)
 
     def __repr__(self):
         return f"EntanglementGraph(nodes={len(self.nodes)})"
@@ -156,8 +209,7 @@ class EntanglementGraph:
 
                 original_prob = child_node.get_probability("active")
 
-                # --- Noisy-OR Evidence Combination ---
-                # This logic is correct, but it must be applied synchronously.
+                # --- Calculate Candidate State ---
                 parents = self.get_parents(child_name)
                 prob_not_activated = 1.0
                 for parent_name, entanglement in parents.items():
@@ -170,16 +222,30 @@ class EntanglementGraph:
 
                 new_prob_active = 1 - prob_not_activated
 
-                # Apply the update for the two-state system directly.
-                # This corrects the previous normalization error.
-                child_node.state_distribution["active"] = new_prob_active
-                child_node.state_distribution["inactive"] = 1 - new_prob_active
+                # --- Verification Step ---
+                # Create a temporary graph state to test the proposed change.
+                # Note: deepcopy is inefficient for large graphs but guarantees a safe, isolated test.
+                temp_graph = copy.deepcopy(self)
+                temp_child_node = temp_graph.get_node(child_name)
+                temp_child_node.state_distribution["active"] = new_prob_active
+                temp_child_node.state_distribution["inactive"] = 1 - new_prob_active
 
-                print(f"Recalculated '{child_name}' from {len(parents)} parent(s). P(active) changed from {original_prob:.3f} to {new_prob_active:.3f}")
+                is_consistent, violated_rule = FormalVerifier.verify(temp_graph)
 
-                # If the change was significant, its children will be processed in the next layer.
-                if abs(new_prob_active - original_prob) > change_threshold:
-                    next_layer_nodes.add(child_name)
+                if is_consistent:
+                    # --- Commit Step ---
+                    # The change is valid, so we apply it to the actual graph.
+                    child_node.state_distribution["active"] = new_prob_active
+                    child_node.state_distribution["inactive"] = 1 - new_prob_active
+
+                    print(f"Recalculated '{child_name}' from {len(parents)} parent(s). P(active) changed from {original_prob:.3f} to {new_prob_active:.3f}. Verified.")
+
+                    if abs(new_prob_active - original_prob) > change_threshold:
+                        next_layer_nodes.add(child_name)
+                else:
+                    # --- Pivot Step ---
+                    # The change violates a rule, so it is rejected.
+                    print(f"PIVOT on '{child_name}': Proposed state violates rule '{violated_rule.description}'. Update rejected.")
 
             nodes_to_process = next_layer_nodes
 
