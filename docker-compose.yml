@@ -1,8 +1,8 @@
-version: '3.8'
-
 services:
   addon:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: latanime-addon
     ports:
       - "7000:7000"
@@ -11,15 +11,15 @@ services:
       - BRIDGE_URL=http://bridge:3001
     depends_on:
       - bridge
-    command: ["node", "server.js"]
     restart: unless-stopped
 
   bridge:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
     container_name: latanime-bridge
     ports:
       - "3001:3001"
     environment:
       - BRIDGE_PORT=3001
-    command: ["node", "bridge-server.js"]
     restart: unless-stopped
