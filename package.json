@@ -1,7 +1,7 @@
 {
   "name": "latanime-addon",
-  "version": "1.0.0",
-  "description": "Provides streams from latanime.org",
+  "version": "1.0.4",
+  "description": "Stremio addon for latanime.org",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

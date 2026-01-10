@@ -1,5 +1,5 @@
 # Use an official Playwright image that comes with browsers and dependencies
-FROM mcr.microsoft.com/playwright:v1.44.0-jammy
+FROM mcr.microsoft.com/playwright:v1.45.0-jammy
 
 # Set the working directory in the container
 WORKDIR /usr/src/app
