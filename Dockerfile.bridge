@@ -13,8 +13,8 @@ RUN npm install
 # Copy the rest of the application source code
 COPY . .
 
-# Expose the port the addon runs on
-EXPOSE 7000
+# Expose the port the bridge runs on
+EXPOSE 3001
 
 # Command to run the application
-CMD ["node", "server.js"]
+CMD ["node", "bridge-server.js"]
