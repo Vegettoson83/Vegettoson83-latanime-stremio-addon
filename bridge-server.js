@@ -102,21 +102,26 @@ app.post('/extract-streams', async (req, res) => {
         const page = await context.newPage();
         try {
             await page.goto(url, { waitUntil: 'domcontentloaded' });
+
             const providers = await page.evaluate(() => {
-            const results = [];
-            const baseKey = document.querySelector('div.player')?.getAttribute('data-key');
-            if (!baseKey) return [];
-            const basePlayerUrl = atob(baseKey);
-            document.querySelectorAll('a.play-video').forEach(el => {
-                const providerName = el.textContent.trim();
-                const encodedPart = el.getAttribute('data-player');
-                if (encodedPart) {
-                    const intermediateUrl = providerName.toLowerCase() === 'yourupload' ? atob(encodedPart) : basePlayerUrl + encodedPart;
-                    results.push({ url: intermediateUrl, title: providerName });
+                const scripts = Array.from(document.querySelectorAll('script'));
+                const videoScript = scripts.find(s => s.textContent.includes('const videos ='));
+                if (!videoScript) return [];
+
+                const videoDataMatch = videoScript.textContent.match(/const videos = (\[\[.*?\]\]);/);
+                if (!videoDataMatch) return [];
+
+                try {
+                    const videos = JSON.parse(videoDataMatch[1].replace(/'/g, '"'));
+                    return videos.map(video => ({
+                        url: `https://latanime.org/reproductor?url=${video[2]}`,
+                        title: video[0]
+                    }));
+                } catch (e) {
+                    console.error('Failed to parse video data:', e);
+                    return [];
                 }
             });
-            return results;
-        });
         console.log(`Found ${providers.length} potential providers.`);
 
         const finalEmbedUrls = await Promise.all(providers.map(async (provider) => {
@@ -140,10 +145,11 @@ app.post('/extract-streams', async (req, res) => {
         console.log(`Found ${validEmbeds.length} valid final embed URLs (after filtering).`);
 
         const streamPromises = validEmbeds.map(async (provider) => {
+            console.log(`Attempting to extract stream from ${provider.title} at ${provider.finalUrl}`);
             try {
                 const videoUrl = await extractVideoUrl(context, provider.finalUrl, provider.url);
-                if (videoUrl) {
-                    console.log(`✅ Extracted: ${provider.title} -> ${videoUrl.substring(0, 60)}...`);
+                if (videoUrl && !videoUrl.includes('bigbuckbunny')) {
+                    console.log(`✅ Success: Extracted from ${provider.title} -> ${videoUrl.substring(0, 60)}...`);
                     return {
                         name: 'Latanime',
                         url: videoUrl,
@@ -157,9 +163,13 @@ app.post('/extract-streams', async (req, res) => {
                             }
                         }
                     };
+                } else if (videoUrl) {
+                    console.log(`⚠️ Filtered placeholder URL from ${provider.title}: ${videoUrl}`);
+                } else {
+                    console.log(`ℹ️ No video URL found for ${provider.title}`);
                 }
             } catch (error) {
-                console.log(`❌ Extraction failed for ${provider.finalUrl}: ${error.message}`);
+                console.error(`❌ Error extracting from ${provider.title} (${provider.finalUrl}): ${error.message}`);
             }
             return null;
         });
