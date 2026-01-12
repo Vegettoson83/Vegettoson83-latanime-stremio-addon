@@ -2,18 +2,29 @@
 
 This is a Stremio addon that provides streams from latanime.org.
 
-## Installation
+## Deployment
+
+This addon is designed to be deployed as a single Docker container, suitable for platforms like Render that expose a single port. The application runs two processes internally (the addon and the scraping bridge) using `pm2`.
 
 1.  Clone this repository.
-2.  Install the dependencies:
+2.  Build the Docker image:
     ```
-    npm install
+    docker build -t latanime-addon .
     ```
-3.  Run the addon:
+3.  Run the container, exposing the addon's port:
     ```
-    npm start
+    docker run -p 10000:10000 latanime-addon
     ```
 
-## Security
+## Local Development
 
-**Warning:** The `bridge` service provides an unsecured endpoint for web scraping. It is designed for internal communication between the `addon` and `bridge` containers within a Docker network. **Do not expose the bridge service port (default: 3001) to the public internet.** Exposing this service can create a significant security vulnerability.
+For local development, you can run the services directly:
+```
+# Terminal 1: Start the addon
+npm run start:addon
+
+# Terminal 2: Start the bridge
+npm run start:bridge
+```
+
+*Note: You will need to add `start:addon` and `start:bridge` scripts to your `package.json` for this to work.*

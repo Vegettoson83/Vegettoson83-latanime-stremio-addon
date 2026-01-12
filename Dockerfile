@@ -13,8 +13,8 @@ RUN npm install
 # Copy the rest of the application files
 COPY . .
 
-# Expose the port the app runs on
+# Expose the port the main addon service runs on for Render
 EXPOSE 10000
 
-# Command to run the application
+# Command to run both services using pm2
 CMD ["npm", "start"]
