@@ -40,7 +40,7 @@ const PROVIDERS = {
     }
 };
 
-async function extractVideoUrl(browser, url, referer = null) {
+async function extractVideoUrl(context, url, referer = null) {
     const cacheKey = `video_url:${url}`;
     const cached = streamCache.get(cacheKey);
     if (cached) {
@@ -50,7 +50,7 @@ async function extractVideoUrl(browser, url, referer = null) {
 
     let page;
     try {
-        page = await browser.newPage();
+        page = await context.newPage();
         await page.setExtraHTTPHeaders({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Referer': referer || new URL(url).origin,
@@ -98,9 +98,12 @@ app.post('/scrape', async (req, res) => {
         return res.status(503).json({ error: 'Browser not initialized' });
     }
 
-    console.log(`[Bridge] Scraping latanime page: ${url}`);
-    const page = await browser.newPage();
+    let context;
     try {
+        context = await browser.newContext();
+        const page = await context.newPage();
+
+        console.log(`[Bridge] Scraping latanime page: ${url}`);
         await page.goto(url, { waitUntil: 'domcontentloaded' });
 
         const providers = await page.evaluate(() => {
@@ -124,7 +127,7 @@ app.post('/scrape', async (req, res) => {
         for (const provider of providers) {
             let providerPage = null;
             try {
-                providerPage = await browser.newPage();
+                providerPage = await context.newPage();
                 await providerPage.setRequestInterception(true);
                 providerPage.on('request', (req) => {
                     if (['image', 'stylesheet', 'font'].includes(req.resourceType())) {
@@ -143,7 +146,7 @@ app.post('/scrape', async (req, res) => {
 
                 if (finalUrl && !finalUrl.includes('listeamed.net')) {
                     console.log(`[Bridge] Found valid final embed URL for ${provider.title}: ${finalUrl.substring(0, 60)}...`);
-                    const videoUrl = await extractVideoUrl(browser, finalUrl, provider.url);
+                    const videoUrl = await extractVideoUrl(context, finalUrl, provider.url);
                     if (videoUrl) {
                         console.log(`[Bridge] ✅ Extracted: ${provider.title} -> ${videoUrl.substring(0, 60)}...`);
                         resolvedStreams.push({
@@ -180,6 +183,7 @@ app.post('/scrape', async (req, res) => {
             });
             return links;
         });
+        await page.close();
 
         const allStreams = [...resolvedStreams, ...downloadLinks];
         console.log(`[Bridge] Total streams found: ${allStreams.length}`);
@@ -189,7 +193,9 @@ app.post('/scrape', async (req, res) => {
         console.error(`[Bridge] Scraping error on ${url}: ${error.message}`);
         res.status(500).json({ error: 'Scraping failed', streams: [] });
     } finally {
-        await page.close();
+        if (context) {
+            await context.close();
+        }
     }
 });
 
