@@ -128,12 +128,12 @@ app.post('/scrape', async (req, res) => {
             let providerPage = null;
             try {
                 providerPage = await context.newPage();
-                await providerPage.setRequestInterception(true);
-                providerPage.on('request', (req) => {
-                    if (['image', 'stylesheet', 'font'].includes(req.resourceType())) {
-                        req.abort();
+                // Optimization: Don't load images or CSS
+                await providerPage.route('**/*', (route) => {
+                    if (['image', 'stylesheet', 'font'].includes(route.request().resourceType())) {
+                        route.abort();
                     } else {
-                        req.continue();
+                        route.continue();
                     }
                 });
 
