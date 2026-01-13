@@ -18,5 +18,5 @@ COPY . .
 # Expose the port the main addon service runs on for Render
 EXPOSE 10000
 
-# Command to run both services using pm2
-CMD ["npm", "start"]
+# Command to run the single addon service
+CMD ["node", "server.js"]
