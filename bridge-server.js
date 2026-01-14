@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const playwright = require('playwright');
 const NodeCache = require('node-cache');
