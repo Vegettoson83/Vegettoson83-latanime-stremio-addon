@@ -45,6 +45,30 @@ const PROVIDERS = {
             }
             return null;
         });
+    },
+    'voe.sx': async (page) => {
+        await page.waitForLoadState('networkidle');
+        return page.evaluate(() => {
+            const scripts = Array.from(document.querySelectorAll('script'));
+            for (const script of scripts) {
+                const match = script.textContent.match(/let sources = (\{[^;]+\});/);
+                if (match) {
+                    try {
+                        const sources = JSON.parse(match[1].replace(/'/g, '"'));
+                        if (sources.hls) {
+                            // Voe often uses a simple reverse string obfuscation
+                            return sources.hls.split('').reverse().join('');
+                        }
+                        if (sources.src) {
+                             return sources.src;
+                        }
+                    } catch (e) {
+                        console.error('Failed to parse Voe sources', e);
+                    }
+                }
+            }
+            return null;
+        });
     }
 };
 
