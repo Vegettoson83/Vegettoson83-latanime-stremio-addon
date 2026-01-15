@@ -10,8 +10,16 @@ let browser;
 
 const PROVIDERS = {
     'yourupload.com': async (page) => {
-        await page.waitForSelector('video');
-        return page.evaluate(() => document.querySelector('video')?.src || document.querySelector('video source')?.src);
+        await page.waitForSelector('video', { state: 'visible', timeout: 20000 });
+        return page.evaluate(() => {
+            const scripts = Array.from(document.querySelectorAll('script'));
+            for (const script of scripts) {
+                const match = script.textContent.match(/https?:\/\/[^"']+\.(mp4|m3u8)[^"']*/);
+                if (match) return match[0];
+            }
+            const video = document.querySelector('video');
+            return video?.src || video?.querySelector('source')?.src;
+        });
     },
     'mp4upload.com': async (page) => {
         await page.waitForSelector('video', { state: 'visible', timeout: 20000 });
