@@ -3,11 +3,11 @@ const { addonBuilder, getRouter } = require('stremio-addon-sdk');
 const cors = require('cors');
 const manifest = require('./lib/manifest');
 const { defineHandlers } = require('./lib/handlers');
+const { startBrowser, gracefulShutdown, getBrowser } = require('./lib/browser');
 
 const builder = new addonBuilder(manifest);
 
-// The browser instance is now managed by the bridge service.
-defineHandlers(builder);
+defineHandlers(builder, { getBrowser });
 
 const addonInterface = builder.getInterface();
 const app = express();
@@ -23,16 +23,14 @@ app.use(getRouter(addonInterface));
 
 const port = process.env.PORT || 10000;
 
-app.listen(port, () => {
-    console.log(`Addon server listening on port ${port}`);
-});
+async function startServer() {
+    await startBrowser();
+    app.listen(port, () => {
+        console.log(`Addon server listening on port ${port}`);
+    });
+}
 
-// Graceful shutdown is simplified as there's no browser to close.
-process.on('SIGINT', () => {
-    console.log('Addon server shutting down.');
-    process.exit(0);
-});
-process.on('SIGTERM', () => {
-    console.log('Addon server shutting down.');
-    process.exit(0);
-});
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
+
+startServer();
