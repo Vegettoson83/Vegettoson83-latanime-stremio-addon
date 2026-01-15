@@ -11,10 +11,11 @@ This addon is designed to be deployed as a single Docker container, suitable for
     ```
     docker build -t latanime-addon .
     ```
-3.  Run the container, exposing the addon's port:
+3.  Run the container, exposing the addon's port and setting the necessary environment variable:
     ```
-    docker run -p 10000:10000 latanime-addon
+    docker run -e SB_API_KEY="YOUR_SCRAPINGBEE_API_KEY" -p 10000:10000 latanime-addon
     ```
+*Note: The `SB_API_KEY` environment variable is required for the addon to resolve metadata and streams correctly.*
 
 ## Local Development
 
