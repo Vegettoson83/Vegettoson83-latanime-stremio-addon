@@ -8,13 +8,22 @@ app.use(express.json());
 const streamCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 let browser;
 
+function isValidStreamUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+    const adPattern = /[/_-]ad([/_-]|$)/;
+    if (adPattern.test(url)) return false;
+    const isDirectVideo = url.split('?')[0].match(/\.(mp4|m3u8|mkv|webm)$/i);
+    const isCommonStream = url.includes('m3u8') || url.includes('googleusercontent') || url.includes('storage.googleapis.com');
+    return isDirectVideo || isCommonStream;
+}
+
 const PROVIDERS = {
     'yourupload.com': async (page) => {
-        await page.waitForSelector('video');
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
         return page.evaluate(() => document.querySelector('video')?.src || document.querySelector('video source')?.src);
     },
     'mp4upload.com': async (page) => {
-        await page.waitForSelector('video', { state: 'visible', timeout: 20000 });
+        await page.waitForSelector('video', { state: 'visible', timeout: 20000 }).catch(() => {});
         return page.evaluate(() => {
             const scripts = Array.from(document.querySelectorAll('script'));
             for (const script of scripts) {
@@ -26,9 +35,9 @@ const PROVIDERS = {
         });
     },
     'vidsrc.to': async (page) => {
-        await page.waitForSelector('iframe');
-        const iframeSrc = await page.$eval('iframe', el => el.src);
-        if (iframeSrc.includes('m3u8')) return iframeSrc;
+        await page.waitForSelector('iframe', { timeout: 10000 }).catch(() => {});
+        const iframeSrc = await page.evaluate(() => document.querySelector('iframe')?.src);
+        if (iframeSrc && iframeSrc.includes('m3u8')) return iframeSrc;
         return page.evaluate(() => {
             const scripts = document.querySelectorAll('script');
             for (const script of scripts) {
@@ -37,6 +46,41 @@ const PROVIDERS = {
             }
             return null;
         });
+    },
+    'voe.sx': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => {
+            const scripts = Array.from(document.querySelectorAll('script'));
+            for (const script of scripts) {
+                const match = script.textContent.match(/'hls':\s*'([^']+)'/) || script.textContent.match(/"hls":\s*"([^"]+)"/);
+                if (match) return match[1];
+            }
+            const video = document.querySelector('video');
+            return video?.src || video?.querySelector('source')?.src;
+        });
+    },
+    'filemoon.sx': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => {
+            const scripts = Array.from(document.querySelectorAll('script'));
+            for (const script of scripts) {
+                const match = script.textContent.match(/file:\s*"([^"]+m3u8[^"]*)"/);
+                if (match) return match[1];
+            }
+            return document.querySelector('video')?.src;
+        });
+    },
+    'mxdrop.com': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'lulu.st': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'dsvplay.com': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
     }
 };
 
@@ -78,10 +122,11 @@ async function extractVideoUrl(context, url, referer = null) {
             });
         }
 
-        if (videoUrl) {
+        if (videoUrl && isValidStreamUrl(videoUrl)) {
             streamCache.set(cacheKey, videoUrl);
+            return videoUrl;
         }
-        return videoUrl;
+        return null;
     } finally {
         if (page) {
             await page.close();
