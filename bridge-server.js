@@ -1,44 +1,13 @@
 const express = require('express');
 const playwright = require('playwright');
 const NodeCache = require('node-cache');
+const { PROVIDERS, isValidStreamUrl } = require('./lib/extractors');
 
 const app = express();
 app.use(express.json());
 
 const streamCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 let browser;
-
-const PROVIDERS = {
-    'yourupload.com': async (page) => {
-        await page.waitForSelector('video');
-        return page.evaluate(() => document.querySelector('video')?.src || document.querySelector('video source')?.src);
-    },
-    'mp4upload.com': async (page) => {
-        await page.waitForSelector('video', { state: 'visible', timeout: 20000 });
-        return page.evaluate(() => {
-            const scripts = Array.from(document.querySelectorAll('script'));
-            for (const script of scripts) {
-                const match = script.textContent.match(/https?:\/\/[^"']+\.(mp4|m3u8)[^"']*/);
-                if (match) return match[0];
-            }
-            const video = document.querySelector('video');
-            return video?.src || video?.querySelector('source')?.src;
-        });
-    },
-    'vidsrc.to': async (page) => {
-        await page.waitForSelector('iframe');
-        const iframeSrc = await page.$eval('iframe', el => el.src);
-        if (iframeSrc.includes('m3u8')) return iframeSrc;
-        return page.evaluate(() => {
-            const scripts = document.querySelectorAll('script');
-            for (const script of scripts) {
-                const match = script.textContent.match(/https?:\/\/[^"']+\.m3u8[^"']*/);
-                if (match) return match[0];
-            }
-            return null;
-        });
-    }
-};
 
 async function extractVideoUrl(context, url, referer = null) {
     const cacheKey = `video_url:${url}`;
@@ -78,10 +47,12 @@ async function extractVideoUrl(context, url, referer = null) {
             });
         }
 
-        if (videoUrl) {
+        if (videoUrl && isValidStreamUrl(videoUrl)) {
             streamCache.set(cacheKey, videoUrl);
+            return videoUrl;
         }
-        return videoUrl;
+        console.warn(`[Bridge] Invalid or no video URL found for ${url}: ${videoUrl}`);
+        return null;
     } finally {
         if (page) {
             await page.close();
@@ -148,7 +119,7 @@ app.post('/scrape', async (req, res) => {
                     console.log(`[Bridge] Found valid final embed URL for ${provider.title}: ${finalUrl.substring(0, 60)}...`);
                     const videoUrl = await extractVideoUrl(context, finalUrl, provider.url);
                     if (videoUrl) {
-                        console.log(`[Bridge] ✅ Extracted: ${provider.title} -> ${videoUrl.substring(0, 60)}...`);
+                        console.log(`[Bridge] [RECURSION-COMPLETE] ✅ Extracted: ${provider.title} -> ${videoUrl.substring(0, 60)}...`);
                         resolvedStreams.push({
                             name: 'Latanime',
                             url: videoUrl,
@@ -186,11 +157,11 @@ app.post('/scrape', async (req, res) => {
         await page.close();
 
         const allStreams = [...resolvedStreams, ...downloadLinks];
-        console.log(`[Bridge] Total streams found: ${allStreams.length}`);
+        console.log(`[Bridge] [STATE-FINAL] Total streams found: ${allStreams.length} (${resolvedStreams.length} resolved, ${downloadLinks.length} downloads)`);
         res.json({ streams: allStreams });
 
     } catch (error) {
-        console.error(`[Bridge] Scraping error on ${url}: ${error.message}`);
+        console.error(`[Bridge] [STATE-ERROR] Scraping error on ${url}: ${error.message}`);
         res.status(500).json({ error: 'Scraping failed', streams: [] });
     } finally {
         if (context) {
