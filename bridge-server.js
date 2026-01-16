@@ -9,12 +9,33 @@ const streamCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 let browser;
 
 function isValidStreamUrl(url) {
-    if (!url || typeof url !== 'string') return false;
-    const adPattern = /[/_-]ad([/_-]|$)/;
+    if (!url || typeof url !== 'string' || url.startsWith('blob:')) return false;
+
+    // Explicitly exclude non-video assets
+    if (url.match(/\.(js|css|png|jpg|jpeg|gif|woff|woff2|svg|json)(\?.*)?$/i)) return false;
+
+    const adPattern = /[/_-]ad([/_-]|$)|static\.doubleclick\.net|google-analytics\.com|rocket-loader/i;
     if (adPattern.test(url)) return false;
-    const isDirectVideo = url.split('?')[0].match(/\.(mp4|m3u8|mkv|webm)$/i);
-    const isCommonStream = url.includes('m3u8') || url.includes('googleusercontent') || url.includes('storage.googleapis.com');
-    return isDirectVideo || isCommonStream;
+
+    const videoExtensions = /\.(mp4|m3u8|mkv|webm|ts)(\?.*)?$/i;
+    const isDirectVideo = videoExtensions.test(url);
+
+    const streamKeywords = [
+        'm3u8', 'googleusercontent.com', 'storage.googleapis.com',
+        '/video.mp4', 'video.mp4', 'manifest.mpd'
+    ];
+    // Strict check for .mp4 to avoid matching domain names like mp4upload.com
+    const hasStrictVideoPattern = /\.(mp4|m3u8|mpd)(\/|\?|$)/.test(url);
+    const hasStreamKeyword = streamKeywords.some(keyword => url.includes(keyword)) || hasStrictVideoPattern;
+
+    const embedPagePattern = /(embed|player|iframe|\/v\/|\/e\/)/i;
+    // An embed page URL like host.com/embed/123 is not a direct stream unless it ends with a video extension
+    const isLikelyEmbedPage = embedPagePattern.test(url) && !isDirectVideo;
+
+    if (isDirectVideo) return true;
+    if (hasStreamKeyword && !isLikelyEmbedPage) return true;
+
+    return false;
 }
 
 const PROVIDERS = {
@@ -115,34 +136,53 @@ async function extractVideoUrl(context, url, referer = null) {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Referer': referer || new URL(url).origin,
         });
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
 
-        const detectedProvider = Object.keys(PROVIDERS).find(p => url.includes(p));
-        const extractor = detectedProvider ? PROVIDERS[detectedProvider] : null;
-
-        let videoUrl;
-        if (extractor) {
-            videoUrl = await extractor(page);
-        } else {
-            videoUrl = await page.evaluate(() => {
-                const video = document.querySelector('video');
-                if (video?.src) return video.src;
-                const source = document.querySelector('video source');
-                if (source?.src) return source.src;
-                const scripts = Array.from(document.querySelectorAll('script'));
-                for (const script of scripts) {
-                    const match = script.textContent.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/);
-                    if (match) return match[0];
+        let videoUrl = null;
+        const videoPromise = new Promise((resolve) => {
+            page.on('request', request => {
+                const reqUrl = request.url();
+                if (isValidStreamUrl(reqUrl) && !reqUrl.includes('google-analytics') && !reqUrl.includes('doubleclick')) {
+                    resolve(reqUrl);
                 }
-                return null;
             });
+            // Fallback timeout for the promise
+            setTimeout(() => resolve(null), 25000);
+        });
+
+        const navPromise = page.goto(url, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+
+        // Wait for either a network-detected video URL or page navigation to finish
+        videoUrl = await Promise.race([videoPromise, navPromise.then(() => null)]);
+
+        if (!videoUrl) {
+            const detectedProvider = Object.keys(PROVIDERS).find(p => url.includes(p));
+            const extractor = detectedProvider ? PROVIDERS[detectedProvider] : null;
+
+            if (extractor) {
+                videoUrl = await extractor(page);
+            } else {
+                videoUrl = await page.evaluate(() => {
+                    const video = document.querySelector('video');
+                    if (video?.src && !video.src.startsWith('blob:')) return video.src;
+                    const source = document.querySelector('video source');
+                    if (source?.src) return source.src;
+                    const scripts = Array.from(document.querySelectorAll('script'));
+                    for (const script of scripts) {
+                        const match = script.textContent.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/);
+                        if (match) return match[0];
+                    }
+                    return null;
+                });
+            }
         }
 
         if (videoUrl && isValidStreamUrl(videoUrl)) {
             streamCache.set(cacheKey, videoUrl);
             return videoUrl;
         } else if (videoUrl) {
-            console.log(`[Bridge] ⚠️ Invalid stream URL detected: ${videoUrl}`);
+            console.log(`[Bridge] ⚠️ Invalid stream URL detected or rejected for ${url}: ${videoUrl}`);
+        } else {
+            console.log(`[Bridge] ❌ No video URL found for ${url}`);
         }
         return null;
     } finally {
