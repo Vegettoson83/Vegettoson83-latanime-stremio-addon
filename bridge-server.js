@@ -149,6 +149,7 @@ app.post('/scrape', async (req, res) => {
         const page = await context.newPage();
 
         console.log(`[Bridge] Scraping latanime page: ${url}`);
+
         await page.goto(url, { waitUntil: 'domcontentloaded' });
 
         const providers = await page.evaluate(() => {
