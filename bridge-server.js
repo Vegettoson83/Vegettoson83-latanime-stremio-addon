@@ -200,8 +200,9 @@ app.post('/scrape', async (req, res) => {
     if (!url) {
         return res.status(400).json({ error: 'URL is required' });
     }
-    if (!browser) {
-        return res.status(503).json({ error: 'Browser not initialized' });
+    if (!browser || !browser.isConnected()) {
+        console.log('[Bridge] Browser not initialized or disconnected, restarting...');
+        await startBrowser();
     }
 
     let context;
