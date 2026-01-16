@@ -159,7 +159,10 @@ async function extractVideoUrl(context, url, referer = null) {
             const extractor = detectedProvider ? PROVIDERS[detectedProvider] : null;
 
             if (extractor) {
-                videoUrl = await extractor(page);
+                videoUrl = await extractor(page).catch(e => {
+                    console.error(`[Bridge] Extractor error for ${url}: ${e.message}`);
+                    return null;
+                });
             } else {
                 videoUrl = await page.evaluate(() => {
                     const video = document.querySelector('video');
