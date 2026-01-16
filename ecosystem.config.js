@@ -7,6 +7,7 @@ module.exports = {
         NODE_ENV: 'production',
         PORT: 10000,
         BRIDGE_URL: 'http://localhost:3001',
+        SB_API_KEY: 'REPLACE_WITH_YOUR_SCRAPINGBEE_API_KEY',
       },
     },
     {
