@@ -81,6 +81,22 @@ const PROVIDERS = {
     'dsvplay.com': async (page) => {
         await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
         return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'ok.ru': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src || document.querySelector('video source')?.src);
+    },
+    'doodstream.com': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src || document.querySelector('video source')?.src);
+    },
+    'uqload.io': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src || document.querySelector('video source')?.src);
+    },
+    'uqload.bz': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src || document.querySelector('video source')?.src);
     }
 };
 
@@ -125,6 +141,8 @@ async function extractVideoUrl(context, url, referer = null) {
         if (videoUrl && isValidStreamUrl(videoUrl)) {
             streamCache.set(cacheKey, videoUrl);
             return videoUrl;
+        } else if (videoUrl) {
+            console.log(`[Bridge] ⚠️ Invalid stream URL detected: ${videoUrl}`);
         }
         return null;
     } finally {
@@ -171,6 +189,7 @@ app.post('/scrape', async (req, res) => {
 
         const resolvedStreams = [];
         for (const provider of providers) {
+            if (!browser || !browser.isConnected()) break;
             let providerPage = null;
             try {
                 providerPage = await context.newPage();
@@ -183,7 +202,7 @@ app.post('/scrape', async (req, res) => {
                     }
                 });
 
-                await providerPage.goto(provider.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                await providerPage.goto(provider.url, { waitUntil: 'domcontentloaded', timeout: 10000 });
 
                 const finalUrl = await providerPage.evaluate(() => {
                     const redirMatch = document.body.innerHTML.match(/var redir = atob\("([^"]+)"\);/);
@@ -240,7 +259,7 @@ app.post('/scrape', async (req, res) => {
         res.status(500).json({ error: 'Scraping failed', streams: [] });
     } finally {
         if (context) {
-            await context.close();
+            await context.close().catch(() => {});
         }
     }
 });
