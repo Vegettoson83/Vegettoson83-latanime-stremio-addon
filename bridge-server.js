@@ -57,7 +57,8 @@ function isValidStreamUrl(url) {
         /[/_-]ad([/_-]|$)|[?&]ad=/i,
         /doubleclick|google-analytics|googletagmanager|pixel|track|analytics|telemetry|onesignal/i,
         /cloudflare-static|rocket-loader/i,
-        /license|popunder|onclick/i
+        /license|popunder|onclick/i,
+        /test-videos\.co\.uk/i
     ];
     if (adNoisePatterns.some(p => p.test(url))) return false;
 
@@ -226,9 +227,21 @@ const PROVIDERS = {
         await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
         return page.evaluate(() => document.querySelector('video')?.src);
     },
-    'listeamed': async (page) => {
+    'dsvplay.com': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'savefiles.com': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'mega.nz': async (page) => {
         await page.waitForTimeout(5000);
-        return null;
+        return null; // Rely on network interception for mega
+    },
+    'listeamed': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
     },
     'vidsrc': async (page) => {
         await page.waitForSelector('iframe', { timeout: 10000 }).catch(() => {});
@@ -246,6 +259,22 @@ const PROVIDERS = {
         return page.evaluate(() => document.querySelector('video')?.src);
     },
     'lvturbo': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'sendvid.com': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'streamtape.com': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'streamwish.to': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'vidmoly.to': async (page) => {
         await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
         return page.evaluate(() => document.querySelector('video')?.src);
     }
@@ -325,7 +354,12 @@ async function extractVideoUrl(context, url, referer = null) {
                     if (match) return match[0];
                 }
                 return null;
-            })
+            }),
+            // Strategy: Patience (Last Resort)
+            async (p) => {
+                await new Promise(r => setTimeout(r, 5000));
+                return videoUrl;
+            }
         ];
 
         videoUrl = await mahoraga.turnWheel(page, strategies);
@@ -438,7 +472,7 @@ app.post('/scrape', async (req, res) => {
         const dlSelectors = [
             'a[href*="pixeldrain.com"]', 'a[href*="mediafire.com"]', 'a[href*="mega.nz"]',
             'a[href*="gofile.io"]', 'a[href*="drive.google.com"]', 'a[href*="1fichier.com"]',
-            'a[download]'
+            'a[href*="1cloudfile.com"]', 'a[download]'
         ];
         $(dlSelectors.join(',')).each((i, el) => {
             const href = $(el).attr('href');
