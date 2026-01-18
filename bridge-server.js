@@ -1,6 +1,8 @@
 const express = require('express');
 const playwright = require('playwright');
 const NodeCache = require('node-cache');
+const cheerio = require('cheerio');
+const { fetchWithScrapingBee } = require('./lib/scraping');
 
 const app = express();
 app.use(express.json());
@@ -8,27 +10,185 @@ app.use(express.json());
 const streamCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 let browser;
 
+function isValidStreamUrl(url) {
+    if (!url || typeof url !== 'string' || url.startsWith('blob:')) return false;
+
+    // Explicitly exclude non-video assets
+    if (url.match(/\.(js|css|png|jpg|jpeg|gif|woff|woff2|svg|json)(\?.*)?$/i)) return false;
+
+    const adPattern = /[/_-]ad([/_-]|$)|static\.doubleclick\.net|google-analytics\.com|rocket-loader/i;
+    if (adPattern.test(url)) return false;
+
+    const videoExtensions = /\.(mp4|m3u8|mkv|webm|ts|mov|avi)(\?.*)?$/i;
+    const isDirectVideo = videoExtensions.test(url);
+
+    const streamKeywords = [
+        'm3u8', 'googleusercontent.com', 'storage.googleapis.com',
+        '/video.mp4', 'video.mp4', 'manifest.mpd', '.mp4?', '.m3u8?', 'playlist', 'master.m3u8',
+        'okcdn.ru', 'vk.com/video_ext.php'
+    ];
+    // Strict check for .mp4 to avoid matching domain names like mp4upload.com
+    const hasStrictVideoPattern = /\.(mp4|m3u8|mpd|ts)(\/|\?|$)/i.test(url);
+    const hasStreamKeyword = streamKeywords.some(keyword => url.toLowerCase().includes(keyword.toLowerCase())) || hasStrictVideoPattern;
+
+    const embedPagePattern = /(embed|player|iframe|\/v\/|\/e\/)/i;
+    // An embed page URL like host.com/embed/123 is not a direct stream unless it ends with a video extension
+    const isLikelyEmbedPage = embedPagePattern.test(url) && !isDirectVideo;
+
+    if (isDirectVideo) return true;
+    if (hasStreamKeyword && !isLikelyEmbedPage) return true;
+
+    return false;
+}
+
 const PROVIDERS = {
     'yourupload.com': async (page) => {
-        await page.waitForSelector('video');
-        return page.evaluate(() => document.querySelector('video')?.src || document.querySelector('video source')?.src);
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => {
+            const video = document.querySelector('video');
+            if (video?.src && !video.src.startsWith('blob:')) return video.src;
+            const source = document.querySelector('video source');
+            if (source?.src) return source.src;
+            return null;
+        });
     },
     'mp4upload.com': async (page) => {
-        await page.waitForSelector('video', { state: 'visible', timeout: 20000 });
+        await page.waitForSelector('video', { state: 'visible', timeout: 20000 }).catch(() => {});
         return page.evaluate(() => {
             const scripts = Array.from(document.querySelectorAll('script'));
             for (const script of scripts) {
-                const match = script.textContent.match(/https?:\/\/[^"']+\.(mp4|m3u8)[^"']*/);
-                if (match) return match[0];
+                const match1 = script.textContent.match(/player\.src\("([^"]+)"\)/);
+                if (match1) return match1[1];
+                const match2 = script.textContent.match(/https?:\/\/[^"']+\.(mp4|m3u8)[^"']*/);
+                if (match2) return match2[0];
             }
             const video = document.querySelector('video');
             return video?.src || video?.querySelector('source')?.src;
         });
     },
-    'vidsrc.to': async (page) => {
-        await page.waitForSelector('iframe');
-        const iframeSrc = await page.$eval('iframe', el => el.src);
-        if (iframeSrc.includes('m3u8')) return iframeSrc;
+    'voe.sx': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => {
+            const scripts = Array.from(document.querySelectorAll('script'));
+            for (const script of scripts) {
+                const match = script.textContent.match(/'hls':\s*'([^']+)'/) ||
+                              script.textContent.match(/"hls":\s*"([^"]+)"/) ||
+                              script.textContent.match(/mp4':\s*'([^']+)'/);
+                if (match) return match[1];
+            }
+            const video = document.querySelector('video');
+            return video?.src || video?.querySelector('source')?.src;
+        });
+    },
+    'filemoon.sx': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => {
+            const scripts = Array.from(document.querySelectorAll('script'));
+            for (const script of scripts) {
+                const match = script.textContent.match(/file:\s*"([^"]+m3u8[^"]*)"/);
+                if (match) return match[1];
+            }
+            return document.querySelector('video')?.src;
+        });
+    },
+    'ok.ru': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => {
+            const video = document.querySelector('video');
+            if (video?.src && !video.src.startsWith('blob:')) return video.src;
+            const meta = document.querySelector('div[data-options]');
+            if (meta) {
+                try {
+                    const options = JSON.parse(meta.getAttribute('data-options'));
+                    const metadata = JSON.parse(options.flashvars.metadata);
+                    const streams = metadata.videos;
+                    if (streams && streams.length > 0) {
+                        return streams[streams.length - 1].url; // Highest quality
+                    }
+                } catch (e) {}
+            }
+            return null;
+        });
+    },
+    'doodstream.com': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => {
+            const video = document.querySelector('video');
+            if (video?.src && !video.src.startsWith('blob:')) return video.src;
+            const scripts = Array.from(document.querySelectorAll('script'));
+            for (const script of scripts) {
+                const match = script.textContent.match(/https?:\/\/[^"']+\.(?:mp4|m3u8|webm)[^"']*/);
+                if (match) return match[0];
+            }
+            return null;
+        });
+    },
+    'mixdrop': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => {
+            const video = document.querySelector('video');
+            if (video?.src && !video.src.startsWith('blob:')) return video.src;
+            const scripts = Array.from(document.querySelectorAll('script'));
+            for (const script of scripts) {
+                const match = script.textContent.match(/MDCore\.wurl\s*=\s*"([^"]+)"/);
+                if (match) return match[1].startsWith('//') ? 'https:' + match[1] : match[1];
+            }
+            return null;
+        });
+    },
+    'uqload': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => {
+            const scripts = Array.from(document.querySelectorAll('script'));
+            for (const script of scripts) {
+                const match = script.textContent.match(/sources:\s*\["([^"]+)"\]/);
+                if (match) return match[1];
+            }
+            const video = document.querySelector('video');
+            return video?.src || video?.querySelector('source')?.src;
+        });
+    },
+    'luluvdo': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => {
+            const scripts = Array.from(document.querySelectorAll('script'));
+            for (const script of scripts) {
+                const match = script.textContent.match(/file:\s*"([^"]+m3u8[^"]*)"/);
+                if (match) return match[1];
+            }
+            return document.querySelector('video')?.src;
+        });
+    },
+    'lulu': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'vidply': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'myvidplay': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'fembed': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'mxdrop': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'm1xdrop': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'listeamed': async (page) => {
+        await page.waitForTimeout(5000);
+        return null;
+    },
+    'vidsrc': async (page) => {
+        await page.waitForSelector('iframe', { timeout: 10000 }).catch(() => {});
         return page.evaluate(() => {
             const scripts = document.querySelectorAll('script');
             for (const script of scripts) {
@@ -37,6 +197,14 @@ const PROVIDERS = {
             }
             return null;
         });
+    },
+    'wolfstream': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'lvturbo': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
     }
 };
 
@@ -55,36 +223,84 @@ async function extractVideoUrl(context, url, referer = null) {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Referer': referer || new URL(url).origin,
         });
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
 
-        const detectedProvider = Object.keys(PROVIDERS).find(p => url.includes(p));
-        const extractor = detectedProvider ? PROVIDERS[detectedProvider] : null;
+        let videoUrl = null;
+        page.on('request', request => {
+            const reqUrl = request.url();
+            if (isValidStreamUrl(reqUrl) && !videoUrl) {
+                console.log(`[Bridge] 🎯 Potential video URL detected via network: ${reqUrl.substring(0, 100)}...`);
+                videoUrl = reqUrl;
+            }
+        });
 
-        let videoUrl;
-        if (extractor) {
-            videoUrl = await extractor(page);
-        } else {
-            videoUrl = await page.evaluate(() => {
-                const video = document.querySelector('video');
-                if (video?.src) return video.src;
-                const source = document.querySelector('video source');
-                if (source?.src) return source.src;
-                const scripts = Array.from(document.querySelectorAll('script'));
-                for (const script of scripts) {
-                    const match = script.textContent.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/);
-                    if (match) return match[0];
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+
+        // Wait up to 5s for initial network detection
+        let checkCount = 0;
+        while (!videoUrl && checkCount < 10) {
+            await new Promise(r => setTimeout(r, 500));
+            checkCount++;
+        }
+
+        // If not found yet, try clicking to trigger play (limited attempts)
+        if (!videoUrl) {
+            console.log(`[Bridge] No video found yet for ${url}, attempting to trigger play...`);
+            const playButtonSelectors = ['div.play-button', 'button.vjs-big-play-button', '.jw-display-icon-container', '#vplayer', 'video', 'body'];
+            for (const selector of playButtonSelectors) {
+                if (videoUrl) break;
+                try {
+                    const exists = await page.evaluate((sel) => !!document.querySelector(sel), selector).catch(() => false);
+                    if (!exists) continue;
+
+                    await page.click(selector, { timeout: 2000 }).catch(() => {});
+                    let innerCheck = 0;
+                    while (!videoUrl && innerCheck < 4) {
+                        await new Promise(r => setTimeout(r, 500));
+                        innerCheck++;
+                    }
+                } catch (e) {
+                    if (e.message.includes('context was destroyed')) break;
                 }
-                return null;
-            });
+            }
         }
 
-        if (videoUrl) {
-            streamCache.set(cacheKey, videoUrl);
+        if (!videoUrl) {
+            const detectedProvider = Object.keys(PROVIDERS).find(p => url.includes(p));
+            const extractor = detectedProvider ? PROVIDERS[detectedProvider] : null;
+
+            if (extractor) {
+                videoUrl = await extractor(page).catch(e => {
+                    console.error(`[Bridge] Extractor error for ${url}: ${e.message}`);
+                    return null;
+                });
+            } else {
+                videoUrl = await page.evaluate(() => {
+                    const video = document.querySelector('video');
+                    if (video?.src && !video.src.startsWith('blob:')) return video.src;
+                    const source = document.querySelector('video source');
+                    if (source?.src) return source.src;
+                    const scripts = Array.from(document.querySelectorAll('script'));
+                    for (const script of scripts) {
+                        const match = script.textContent.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/);
+                        if (match) return match[0];
+                    }
+                    return null;
+                }).catch(() => null);
+            }
         }
-        return videoUrl;
+
+        if (videoUrl && isValidStreamUrl(videoUrl)) {
+            streamCache.set(cacheKey, videoUrl);
+            return videoUrl;
+        } else if (videoUrl) {
+            console.log(`[Bridge] ⚠️ Invalid stream URL detected or rejected for ${url}: ${videoUrl}`);
+        } else {
+            console.log(`[Bridge] ❌ No video URL found for ${url}`);
+        }
+        return null;
     } finally {
         if (page) {
-            await page.close();
+            await page.close().catch(() => {});
         }
     }
 }
@@ -94,41 +310,40 @@ app.post('/scrape', async (req, res) => {
     if (!url) {
         return res.status(400).json({ error: 'URL is required' });
     }
-    if (!browser) {
-        return res.status(503).json({ error: 'Browser not initialized' });
+    if (!browser || !browser.isConnected()) {
+        console.log('[Bridge] Browser not initialized or disconnected, restarting...');
+        await startBrowser();
     }
 
     let context;
     try {
-        context = await browser.newContext();
-        const page = await context.newPage();
+        console.log(`[Bridge] Scraping latanime page via ScrapingBee: ${url}`);
+        const html = await fetchWithScrapingBee(url, true);
+        const $ = cheerio.load(html);
 
-        console.log(`[Bridge] Scraping latanime page: ${url}`);
-        await page.goto(url, { waitUntil: 'domcontentloaded' });
-
-        const providers = await page.evaluate(() => {
-            const results = [];
-            const baseKey = document.querySelector('div.player')?.getAttribute('data-key');
-            if (!baseKey) return [];
-            const basePlayerUrl = atob(baseKey);
-            document.querySelectorAll('a.play-video').forEach(el => {
-                const providerName = el.textContent.trim();
-                const encodedPart = el.getAttribute('data-player');
+        const providers = [];
+        const baseKey = $('div.player').attr('data-key');
+        if (baseKey) {
+            const basePlayerUrl = Buffer.from(baseKey, 'base64').toString();
+            $('a.play-video').each((i, el) => {
+                const providerName = $(el).text().trim();
+                const encodedPart = $(el).attr('data-player');
                 if (encodedPart) {
-                    const intermediateUrl = providerName.toLowerCase() === 'yourupload' ? atob(encodedPart) : basePlayerUrl + encodedPart;
-                    results.push({ url: intermediateUrl, title: providerName });
+                    const intermediateUrl = providerName.toLowerCase() === 'yourupload' ? Buffer.from(encodedPart, 'base64').toString() : basePlayerUrl + encodedPart;
+                    providers.push({ url: intermediateUrl, title: providerName });
                 }
             });
-            return results;
-        });
+        }
+
         console.log(`[Bridge] Found ${providers.length} potential providers.`);
+        context = await browser.newContext();
 
         const resolvedStreams = [];
-        for (const provider of providers) {
+        const processProvider = async (provider) => {
+            if (!browser || !browser.isConnected()) return;
             let providerPage = null;
             try {
                 providerPage = await context.newPage();
-                // Optimization: Don't load images or CSS
                 await providerPage.route('**/*', (route) => {
                     if (['image', 'stylesheet', 'font'].includes(route.request().resourceType())) {
                         route.abort();
@@ -137,18 +352,18 @@ app.post('/scrape', async (req, res) => {
                     }
                 });
 
-                await providerPage.goto(provider.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                await providerPage.goto(provider.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
 
                 const finalUrl = await providerPage.evaluate(() => {
                     const redirMatch = document.body.innerHTML.match(/var redir = atob\("([^"]+)"\);/);
                     return redirMatch ? atob(redirMatch[1]) : null;
-                });
+                }).catch(() => null);
 
-                if (finalUrl && !finalUrl.includes('listeamed.net')) {
-                    console.log(`[Bridge] Found valid final embed URL for ${provider.title}: ${finalUrl.substring(0, 60)}...`);
+                if (finalUrl) {
+                    console.log(`[Bridge] Found final embed for ${provider.title}`);
                     const videoUrl = await extractVideoUrl(context, finalUrl, provider.url);
                     if (videoUrl) {
-                        console.log(`[Bridge] ✅ Extracted: ${provider.title} -> ${videoUrl.substring(0, 60)}...`);
+                        console.log(`[Bridge] ✅ Extracted: ${provider.title}`);
                         resolvedStreams.push({
                             name: 'Latanime',
                             url: videoUrl,
@@ -165,25 +380,31 @@ app.post('/scrape', async (req, res) => {
                     }
                 }
             } catch (e) {
-                console.error(`[Bridge] Failed processing provider ${provider.title} (${provider.url}): ${e.message}`);
+                console.error(`[Bridge] Error processing ${provider.title}: ${e.message}`);
             } finally {
-                if (providerPage) await providerPage.close();
+                if (providerPage) await providerPage.close().catch(() => {});
             }
+        };
+
+        // Process in concurrent batches
+        const batchSize = 3;
+        for (let i = 0; i < providers.length; i += batchSize) {
+            const batch = providers.slice(i, i + batchSize);
+            await Promise.all(batch.map(p => processProvider(p)));
         }
 
-        const downloadLinks = await page.evaluate(() => {
-            const links = [];
-            const selectors = [
-                'a[href*="pixeldrain.com"]', 'a[href*="mediafire.com"]', 'a[href*="mega.nz"]',
-                'a[href*="gofile.io"]', 'a[href*="drive.google.com"]', 'a[href*="1fichier.com"]',
-                'a[download]'
-            ];
-            document.querySelectorAll(selectors.join(',')).forEach(el => {
-                if (el.href) links.push({ url: el.href, title: `📥 ${el.textContent.trim() || 'Download'}` });
-            });
-            return links;
+        const downloadLinks = [];
+        const dlSelectors = [
+            'a[href*="pixeldrain.com"]', 'a[href*="mediafire.com"]', 'a[href*="mega.nz"]',
+            'a[href*="gofile.io"]', 'a[href*="drive.google.com"]', 'a[href*="1fichier.com"]',
+            'a[download]'
+        ];
+        $(dlSelectors.join(',')).each((i, el) => {
+            const href = $(el).attr('href');
+            if (href) {
+                downloadLinks.push({ url: href, title: `📥 ${$(el).text().trim() || 'Download'}` });
+            }
         });
-        await page.close();
 
         const allStreams = [...resolvedStreams, ...downloadLinks];
         console.log(`[Bridge] Total streams found: ${allStreams.length}`);
@@ -194,7 +415,7 @@ app.post('/scrape', async (req, res) => {
         res.status(500).json({ error: 'Scraping failed', streams: [] });
     } finally {
         if (context) {
-            await context.close();
+            await context.close().catch(() => {});
         }
     }
 });
@@ -203,14 +424,14 @@ const port = process.env.BRIDGE_PORT || 3001;
 
 async function startBrowser() {
     try {
+        if (browser && browser.isConnected()) return;
         browser = await playwright.chromium.launch({
             headless: true,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--single-process'
+                '--disable-gpu'
             ]
         });
         console.log('[Bridge] Playwright browser launched successfully.');
