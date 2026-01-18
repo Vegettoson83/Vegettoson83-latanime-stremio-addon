@@ -4,6 +4,9 @@ FROM mcr.microsoft.com/playwright:v1.45.0-jammy
 # Set the working directory in the container
 WORKDIR /app
 
+# Set Playwright browser path
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 # Copy package.json and package-lock.json to leverage Docker cache
 COPY package*.json ./
 
