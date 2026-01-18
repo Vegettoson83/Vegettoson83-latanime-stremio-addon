@@ -10,33 +10,76 @@ app.use(express.json());
 const streamCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 let browser;
 
+/**
+ * MAHORAGA ADAPTATION ENGINE v1.0
+ * Implementation of the Adaptive Intelligence Framework for Stream Extraction.
+ */
+class Mahoraga {
+    constructor(url) {
+        this.url = url;
+        this.rotation = 0;
+        this.phenomena = [];
+        this.adapted = false;
+        this.masteredUrl = null;
+    }
+
+    async turnWheel(page, strategies) {
+        console.log(`[Mahoraga] Turning the wheel... Rotation: ${++this.rotation} for ${this.url}`);
+        for (const strategy of strategies) {
+            try {
+                const result = await strategy(page);
+                if (result && isValidStreamUrl(result)) {
+                    console.log(`[Mahoraga] ✅ Adaptation complete. Phenomenon mastered.`);
+                    this.adapted = true;
+                    this.masteredUrl = result;
+                    return result;
+                }
+            } catch (e) {
+                console.error(`[Mahoraga] Rotation ${this.rotation} failed strategy: ${e.message}`);
+            }
+        }
+        return null;
+    }
+}
+
+/**
+ * SAITAMA ONE PUNCH VALIDATOR v1.0
+ * Definitive filtering logic to identify valid video streams and eliminate ad-noise.
+ */
 function isValidStreamUrl(url) {
     if (!url || typeof url !== 'string' || url.startsWith('blob:')) return false;
 
-    // Explicitly exclude non-video assets
-    if (url.match(/\.(js|css|png|jpg|jpeg|gif|woff|woff2|svg|json)(\?.*)?$/i)) return false;
+    // Negative constraints (Force escape from ad-noise)
+    const blacklistedAssets = /\.(js|css|png|jpg|jpeg|gif|woff|woff2|svg|json|html|php|aspx|txt|xml)(\?.*)?$/i;
+    if (blacklistedAssets.test(url)) return false;
 
-    const adPattern = /[/_-]ad([/_-]|$)|static\.doubleclick\.net|google-analytics\.com|rocket-loader/i;
-    if (adPattern.test(url)) return false;
-
-    const videoExtensions = /\.(mp4|m3u8|mkv|webm|ts|mov|avi)(\?.*)?$/i;
-    const isDirectVideo = videoExtensions.test(url);
-
-    const streamKeywords = [
-        'm3u8', 'googleusercontent.com', 'storage.googleapis.com',
-        '/video.mp4', 'video.mp4', 'manifest.mpd', '.mp4?', '.m3u8?', 'playlist', 'master.m3u8',
-        'okcdn.ru', 'vk.com/video_ext.php'
+    const adNoisePatterns = [
+        /[/_-]ad([/_-]|$)|[?&]ad=/i,
+        /doubleclick|google-analytics|googletagmanager|pixel|track|analytics|telemetry|onesignal/i,
+        /cloudflare-static|rocket-loader/i,
+        /license|popunder|onclick/i
     ];
-    // Strict check for .mp4 to avoid matching domain names like mp4upload.com
-    const hasStrictVideoPattern = /\.(mp4|m3u8|mpd|ts)(\/|\?|$)/i.test(url);
-    const hasStreamKeyword = streamKeywords.some(keyword => url.toLowerCase().includes(keyword.toLowerCase())) || hasStrictVideoPattern;
+    if (adNoisePatterns.some(p => p.test(url))) return false;
 
-    const embedPagePattern = /(embed|player|iframe|\/v\/|\/e\/)/i;
-    // An embed page URL like host.com/embed/123 is not a direct stream unless it ends with a video extension
-    const isLikelyEmbedPage = embedPagePattern.test(url) && !isDirectVideo;
+    // Positive constraints (Identify the One True Stream)
+    const directVideoExtensions = /\.(mp4|m3u8|mkv|webm|ts|mov|avi|mpd)(\/|\?|$)/i;
+    if (directVideoExtensions.test(url)) return true;
 
-    if (isDirectVideo) return true;
-    if (hasStreamKeyword && !isLikelyEmbedPage) return true;
+    const highConfidenceHosts = [
+        'googleusercontent.com',
+        'storage.googleapis.com',
+        'googlevideo.com',
+        'okcdn.ru',
+        'vk.com/video_ext.php'
+    ];
+    if (highConfidenceHosts.some(h => url.includes(h))) return true;
+
+    const streamKeywords = ['/video.mp4', 'video.mp4', 'playlist', 'master.m3u8', 'chunk'];
+    if (streamKeywords.some(k => url.toLowerCase().includes(k))) {
+        // Prevent matching hostnames or embed pages as streams
+        const isEmbedPage = /(embed|player|iframe|\/v\/|\/e\/)/i.test(url);
+        return !isEmbedPage;
+    }
 
     return false;
 }
@@ -216,11 +259,12 @@ async function extractVideoUrl(context, url, referer = null) {
         return cached;
     }
 
+    const mahoraga = new Mahoraga(url);
     let page;
     try {
         page = await context.newPage();
         await page.setExtraHTTPHeaders({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Referer': referer || new URL(url).origin,
         });
 
@@ -228,75 +272,71 @@ async function extractVideoUrl(context, url, referer = null) {
         page.on('request', request => {
             const reqUrl = request.url();
             if (isValidStreamUrl(reqUrl) && !videoUrl) {
-                console.log(`[Bridge] 🎯 Potential video URL detected via network: ${reqUrl.substring(0, 100)}...`);
+                console.log(`[Mahoraga] 👁️ Phenomenon Detected (Network): ${reqUrl.substring(0, 80)}...`);
                 videoUrl = reqUrl;
             }
         });
 
+        // ROTATION 1: PASSIVE OBSERVATION
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
 
-        // Wait up to 5s for initial network detection
-        let checkCount = 0;
-        while (!videoUrl && checkCount < 10) {
+        let waitCount = 0;
+        while (!videoUrl && waitCount < 10) {
             await new Promise(r => setTimeout(r, 500));
-            checkCount++;
+            waitCount++;
         }
 
-        // If not found yet, try clicking to trigger play (limited attempts)
-        if (!videoUrl) {
-            console.log(`[Bridge] No video found yet for ${url}, attempting to trigger play...`);
-            const playButtonSelectors = ['div.play-button', 'button.vjs-big-play-button', '.jw-display-icon-container', '#vplayer', 'video', 'body'];
-            for (const selector of playButtonSelectors) {
-                if (videoUrl) break;
-                try {
-                    const exists = await page.evaluate((sel) => !!document.querySelector(sel), selector).catch(() => false);
-                    if (!exists) continue;
+        if (videoUrl) return mahoraga.turnWheel(page, [() => videoUrl]);
 
-                    await page.click(selector, { timeout: 2000 }).catch(() => {});
-                    let innerCheck = 0;
-                    while (!videoUrl && innerCheck < 4) {
-                        await new Promise(r => setTimeout(r, 500));
-                        innerCheck++;
-                    }
-                } catch (e) {
-                    if (e.message.includes('context was destroyed')) break;
+        // ROTATION 2: ACTIVE ENGAGEMENT (Pattern Matching & Interaction)
+        const strategies = [
+            // Strategy: Provider-specific Mastery
+            async (p) => {
+                const detectedProvider = Object.keys(PROVIDERS).find(key => url.includes(key));
+                return detectedProvider ? PROVIDERS[detectedProvider](p) : null;
+            },
+            // Strategy: DOM Scavenging
+            async (p) => p.evaluate(() => {
+                const video = document.querySelector('video');
+                if (video?.src && !video.src.startsWith('blob:')) return video.src;
+                const source = document.querySelector('video source');
+                return source?.src || null;
+            }),
+            // Strategy: Trigger Engagement (The "Sandal-Hat" Approach)
+            async (p) => {
+                const selectors = ['div.play-button', 'button.vjs-big-play-button', '.jw-display-icon-container', '#vplayer', 'video', 'body'];
+                for (const selector of selectors) {
+                    if (videoUrl) break;
+                    try {
+                        const exists = await p.evaluate((sel) => !!document.querySelector(sel), selector).catch(() => false);
+                        if (exists) {
+                            await p.click(selector, { timeout: 2000 }).catch(() => {});
+                            await new Promise(r => setTimeout(r, 1000));
+                        }
+                    } catch (e) {}
                 }
-            }
-        }
+                return videoUrl;
+            },
+            // Strategy: Script Archeology
+            async (p) => p.evaluate(() => {
+                const scripts = Array.from(document.querySelectorAll('script'));
+                for (const script of scripts) {
+                    const match = script.textContent.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/);
+                    if (match) return match[0];
+                }
+                return null;
+            })
+        ];
 
-        if (!videoUrl) {
-            const detectedProvider = Object.keys(PROVIDERS).find(p => url.includes(p));
-            const extractor = detectedProvider ? PROVIDERS[detectedProvider] : null;
-
-            if (extractor) {
-                videoUrl = await extractor(page).catch(e => {
-                    console.error(`[Bridge] Extractor error for ${url}: ${e.message}`);
-                    return null;
-                });
-            } else {
-                videoUrl = await page.evaluate(() => {
-                    const video = document.querySelector('video');
-                    if (video?.src && !video.src.startsWith('blob:')) return video.src;
-                    const source = document.querySelector('video source');
-                    if (source?.src) return source.src;
-                    const scripts = Array.from(document.querySelectorAll('script'));
-                    for (const script of scripts) {
-                        const match = script.textContent.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/);
-                        if (match) return match[0];
-                    }
-                    return null;
-                }).catch(() => null);
-            }
-        }
+        videoUrl = await mahoraga.turnWheel(page, strategies);
 
         if (videoUrl && isValidStreamUrl(videoUrl)) {
+            console.log(`[RECURSION-COMPLETE] Extracted valid stream: ${videoUrl.substring(0, 80)}...`);
             streamCache.set(cacheKey, videoUrl);
             return videoUrl;
-        } else if (videoUrl) {
-            console.log(`[Bridge] ⚠️ Invalid stream URL detected or rejected for ${url}: ${videoUrl}`);
-        } else {
-            console.log(`[Bridge] ❌ No video URL found for ${url}`);
         }
+
+        console.log(`[Mahoraga] ❌ Failed to adapt to ${url}. Phenomenon remains elusive.`);
         return null;
     } finally {
         if (page) {
@@ -307,6 +347,7 @@ async function extractVideoUrl(context, url, referer = null) {
 
 app.post('/scrape', async (req, res) => {
     const { url } = req.body;
+    console.log(`[STATE-SCRAPE] request: ${url}`);
     if (!url) {
         return res.status(400).json({ error: 'URL is required' });
     }
@@ -453,7 +494,11 @@ async function gracefulShutdown() {
 process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
-app.listen(port, async () => {
-    await startBrowser();
-    console.log(`[Bridge] Server listening on port ${port}`);
-});
+if (require.main === module) {
+    app.listen(port, async () => {
+        await startBrowser();
+        console.log(`[Bridge] Server listening on port ${port}`);
+    });
+}
+
+module.exports = { isValidStreamUrl };
