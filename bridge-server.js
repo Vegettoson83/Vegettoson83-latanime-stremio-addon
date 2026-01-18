@@ -40,6 +40,28 @@ class Mahoraga {
         }
         return null;
     }
+
+    static unpackJS(packed) {
+        try {
+            const args = packed.replace(/^['"]|['"]$/g, '').split(/,\s*/);
+            if (args.length < 4) return '';
+
+            let p = args[0].replace(/'/g, '');
+            const a = parseInt(args[1]) || 10;
+            const c = parseInt(args[2]) || 0;
+            const k = args[3].replace(/["']/g, '').split('|');
+
+            while (c--) {
+                if (k[c]) {
+                    const regex = new RegExp('\\b' + c.toString(a) + '\\b', 'g');
+                    p = p.replace(regex, k[c]);
+                }
+            }
+            return p;
+        } catch (e) {
+            return '';
+        }
+    }
 }
 
 /**
@@ -55,7 +77,7 @@ function isValidStreamUrl(url) {
 
     const adNoisePatterns = [
         /[/_-]ad([/_-]|$)|[?&]ad=/i,
-        /doubleclick|google-analytics|googletagmanager|pixel|track|analytics|telemetry|onesignal/i,
+        /doubleclick|google-analytics|googletagmanager|pixel|track|analytics|telemetry|onesignal|cloudflare/i,
         /cloudflare-static|rocket-loader/i,
         /license|popunder|onclick/i,
         /test-videos\.co\.uk/i
@@ -111,28 +133,39 @@ const PROVIDERS = {
         });
     },
     'voe.sx': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        const html = await page.content();
+        let match = html.match(/'hls':\s*'([^']+)'/) ||
+                    html.match(/"hls":\s*"([^"]+)"/) ||
+                    html.match(/sources:\s*\{[^}]*hls:\s*'([^']+)'/);
+        if (match) {
+            try {
+                const decoded = Buffer.from(match[1], 'base64').toString();
+                if (decoded.startsWith('http')) return decoded;
+            } catch (e) {}
+            if (match[1].startsWith('http')) return match[1];
+        }
         return page.evaluate(() => {
-            const scripts = Array.from(document.querySelectorAll('script'));
-            for (const script of scripts) {
-                const match = script.textContent.match(/'hls':\s*'([^']+)'/) ||
-                              script.textContent.match(/"hls":\s*"([^"]+)"/) ||
-                              script.textContent.match(/mp4':\s*'([^']+)'/);
-                if (match) return match[1];
-            }
             const video = document.querySelector('video');
             return video?.src || video?.querySelector('source')?.src;
         });
     },
     'filemoon.sx': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        const html = await page.content();
+        let match = html.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+        if (match) {
+            const decoded = Mahoraga.unpackJS(match[1]);
+            const urlMatch = decoded.match(/file:"([^"]+)"/);
+            if (urlMatch) return urlMatch[1];
+        }
         return page.evaluate(() => {
+            const video = document.querySelector('video');
+            if (video?.src && !video.src.startsWith('blob:')) return video.src;
             const scripts = Array.from(document.querySelectorAll('script'));
             for (const script of scripts) {
-                const match = script.textContent.match(/file:\s*"([^"]+m3u8[^"]*)"/);
-                if (match) return match[1];
+                const m = script.textContent.match(/file:\s*"([^"]+m3u8[^"]*)"/);
+                if (m) return m[1];
             }
-            return document.querySelector('video')?.src;
+            return null;
         });
     },
     'ok.ru': async (page) => {
@@ -155,30 +188,34 @@ const PROVIDERS = {
         });
     },
     'doodstream.com': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
-        return page.evaluate(() => {
-            const video = document.querySelector('video');
-            if (video?.src && !video.src.startsWith('blob:')) return video.src;
-            const scripts = Array.from(document.querySelectorAll('script'));
-            for (const script of scripts) {
-                const match = script.textContent.match(/https?:\/\/[^"']+\.(?:mp4|m3u8|webm)[^"']*/);
-                if (match) return match[0];
-            }
-            return null;
-        });
+        const url = page.url();
+        const html = await page.content();
+        const passMatch = html.match(/\/pass_md5\/([^'"\s]+)/);
+        if (!passMatch) return null;
+
+        const passUrl = `https://${new URL(url).hostname}/pass_md5/${passMatch[1]}`;
+        const token = await page.evaluate(async (pUrl) => {
+            const resp = await fetch(pUrl);
+            return resp.text();
+        }, passUrl);
+
+        const randomStr = Array.from({length: 10}, () =>
+            'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 62)]
+        ).join('');
+
+        return `https://${new URL(url).hostname}${passMatch[1]}${randomStr}?token=${token}&expiry=${Date.now()}`;
     },
     'mixdrop': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
-        return page.evaluate(() => {
-            const video = document.querySelector('video');
-            if (video?.src && !video.src.startsWith('blob:')) return video.src;
-            const scripts = Array.from(document.querySelectorAll('script'));
-            for (const script of scripts) {
-                const match = script.textContent.match(/MDCore\.wurl\s*=\s*"([^"]+)"/);
-                if (match) return match[1].startsWith('//') ? 'https:' + match[1] : match[1];
-            }
-            return null;
-        });
+        const html = await page.content();
+        let match = html.match(/MDCore\.wurl\s*=\s*"([^"]+)"/) || html.match(/wurl\s*=\s*"([^"]+)"/);
+        if (match) {
+            try {
+                const decoded = Buffer.from(match[1], 'base64').toString();
+                return decoded.startsWith('//') ? 'https:' + decoded : (decoded.startsWith('http') ? decoded : null);
+            } catch (e) {}
+            return match[1].startsWith('//') ? 'https:' + match[1] : match[1];
+        }
+        return page.evaluate(() => document.querySelector('video')?.src);
     },
     'uqload': async (page) => {
         await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
@@ -193,14 +230,16 @@ const PROVIDERS = {
         });
     },
     'luluvdo': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        const html = await page.content();
+        let match = html.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+        if (match) {
+            const decoded = Mahoraga.unpackJS(match[1]);
+            const urlMatch = decoded.match(/file:"([^"]+)"/);
+            if (urlMatch) return urlMatch[1];
+        }
         return page.evaluate(() => {
-            const scripts = Array.from(document.querySelectorAll('script'));
-            for (const script of scripts) {
-                const match = script.textContent.match(/file:\s*"([^"]+m3u8[^"]*)"/);
-                if (match) return match[1];
-            }
-            return document.querySelector('video')?.src;
+            const video = document.querySelector('video');
+            return video?.src || video?.querySelector('source')?.src;
         });
     },
     'lulu': async (page) => {
@@ -228,7 +267,13 @@ const PROVIDERS = {
         return page.evaluate(() => document.querySelector('video')?.src);
     },
     'dsvplay.com': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        const html = await page.content();
+        const packed = html.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+        if (packed) {
+            const decoded = Mahoraga.unpackJS(packed[1]);
+            const urlMatch = decoded.match(/file:"([^"]+)"/);
+            if (urlMatch) return urlMatch[1];
+        }
         return page.evaluate(() => document.querySelector('video')?.src);
     },
     'savefiles.com': async (page) => {
@@ -267,7 +312,19 @@ const PROVIDERS = {
         return page.evaluate(() => document.querySelector('video')?.src);
     },
     'streamtape.com': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        const url = page.url().replace('/e/', '/v/');
+        if (url !== page.url()) await page.goto(url, { waitUntil: 'domcontentloaded' }).catch(() => {});
+
+        const html = await page.content();
+        const norobotMatch = html.match(/getElementById\('norobotlink'\)\.innerHTML = (.+?);/);
+        const linkMatch = html.match(/id\s*=\s*["']ideoooolink["'][^>]*>([^<]+)</);
+
+        if (norobotMatch && linkMatch) {
+            const tokenMatch = norobotMatch[1].match(/token=([^&']+)/);
+            if (tokenMatch) {
+                return `https:/${linkMatch[1].trim()}&token=${tokenMatch[1]}&stream=1`;
+            }
+        }
         return page.evaluate(() => document.querySelector('video')?.src);
     },
     'streamwish.to': async (page) => {
@@ -275,7 +332,35 @@ const PROVIDERS = {
         return page.evaluate(() => document.querySelector('video')?.src);
     },
     'vidmoly.to': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        const html = await page.content();
+        const packed = html.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+        if (packed) {
+            const decoded = Mahoraga.unpackJS(packed[1]);
+            const urlMatch = decoded.match(/file:"([^"]+)"/);
+            if (urlMatch) return urlMatch[1];
+        }
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'vidoza.net': async (page) => {
+        const html = await page.content();
+        const match = html.match(/src:\s*"([^"]+\.mp4[^"']*)"/);
+        if (match) return match[1];
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'supervideo.tv': async (page) => {
+        const html = await page.content();
+        const packed = html.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+        if (packed) {
+            const decoded = Mahoraga.unpackJS(packed[1]);
+            const urlMatch = decoded.match(/file:"([^"]+)"/);
+            if (urlMatch) return urlMatch[1];
+        }
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'upstream.to': async (page) => {
+        const html = await page.content();
+        const match = html.match(/file:\s*"([^"]+\.m3u8[^"']*)"/);
+        if (match) return match[1];
         return page.evaluate(() => document.querySelector('video')?.src);
     }
 };
@@ -303,6 +388,9 @@ async function extractVideoUrl(context, url, referer = null) {
             if (isValidStreamUrl(reqUrl) && !videoUrl) {
                 console.log(`[Mahoraga] 👁️ Phenomenon Detected (Network): ${reqUrl.substring(0, 80)}...`);
                 videoUrl = reqUrl;
+            } else if (reqUrl.includes('.mp4') || reqUrl.includes('.m3u8')) {
+                // Log why it was rejected
+                // console.log(`[Mahoraga] 👁️ Potential stream rejected: ${reqUrl.substring(0, 80)}...`);
             }
         });
 
@@ -347,14 +435,23 @@ async function extractVideoUrl(context, url, referer = null) {
                 return videoUrl;
             },
             // Strategy: Script Archeology
-            async (p) => p.evaluate(() => {
-                const scripts = Array.from(document.querySelectorAll('script'));
+            async (p) => {
+                const scripts = await p.evaluate(() => Array.from(document.querySelectorAll('script')).map(s => s.textContent));
                 for (const script of scripts) {
-                    const match = script.textContent.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/);
-                    if (match) return match[0];
+                    // Check for common video URL patterns
+                    const match = script.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/);
+                    if (match && isValidStreamUrl(match[0])) return match[0];
+
+                    // Check for packed JS in ANY script as a fallback
+                    const packed = script.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+                    if (packed) {
+                        const decoded = Mahoraga.unpackJS(packed[1]);
+                        const urlMatch = decoded.match(/file:"([^"]+)"/) || decoded.match(/src:"([^"]+)"/);
+                        if (urlMatch && isValidStreamUrl(urlMatch[1])) return urlMatch[1];
+                    }
                 }
                 return null;
-            }),
+            },
             // Strategy: Patience (Last Resort)
             async (p) => {
                 await new Promise(r => setTimeout(r, 5000));
@@ -462,7 +559,7 @@ app.post('/scrape', async (req, res) => {
         };
 
         // Process in concurrent batches
-        const batchSize = 3;
+        const batchSize = 4;
         for (let i = 0; i < providers.length; i += batchSize) {
             const batch = providers.slice(i, i + batchSize);
             await Promise.all(batch.map(p => processProvider(p)));
