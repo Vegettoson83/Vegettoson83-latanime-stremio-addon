@@ -28,3 +28,11 @@ npm run start:bridge
 ```
 
 *Note: You will need to add `start:addon` and `start:bridge` scripts to your `package.json` for this to work.*
+
+## Configuration
+
+The following environment variables are required:
+- `SB_API_KEY`: Your ScrapingBee API key (Mandatory).
+- `RENDER_API_KEY`: Your Render API key (Optional, for deployment management).
+- `PORT`: Addon server port (Default: 10000).
+- `BRIDGE_PORT`: Scraping bridge port (Default: 3001).

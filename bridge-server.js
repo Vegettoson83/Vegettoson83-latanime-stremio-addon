@@ -10,33 +10,99 @@ app.use(express.json());
 const streamCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 let browser;
 
+/**
+ * MAHORAGA ADAPTATION ENGINE v1.0
+ * Implementation of the Adaptive Intelligence Framework for Stream Extraction.
+ */
+class Mahoraga {
+    constructor(url) {
+        this.url = url;
+        this.rotation = 0;
+        this.phenomena = [];
+        this.adapted = false;
+        this.masteredUrl = null;
+    }
+
+    async turnWheel(page, strategies) {
+        console.log(`[Mahoraga] Turning the wheel... Rotation: ${++this.rotation} for ${this.url}`);
+        for (const strategy of strategies) {
+            try {
+                const result = await strategy(page);
+                if (result && isValidStreamUrl(result)) {
+                    console.log(`[Mahoraga] ✅ Adaptation complete. Phenomenon mastered.`);
+                    this.adapted = true;
+                    this.masteredUrl = result;
+                    return result;
+                }
+            } catch (e) {
+                console.error(`[Mahoraga] Rotation ${this.rotation} failed strategy: ${e.message}`);
+            }
+        }
+        return null;
+    }
+
+    static unpackJS(packed) {
+        try {
+            const args = packed.replace(/^['"]|['"]$/g, '').split(/,\s*/);
+            if (args.length < 4) return '';
+
+            let p = args[0].replace(/'/g, '');
+            const a = parseInt(args[1]) || 10;
+            const c = parseInt(args[2]) || 0;
+            const k = args[3].replace(/["']/g, '').split('|');
+
+            while (c--) {
+                if (k[c]) {
+                    const regex = new RegExp('\\b' + c.toString(a) + '\\b', 'g');
+                    p = p.replace(regex, k[c]);
+                }
+            }
+            return p;
+        } catch (e) {
+            return '';
+        }
+    }
+}
+
+/**
+ * SAITAMA ONE PUNCH VALIDATOR v1.0
+ * Definitive filtering logic to identify valid video streams and eliminate ad-noise.
+ */
 function isValidStreamUrl(url) {
     if (!url || typeof url !== 'string' || url.startsWith('blob:')) return false;
 
-    // Explicitly exclude non-video assets
-    if (url.match(/\.(js|css|png|jpg|jpeg|gif|woff|woff2|svg|json)(\?.*)?$/i)) return false;
+    // Negative constraints (Force escape from ad-noise)
+    const blacklistedAssets = /\.(js|css|png|jpg|jpeg|gif|woff|woff2|svg|json|html|php|aspx|txt|xml)(\?.*)?$/i;
+    if (blacklistedAssets.test(url)) return false;
 
-    const adPattern = /[/_-]ad([/_-]|$)|static\.doubleclick\.net|google-analytics\.com|rocket-loader/i;
-    if (adPattern.test(url)) return false;
-
-    const videoExtensions = /\.(mp4|m3u8|mkv|webm|ts|mov|avi)(\?.*)?$/i;
-    const isDirectVideo = videoExtensions.test(url);
-
-    const streamKeywords = [
-        'm3u8', 'googleusercontent.com', 'storage.googleapis.com',
-        '/video.mp4', 'video.mp4', 'manifest.mpd', '.mp4?', '.m3u8?', 'playlist', 'master.m3u8',
-        'okcdn.ru', 'vk.com/video_ext.php'
+    const adNoisePatterns = [
+        /[/_-]ad([/_-]|$)|[?&]ad=/i,
+        /doubleclick|google-analytics|googletagmanager|pixel|track|analytics|telemetry|onesignal|cloudflare/i,
+        /cloudflare-static|rocket-loader/i,
+        /license|popunder|onclick/i,
+        /test-videos\.co\.uk/i
     ];
-    // Strict check for .mp4 to avoid matching domain names like mp4upload.com
-    const hasStrictVideoPattern = /\.(mp4|m3u8|mpd|ts)(\/|\?|$)/i.test(url);
-    const hasStreamKeyword = streamKeywords.some(keyword => url.toLowerCase().includes(keyword.toLowerCase())) || hasStrictVideoPattern;
+    if (adNoisePatterns.some(p => p.test(url))) return false;
 
-    const embedPagePattern = /(embed|player|iframe|\/v\/|\/e\/)/i;
-    // An embed page URL like host.com/embed/123 is not a direct stream unless it ends with a video extension
-    const isLikelyEmbedPage = embedPagePattern.test(url) && !isDirectVideo;
+    // Positive constraints (Identify the One True Stream)
+    const directVideoExtensions = /\.(mp4|m3u8|mkv|webm|ts|mov|avi|mpd)(\/|\?|$)/i;
+    if (directVideoExtensions.test(url)) return true;
 
-    if (isDirectVideo) return true;
-    if (hasStreamKeyword && !isLikelyEmbedPage) return true;
+    const highConfidenceHosts = [
+        'googleusercontent.com',
+        'storage.googleapis.com',
+        'googlevideo.com',
+        'okcdn.ru',
+        'vk.com/video_ext.php'
+    ];
+    if (highConfidenceHosts.some(h => url.includes(h))) return true;
+
+    const streamKeywords = ['/video.mp4', 'video.mp4', 'playlist', 'master.m3u8', 'chunk'];
+    if (streamKeywords.some(k => url.toLowerCase().includes(k))) {
+        // Prevent matching hostnames or embed pages as streams
+        const isEmbedPage = /(embed|player|iframe|\/v\/|\/e\/)/i.test(url);
+        return !isEmbedPage;
+    }
 
     return false;
 }
@@ -67,28 +133,39 @@ const PROVIDERS = {
         });
     },
     'voe.sx': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        const html = await page.content();
+        let match = html.match(/'hls':\s*'([^']+)'/) ||
+                    html.match(/"hls":\s*"([^"]+)"/) ||
+                    html.match(/sources:\s*\{[^}]*hls:\s*'([^']+)'/);
+        if (match) {
+            try {
+                const decoded = Buffer.from(match[1], 'base64').toString();
+                if (decoded.startsWith('http')) return decoded;
+            } catch (e) {}
+            if (match[1].startsWith('http')) return match[1];
+        }
         return page.evaluate(() => {
-            const scripts = Array.from(document.querySelectorAll('script'));
-            for (const script of scripts) {
-                const match = script.textContent.match(/'hls':\s*'([^']+)'/) ||
-                              script.textContent.match(/"hls":\s*"([^"]+)"/) ||
-                              script.textContent.match(/mp4':\s*'([^']+)'/);
-                if (match) return match[1];
-            }
             const video = document.querySelector('video');
             return video?.src || video?.querySelector('source')?.src;
         });
     },
     'filemoon.sx': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        const html = await page.content();
+        let match = html.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+        if (match) {
+            const decoded = Mahoraga.unpackJS(match[1]);
+            const urlMatch = decoded.match(/file:"([^"]+)"/);
+            if (urlMatch) return urlMatch[1];
+        }
         return page.evaluate(() => {
+            const video = document.querySelector('video');
+            if (video?.src && !video.src.startsWith('blob:')) return video.src;
             const scripts = Array.from(document.querySelectorAll('script'));
             for (const script of scripts) {
-                const match = script.textContent.match(/file:\s*"([^"]+m3u8[^"]*)"/);
-                if (match) return match[1];
+                const m = script.textContent.match(/file:\s*"([^"]+m3u8[^"]*)"/);
+                if (m) return m[1];
             }
-            return document.querySelector('video')?.src;
+            return null;
         });
     },
     'ok.ru': async (page) => {
@@ -111,30 +188,34 @@ const PROVIDERS = {
         });
     },
     'doodstream.com': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
-        return page.evaluate(() => {
-            const video = document.querySelector('video');
-            if (video?.src && !video.src.startsWith('blob:')) return video.src;
-            const scripts = Array.from(document.querySelectorAll('script'));
-            for (const script of scripts) {
-                const match = script.textContent.match(/https?:\/\/[^"']+\.(?:mp4|m3u8|webm)[^"']*/);
-                if (match) return match[0];
-            }
-            return null;
-        });
+        const url = page.url();
+        const html = await page.content();
+        const passMatch = html.match(/\/pass_md5\/([^'"\s]+)/);
+        if (!passMatch) return null;
+
+        const passUrl = `https://${new URL(url).hostname}/pass_md5/${passMatch[1]}`;
+        const token = await page.evaluate(async (pUrl) => {
+            const resp = await fetch(pUrl);
+            return resp.text();
+        }, passUrl);
+
+        const randomStr = Array.from({length: 10}, () =>
+            'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 62)]
+        ).join('');
+
+        return `https://${new URL(url).hostname}${passMatch[1]}${randomStr}?token=${token}&expiry=${Date.now()}`;
     },
     'mixdrop': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
-        return page.evaluate(() => {
-            const video = document.querySelector('video');
-            if (video?.src && !video.src.startsWith('blob:')) return video.src;
-            const scripts = Array.from(document.querySelectorAll('script'));
-            for (const script of scripts) {
-                const match = script.textContent.match(/MDCore\.wurl\s*=\s*"([^"]+)"/);
-                if (match) return match[1].startsWith('//') ? 'https:' + match[1] : match[1];
-            }
-            return null;
-        });
+        const html = await page.content();
+        let match = html.match(/MDCore\.wurl\s*=\s*"([^"]+)"/) || html.match(/wurl\s*=\s*"([^"]+)"/);
+        if (match) {
+            try {
+                const decoded = Buffer.from(match[1], 'base64').toString();
+                return decoded.startsWith('//') ? 'https:' + decoded : (decoded.startsWith('http') ? decoded : null);
+            } catch (e) {}
+            return match[1].startsWith('//') ? 'https:' + match[1] : match[1];
+        }
+        return page.evaluate(() => document.querySelector('video')?.src);
     },
     'uqload': async (page) => {
         await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
@@ -149,14 +230,16 @@ const PROVIDERS = {
         });
     },
     'luluvdo': async (page) => {
-        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        const html = await page.content();
+        let match = html.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+        if (match) {
+            const decoded = Mahoraga.unpackJS(match[1]);
+            const urlMatch = decoded.match(/file:"([^"]+)"/);
+            if (urlMatch) return urlMatch[1];
+        }
         return page.evaluate(() => {
-            const scripts = Array.from(document.querySelectorAll('script'));
-            for (const script of scripts) {
-                const match = script.textContent.match(/file:\s*"([^"]+m3u8[^"]*)"/);
-                if (match) return match[1];
-            }
-            return document.querySelector('video')?.src;
+            const video = document.querySelector('video');
+            return video?.src || video?.querySelector('source')?.src;
         });
     },
     'lulu': async (page) => {
@@ -183,9 +266,27 @@ const PROVIDERS = {
         await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
         return page.evaluate(() => document.querySelector('video')?.src);
     },
-    'listeamed': async (page) => {
+    'dsvplay.com': async (page) => {
+        const html = await page.content();
+        const packed = html.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+        if (packed) {
+            const decoded = Mahoraga.unpackJS(packed[1]);
+            const urlMatch = decoded.match(/file:"([^"]+)"/);
+            if (urlMatch) return urlMatch[1];
+        }
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'savefiles.com': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'mega.nz': async (page) => {
         await page.waitForTimeout(5000);
-        return null;
+        return null; // Rely on network interception for mega
+    },
+    'listeamed': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
     },
     'vidsrc': async (page) => {
         await page.waitForSelector('iframe', { timeout: 10000 }).catch(() => {});
@@ -205,6 +306,62 @@ const PROVIDERS = {
     'lvturbo': async (page) => {
         await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
         return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'sendvid.com': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'streamtape.com': async (page) => {
+        const url = page.url().replace('/e/', '/v/');
+        if (url !== page.url()) await page.goto(url, { waitUntil: 'domcontentloaded' }).catch(() => {});
+
+        const html = await page.content();
+        const norobotMatch = html.match(/getElementById\('norobotlink'\)\.innerHTML = (.+?);/);
+        const linkMatch = html.match(/id\s*=\s*["']ideoooolink["'][^>]*>([^<]+)</);
+
+        if (norobotMatch && linkMatch) {
+            const tokenMatch = norobotMatch[1].match(/token=([^&']+)/);
+            if (tokenMatch) {
+                return `https:/${linkMatch[1].trim()}&token=${tokenMatch[1]}&stream=1`;
+            }
+        }
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'streamwish.to': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'vidmoly.to': async (page) => {
+        const html = await page.content();
+        const packed = html.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+        if (packed) {
+            const decoded = Mahoraga.unpackJS(packed[1]);
+            const urlMatch = decoded.match(/file:"([^"]+)"/);
+            if (urlMatch) return urlMatch[1];
+        }
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'vidoza.net': async (page) => {
+        const html = await page.content();
+        const match = html.match(/src:\s*"([^"]+\.mp4[^"']*)"/);
+        if (match) return match[1];
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'supervideo.tv': async (page) => {
+        const html = await page.content();
+        const packed = html.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+        if (packed) {
+            const decoded = Mahoraga.unpackJS(packed[1]);
+            const urlMatch = decoded.match(/file:"([^"]+)"/);
+            if (urlMatch) return urlMatch[1];
+        }
+        return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'upstream.to': async (page) => {
+        const html = await page.content();
+        const match = html.match(/file:\s*"([^"]+\.m3u8[^"']*)"/);
+        if (match) return match[1];
+        return page.evaluate(() => document.querySelector('video')?.src);
     }
 };
 
@@ -216,11 +373,12 @@ async function extractVideoUrl(context, url, referer = null) {
         return cached;
     }
 
+    const mahoraga = new Mahoraga(url);
     let page;
     try {
         page = await context.newPage();
         await page.setExtraHTTPHeaders({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Referer': referer || new URL(url).origin,
         });
 
@@ -228,75 +386,88 @@ async function extractVideoUrl(context, url, referer = null) {
         page.on('request', request => {
             const reqUrl = request.url();
             if (isValidStreamUrl(reqUrl) && !videoUrl) {
-                console.log(`[Bridge] 🎯 Potential video URL detected via network: ${reqUrl.substring(0, 100)}...`);
+                console.log(`[Mahoraga] 👁️ Phenomenon Detected (Network): ${reqUrl.substring(0, 80)}...`);
                 videoUrl = reqUrl;
+            } else if (reqUrl.includes('.mp4') || reqUrl.includes('.m3u8')) {
+                // Log why it was rejected
+                // console.log(`[Mahoraga] 👁️ Potential stream rejected: ${reqUrl.substring(0, 80)}...`);
             }
         });
 
+        // ROTATION 1: PASSIVE OBSERVATION
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
 
-        // Wait up to 5s for initial network detection
-        let checkCount = 0;
-        while (!videoUrl && checkCount < 10) {
+        let waitCount = 0;
+        while (!videoUrl && waitCount < 10) {
             await new Promise(r => setTimeout(r, 500));
-            checkCount++;
+            waitCount++;
         }
 
-        // If not found yet, try clicking to trigger play (limited attempts)
-        if (!videoUrl) {
-            console.log(`[Bridge] No video found yet for ${url}, attempting to trigger play...`);
-            const playButtonSelectors = ['div.play-button', 'button.vjs-big-play-button', '.jw-display-icon-container', '#vplayer', 'video', 'body'];
-            for (const selector of playButtonSelectors) {
-                if (videoUrl) break;
-                try {
-                    const exists = await page.evaluate((sel) => !!document.querySelector(sel), selector).catch(() => false);
-                    if (!exists) continue;
+        if (videoUrl) return mahoraga.turnWheel(page, [() => videoUrl]);
 
-                    await page.click(selector, { timeout: 2000 }).catch(() => {});
-                    let innerCheck = 0;
-                    while (!videoUrl && innerCheck < 4) {
-                        await new Promise(r => setTimeout(r, 500));
-                        innerCheck++;
-                    }
-                } catch (e) {
-                    if (e.message.includes('context was destroyed')) break;
+        // ROTATION 2: ACTIVE ENGAGEMENT (Pattern Matching & Interaction)
+        const strategies = [
+            // Strategy: Provider-specific Mastery
+            async (p) => {
+                const detectedProvider = Object.keys(PROVIDERS).find(key => url.includes(key));
+                return detectedProvider ? PROVIDERS[detectedProvider](p) : null;
+            },
+            // Strategy: DOM Scavenging
+            async (p) => p.evaluate(() => {
+                const video = document.querySelector('video');
+                if (video?.src && !video.src.startsWith('blob:')) return video.src;
+                const source = document.querySelector('video source');
+                return source?.src || null;
+            }),
+            // Strategy: Trigger Engagement (The "Sandal-Hat" Approach)
+            async (p) => {
+                const selectors = ['div.play-button', 'button.vjs-big-play-button', '.jw-display-icon-container', '#vplayer', 'video', 'body'];
+                for (const selector of selectors) {
+                    if (videoUrl) break;
+                    try {
+                        const exists = await p.evaluate((sel) => !!document.querySelector(sel), selector).catch(() => false);
+                        if (exists) {
+                            await p.click(selector, { timeout: 2000 }).catch(() => {});
+                            await new Promise(r => setTimeout(r, 1000));
+                        }
+                    } catch (e) {}
                 }
-            }
-        }
+                return videoUrl;
+            },
+            // Strategy: Script Archeology
+            async (p) => {
+                const scripts = await p.evaluate(() => Array.from(document.querySelectorAll('script')).map(s => s.textContent));
+                for (const script of scripts) {
+                    // Check for common video URL patterns
+                    const match = script.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/);
+                    if (match && isValidStreamUrl(match[0])) return match[0];
 
-        if (!videoUrl) {
-            const detectedProvider = Object.keys(PROVIDERS).find(p => url.includes(p));
-            const extractor = detectedProvider ? PROVIDERS[detectedProvider] : null;
-
-            if (extractor) {
-                videoUrl = await extractor(page).catch(e => {
-                    console.error(`[Bridge] Extractor error for ${url}: ${e.message}`);
-                    return null;
-                });
-            } else {
-                videoUrl = await page.evaluate(() => {
-                    const video = document.querySelector('video');
-                    if (video?.src && !video.src.startsWith('blob:')) return video.src;
-                    const source = document.querySelector('video source');
-                    if (source?.src) return source.src;
-                    const scripts = Array.from(document.querySelectorAll('script'));
-                    for (const script of scripts) {
-                        const match = script.textContent.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/);
-                        if (match) return match[0];
+                    // Check for packed JS in ANY script as a fallback
+                    const packed = script.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+                    if (packed) {
+                        const decoded = Mahoraga.unpackJS(packed[1]);
+                        const urlMatch = decoded.match(/file:"([^"]+)"/) || decoded.match(/src:"([^"]+)"/);
+                        if (urlMatch && isValidStreamUrl(urlMatch[1])) return urlMatch[1];
                     }
-                    return null;
-                }).catch(() => null);
+                }
+                return null;
+            },
+            // Strategy: Patience (Last Resort)
+            async (p) => {
+                await new Promise(r => setTimeout(r, 5000));
+                return videoUrl;
             }
-        }
+        ];
+
+        videoUrl = await mahoraga.turnWheel(page, strategies);
 
         if (videoUrl && isValidStreamUrl(videoUrl)) {
+            console.log(`[RECURSION-COMPLETE] Extracted valid stream: ${videoUrl.substring(0, 80)}...`);
             streamCache.set(cacheKey, videoUrl);
             return videoUrl;
-        } else if (videoUrl) {
-            console.log(`[Bridge] ⚠️ Invalid stream URL detected or rejected for ${url}: ${videoUrl}`);
-        } else {
-            console.log(`[Bridge] ❌ No video URL found for ${url}`);
         }
+
+        console.log(`[Mahoraga] ❌ Failed to adapt to ${url}. Phenomenon remains elusive.`);
         return null;
     } finally {
         if (page) {
@@ -307,6 +478,7 @@ async function extractVideoUrl(context, url, referer = null) {
 
 app.post('/scrape', async (req, res) => {
     const { url } = req.body;
+    console.log(`[STATE-SCRAPE] request: ${url}`);
     if (!url) {
         return res.status(400).json({ error: 'URL is required' });
     }
@@ -387,7 +559,7 @@ app.post('/scrape', async (req, res) => {
         };
 
         // Process in concurrent batches
-        const batchSize = 3;
+        const batchSize = 4;
         for (let i = 0; i < providers.length; i += batchSize) {
             const batch = providers.slice(i, i + batchSize);
             await Promise.all(batch.map(p => processProvider(p)));
@@ -397,7 +569,7 @@ app.post('/scrape', async (req, res) => {
         const dlSelectors = [
             'a[href*="pixeldrain.com"]', 'a[href*="mediafire.com"]', 'a[href*="mega.nz"]',
             'a[href*="gofile.io"]', 'a[href*="drive.google.com"]', 'a[href*="1fichier.com"]',
-            'a[download]'
+            'a[href*="1cloudfile.com"]', 'a[download]'
         ];
         $(dlSelectors.join(',')).each((i, el) => {
             const href = $(el).attr('href');
@@ -453,7 +625,11 @@ async function gracefulShutdown() {
 process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
-app.listen(port, async () => {
-    await startBrowser();
-    console.log(`[Bridge] Server listening on port ${port}`);
-});
+if (require.main === module) {
+    app.listen(port, async () => {
+        await startBrowser();
+        console.log(`[Bridge] Server listening on port ${port}`);
+    });
+}
+
+module.exports = { isValidStreamUrl };
