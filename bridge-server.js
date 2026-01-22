@@ -16,7 +16,7 @@ function isValidStreamUrl(url) {
     // Explicitly exclude non-video assets
     if (url.match(/\.(js|css|png|jpg|jpeg|gif|woff|woff2|svg|json)(\?.*)?$/i)) return false;
 
-    const adPattern = /[/_-]ad([/_-]|$)|static\.doubleclick\.net|google-analytics\.com|rocket-loader/i;
+    const adPattern = /[/_-]ad([/_-]|$)|[?&]ad=|static\.doubleclick\.net|google-analytics\.com|rocket-loader/i;
     if (adPattern.test(url)) return false;
 
     const videoExtensions = /\.(mp4|m3u8|mkv|webm|ts|mov|avi)(\?.*)?$/i;
