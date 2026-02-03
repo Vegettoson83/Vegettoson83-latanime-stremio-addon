@@ -4,7 +4,7 @@ This is a Stremio addon that provides streams from latanime.org.
 
 ## Deployment
 
-This addon is designed to be deployed as a single Docker container, suitable for platforms like Render that expose a single port. The application runs two processes internally (the addon and the scraping bridge) using `pm2`.
+This addon is designed to be deployed as a single Docker container, suitable for platforms like Render that expose a single port.
 
 1.  Clone this repository.
 2.  Build the Docker image:
@@ -18,13 +18,7 @@ This addon is designed to be deployed as a single Docker container, suitable for
 
 ## Local Development
 
-For local development, you can run the services directly:
+For local development, you can run the service directly:
 ```
-# Terminal 1: Start the addon
-npm run start:addon
-
-# Terminal 2: Start the bridge
-npm run start:bridge
+npm start
 ```
-
-*Note: You will need to add `start:addon` and `start:bridge` scripts to your `package.json` for this to work.*
