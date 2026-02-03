@@ -6,7 +6,6 @@ const { defineHandlers } = require('./lib/handlers');
 
 const builder = new addonBuilder(manifest);
 
-// The browser instance is now managed by the bridge service.
 defineHandlers(builder);
 
 const addonInterface = builder.getInterface();
@@ -27,7 +26,6 @@ app.listen(port, () => {
     console.log(`Addon server listening on port ${port}`);
 });
 
-// Graceful shutdown is simplified as there's no browser to close.
 process.on('SIGINT', () => {
     console.log('Addon server shutting down.');
     process.exit(0);
