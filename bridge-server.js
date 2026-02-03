@@ -16,7 +16,7 @@ function isValidStreamUrl(url) {
     // Explicitly exclude non-video assets
     if (url.match(/\.(js|css|png|jpg|jpeg|gif|woff|woff2|svg|json)(\?.*)?$/i)) return false;
 
-    const adPattern = /[/_-]ad([/_-]|$)|static\.doubleclick\.net|google-analytics\.com|rocket-loader/i;
+    const adPattern = /[/_-]ad([/_-]|$)|[?&]ad=|static\.doubleclick\.net|google-analytics\.com|rocket-loader/i;
     if (adPattern.test(url)) return false;
 
     const videoExtensions = /\.(mp4|m3u8|mkv|webm|ts|mov|avi)(\?.*)?$/i;
@@ -25,7 +25,7 @@ function isValidStreamUrl(url) {
     const streamKeywords = [
         'm3u8', 'googleusercontent.com', 'storage.googleapis.com',
         '/video.mp4', 'video.mp4', 'manifest.mpd', '.mp4?', '.m3u8?', 'playlist', 'master.m3u8',
-        'okcdn.ru', 'vk.com/video_ext.php'
+        'okcdn.ru', 'vk.com/video_ext.php', '/pass/', '/stream/', '/hls/'
     ];
     // Strict check for .mp4 to avoid matching domain names like mp4upload.com
     const hasStrictVideoPattern = /\.(mp4|m3u8|mpd|ts)(\/|\?|$)/i.test(url);
@@ -245,7 +245,10 @@ async function extractVideoUrl(context, url, referer = null) {
         // If not found yet, try clicking to trigger play (limited attempts)
         if (!videoUrl) {
             console.log(`[Bridge] No video found yet for ${url}, attempting to trigger play...`);
-            const playButtonSelectors = ['div.play-button', 'button.vjs-big-play-button', '.jw-display-icon-container', '#vplayer', 'video', 'body'];
+            const playButtonSelectors = [
+                'div.play-button', 'button.vjs-big-play-button', '.jw-display-icon-container',
+                'button[aria-label*="Play"]', '#start', '#vplayer', 'video', 'body'
+            ];
             for (const selector of playButtonSelectors) {
                 if (videoUrl) break;
                 try {
@@ -329,7 +332,15 @@ app.post('/scrape', async (req, res) => {
                 const providerName = $(el).text().trim();
                 const encodedPart = $(el).attr('data-player');
                 if (encodedPart) {
-                    const intermediateUrl = providerName.toLowerCase() === 'yourupload' ? Buffer.from(encodedPart, 'base64').toString() : basePlayerUrl + encodedPart;
+                    let directUrl;
+                    try {
+                        const decoded = Buffer.from(encodedPart, 'base64').toString();
+                        if (decoded.startsWith('http')) {
+                            directUrl = decoded;
+                        }
+                    } catch (e) {}
+
+                    const intermediateUrl = directUrl || (basePlayerUrl + encodedPart);
                     providers.push({ url: intermediateUrl, title: providerName });
                 }
             });
@@ -354,13 +365,18 @@ app.post('/scrape', async (req, res) => {
 
                 await providerPage.goto(provider.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
 
-                const finalUrl = await providerPage.evaluate(() => {
+                let finalUrl = await providerPage.evaluate(() => {
                     const redirMatch = document.body.innerHTML.match(/var redir = atob\("([^"]+)"\);/);
                     return redirMatch ? atob(redirMatch[1]) : null;
                 }).catch(() => null);
 
+                // If no redir found, and it's not the reproductor, assume provider.url is the final embed URL
+                if (!finalUrl && !provider.url.includes('latanime.org/reproductor')) {
+                    finalUrl = provider.url;
+                }
+
                 if (finalUrl) {
-                    console.log(`[Bridge] Found final embed for ${provider.title}`);
+                    console.log(`[Bridge] Found final embed for ${provider.title}: ${finalUrl}`);
                     const videoUrl = await extractVideoUrl(context, finalUrl, provider.url);
                     if (videoUrl) {
                         console.log(`[Bridge] ✅ Extracted: ${provider.title}`);
