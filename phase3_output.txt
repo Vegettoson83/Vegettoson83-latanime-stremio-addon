@@ -1,0 +1,12 @@
+
+=================================================================
+EXTRACTION RESULT
+=================================================================
+Bridge method: ajax_required
+
+Players (0):
+
+Downloads (0):
+
+⚠  Player URLs are AJAX-loaded. Running Playwright fallback...
+Intercepted 0 requests:

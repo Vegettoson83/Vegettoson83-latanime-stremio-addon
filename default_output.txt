@@ -1,0 +1,156 @@
+
+=================================================================
+DIAGNOSTIC: https://latanime.org/ver/one-punch-man-temporada-3-episodio-12
+=================================================================
+HTTP 200 | 34392 chars
+
+[1] DATA ATTRIBUTES on player-related elements:
+  <img data-src='https://latanime.org/thumbs/portada/trinity-blood-castellano-1685837968.jpg?v=1.5'> text:
+  <img data-src='https://latanime.org/thumbs/portada/danny-phantom-latino-1682720936.jpg?v=1.5'> text:
+  <img data-src='https://latanime.org/thumbs/portada/maquia-una-historia-de-amor-inmortal-castellano-1696047925.jpg?v=1.5'> text:
+  <img data-src='https://latanime.org/thumbs/portada/himegoto.jpg?v=1.5'> text:
+  <img data-src='https://latanime.org/thumbs/portada/maria-sama-ga-miteru-haru-s2-castellano-1693953800.jpg?v=1.5'> text:
+  <img data-src='https://latanime.org/thumbs/portada/63ujkkla.jpg?v=1.5'> text:
+
+[2] INLINE <script> BLOCKS:
+
+  [script 0] (141 chars):
+  var direct_link = "https://minkoverseas.com/zsycza09ay?key=9814542c7f05a1de89919cce6a5896a9";
+          var sitee_url = "https://latanime.org";
+
+  [script 1] (953 chars):
+  var disqus_loaded = false;
+          var disqus_shortname = 'lati-1'; //CAMBIAR EL NOMBRE POR EL DE LA WEB
+          function disqus() {
+              if (!disqus_loaded)  {
+                  disqus_loaded = true;
+                  var e = document.createElement("script");
+                  e.type = "text/javascript";
+                  e.async = true;
+                  e.src = "//" + disqus_shortname + ".disqus.com/embed.js";
+                  (document.getElementsByTagName("head")[0] ||
+                  document.getElementsByTagName("body")[0])
+                  .appendChild(e);
+                  //Hide the button after opening
+                  document.getElementById("show-comments").style.display = "none";
+              }
+          }
+          //Opens comments when linked to directly
+          var hash = window.locati
+  ... [153 chars truncated]
+
+  [script 2] (526 chars):
+  function handleDirectLinkClick(event) {
+    event.preventDefault();
+    let originalUrl = event.currentTarget.href;
+
+    if (direct_link) {
+      var newWindow = window.open(direct_link, "_blank");
+      if (newWindow) {
+        newWindow.focus();
+        setTimeout(() => {
+          window.location.href = originalUrl;
+        }, 500);
+      }
+    } else {
+      window.location.href = event.currentTarget.href;
+    }
+  }
+
+  document.querySelectorAll("a.direct-link").forEach(function (link) {
+    link.addEventListener("click", handleDirectLinkClick);
+  });
+
+  [script 3] (64 chars):
+  var resource_token = 'ipLtO9U6MCznaXMvVRqBeAOPZc3rlsuBwRVwRARs';
+
+  [script 4] (149 chars):
+  window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'G-XJ1W8BPYNM');
+
+  [script 5] (99 chars):
+  $(document).ready(function(){
+  /*Cargar imagenes*/
+  const observer = lozad();
+  observer.observe();
+  });
+
+[3] EXTERNAL <script> SRC FILES:
+  https://latanime.org/public/js/lozad.min.js?v=2.1
+  https://latanime.org/public/js/app.js?v=2.7
+  https://latanime.org/public/js/index.js?v=3.1
+  https://latanime.org/public/js/guest.js?v=2.1
+  https://latanime.org/public/js/jquery-3.6.0.min.js
+  //vf.vinostempus.com/r8HnoItfwm4/69092
+  https://bitbelongingcontentment.com/7a/ab/db/7aabdbbf707df68abf72254eedc624b5.js
+  https://latanime.org/public/js/capitulo.js?v=2.55
+  https://www.googletagmanager.com/gtag/js?id=G-XJ1W8BPYNM
+  https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js
+  /cdn-cgi/scripts/7d0fa10a/cloudflare-static/rocket-loader.min.js
+
+[4] KNOWN VIDEO HOST URLS anywhere in HTML:
+  [savefiles] https://savefiles.com/bcaa4ehoqbxx
+  [mega] https://mega.nz/#!OIckDAQT!OuPAp81gPTIgqid8PzEAdotJCfx_GC_icQHJiJmngjc
+
+[5] PLAYER BUTTON LIST (raw HTML):
+  <ul class="cap_repro d-flex flex-wrap">
+<li id="play-video">
+<a class="play-video repro-item cap" data-player="aHR0cHM6Ly9kc3ZwbGF5LmNvbS9lLzR1b2hicnJ6aG14ag==">dsvplay</a>
+</li>
+<li id="play-video">
+<a class="play-video repro-item cap" data-player="aHR0cHM6Ly9maWxlbW9vbi5zeC9lLzdseDM0MzB0aDBsdg==">filemoon</a>
+</li>
+<li id="play-video">
+<a class="play-video repro-item cap" data-player="aHR0cHM6Ly9oZXhsb2FkLmNvbS9lbWJlZC04ZW9mM2QwYzFlMmU=">hexload</a>
+</li>
+<li id="play-video">
+<a class="play-video repro-item cap" data-player="aHR0cHM6Ly9zYXZlZmlsZXMuY29tL2UvYmNhYTRlaG9xYnh4">savefiles</a>
+</li>
+<li id="play-video">
+<a class="play-video repro-item cap" data-player="aHR0cHM6Ly9tZWdhLm56L2VtYmVkLyMhT0lja0RBUVQhT3VQQXA4MWdQVElncWlkOFB6RUFkb3RKQ2Z4X0dDX2ljUUhKaUptbmdqYw==">mega</a>
+</li>
+<li id="play-video">
+<a class="play-video repro-item cap" data-player="aHR0cHM6Ly9sdWx1dmlkLmNvbS9lL2RobmE1Mno3YWl1NQ==">lulu</a>
+</li>
+<li id="play-video">
+<a class="play-video repro-item cap" data-player="aHR0cHM6Ly9teGRyb3AudG8vZS9lbDA0N3oxZWZxZHBrdzM=">mxdrop</a>
+</li>
+<li id="play-video">
+<a class="play-video repro-item cap" data-player="aHR0cHM6Ly92b2Uuc3gvZS92enF5YzZrZHVqYWU=">voe</a>
+</li>
+<li id="play-video">
+<a class="play-video repro-item cap" data-player="aHR0cHM6Ly93d3cubXA0dXBsb2FkLmNvbS9lbWJlZC1laTNvYzFsanQ1bWouaHRtbA==">mp4upload</a>
+</li>
+</ul>
+
+[6] ONCLICK HANDLERS containing URLs:
+
+[7] RAW HTML CONTEXT around 'player' keyword (±300 chars):
+  ✗ No 'player' variable/function found in HTML
+
+=================================================================
+EXTRACTION RESULT
+=================================================================
+Bridge method: data_attributes
+
+Players (9):
+  dsvplay: https://dsvplay.com/e/4uohbrrzhmxj
+  filemoon: https://filemoon.sx/e/7lx3430th0lv
+  hexload: https://hexload.com/embed-8eof3d0c1e2e
+  savefiles: https://savefiles.com/e/bcaa4ehoqbxx
+  mega: https://mega.nz/embed/#!OIckDAQT!OuPAp81gPTIgqid8PzEAdotJCfx_GC_icQHJiJmngjc
+  lulu: https://luluvid.com/e/dhna52z7aiu5
+  mxdrop: https://mxdrop.to/e/el047z1efqdpkw3
+  voe: https://voe.sx/e/vzqyc6kdujae
+  mp4upload: https://www.mp4upload.com/embed-ei3oc1ljt5mj.html
+
+Downloads (6):
+  pixeldrain: https://pixeldrain.com/u/NZ3ECFVL
+  mega: https://mega.nz/#!OIckDAQT!OuPAp81gPTIgqid8PzEAdotJCfx_GC_icQHJiJmngjc
+  mediafire: https://mediafire.com/file/s00km43csbjikba
+  gofile: https://gofile.io/d/1Jc94Y
+  savefiles: https://savefiles.com/bcaa4ehoqbxx
+  1cloudfile: https://1cloudfile.com/3wBhn

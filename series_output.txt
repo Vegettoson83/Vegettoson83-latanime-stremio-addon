@@ -1,0 +1,11 @@
+Series: one-punch-man-temporada-3 | Episodes in HTML: 2
+
+Episode 1: https://latanime.org/ver/one-punch-man-temporada-3-episodio-1
+  Bridge: data_attributes
+  Players: ['filemoon', 'mega', 'dsvplay', 'lulu', 'mxdrop', 'listeamed', 'voe', 'mp4upload']
+  Downloads: ['pixeldrain', 'mega', 'mediafire', 'gofile', '1cloudfile']
+
+Episode 2: https://latanime.org/ver/one-punch-man-temporada-3-episodio-2
+  Bridge: data_attributes
+  Players: ['filemoon', 'mega', 'dsvplay', 'lulu', 'mxdrop', 'listeamed', 'voe', 'mp4upload']
+  Downloads: ['pixeldrain', 'mega', 'mediafire', 'gofile', '1cloudfile']
