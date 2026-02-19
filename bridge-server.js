@@ -16,7 +16,7 @@ function isValidStreamUrl(url) {
     // Explicitly exclude non-video assets
     if (url.match(/\.(js|css|png|jpg|jpeg|gif|woff|woff2|svg|json)(\?.*)?$/i)) return false;
 
-    const adPattern = /[/_-]ad([/_-]|$)|[?&]ad=|static\.doubleclick\.net|google-analytics\.com|rocket-loader/i;
+    const adPattern = /[/_-]ad([/_-]|$)|[?&]ad=|static\.doubleclick\.net|google-analytics\.com|rocket-loader|popads|onclick|syndication\.com|a\.nested/i;
     if (adPattern.test(url)) return false;
 
     const videoExtensions = /\.(mp4|m3u8|mkv|webm|ts|mov|avi)(\?.*)?$/i;
@@ -25,7 +25,8 @@ function isValidStreamUrl(url) {
     const streamKeywords = [
         'm3u8', 'googleusercontent.com', 'storage.googleapis.com',
         '/video.mp4', 'video.mp4', 'manifest.mpd', '.mp4?', '.m3u8?', 'playlist', 'master.m3u8',
-        'okcdn.ru', 'vk.com/video_ext.php', '/pass/', '/stream/', '/hls/'
+        'okcdn.ru', 'vk.com/video_ext.php', '/pass/', '/stream/', '/hls/', 'bitmovin', 'clouddn',
+        'mega.nz/embed'
     ];
     // Strict check for .mp4 to avoid matching domain names like mp4upload.com
     const hasStrictVideoPattern = /\.(mp4|m3u8|mpd|ts)(\/|\?|$)/i.test(url);
@@ -205,6 +206,19 @@ const PROVIDERS = {
     'lvturbo': async (page) => {
         await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
         return page.evaluate(() => document.querySelector('video')?.src);
+    },
+    'dsvplay.com': async (page) => {
+        await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+        return page.evaluate(() => {
+            const video = document.querySelector('video');
+            if (video?.src && !video.src.startsWith('blob:')) return video.src;
+            const source = document.querySelector('video source');
+            return source?.src || null;
+        });
+    },
+    'mega.nz': async (page) => {
+        // Mega.nz embeds are hard to scrape for direct links, so we return the embed URL itself as a fallback
+        return page.url();
     }
 };
 
@@ -235,14 +249,43 @@ async function extractVideoUrl(context, url, referer = null) {
 
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
 
-        // Wait up to 5s for initial network detection
+        // Wait up to 3s for initial network detection (reduced from 5s)
         let checkCount = 0;
-        while (!videoUrl && checkCount < 10) {
+        while (!videoUrl && checkCount < 6) {
             await new Promise(r => setTimeout(r, 500));
             checkCount++;
         }
 
-        // If not found yet, try clicking to trigger play (limited attempts)
+        // If still no video, try the specific extractor first as it's often faster/more reliable than generic triggers
+        if (!videoUrl) {
+            const detectedProvider = Object.keys(PROVIDERS).find(p => url.includes(p));
+            const extractor = detectedProvider ? PROVIDERS[detectedProvider] : null;
+
+            if (extractor) {
+                videoUrl = await extractor(page).catch(e => {
+                    console.error(`[Bridge] Extractor error for ${url}: ${e.message}`);
+                    return null;
+                });
+            }
+        }
+
+        // If still not found, try generic evaluation or clicking to trigger play
+        if (!videoUrl) {
+            videoUrl = await page.evaluate(() => {
+                const video = document.querySelector('video');
+                if (video?.src && !video.src.startsWith('blob:')) return video.src;
+                const source = document.querySelector('video source');
+                if (source?.src) return source.src;
+                const scripts = Array.from(document.querySelectorAll('script'));
+                for (const script of scripts) {
+                    const match = script.textContent.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/);
+                    if (match) return match[0];
+                }
+                return null;
+            }).catch(() => null);
+        }
+
+        // Only try clicking as a last resort
         if (!videoUrl) {
             console.log(`[Bridge] No video found yet for ${url}, attempting to trigger play...`);
             const playButtonSelectors = [
@@ -264,31 +307,6 @@ async function extractVideoUrl(context, url, referer = null) {
                 } catch (e) {
                     if (e.message.includes('context was destroyed')) break;
                 }
-            }
-        }
-
-        if (!videoUrl) {
-            const detectedProvider = Object.keys(PROVIDERS).find(p => url.includes(p));
-            const extractor = detectedProvider ? PROVIDERS[detectedProvider] : null;
-
-            if (extractor) {
-                videoUrl = await extractor(page).catch(e => {
-                    console.error(`[Bridge] Extractor error for ${url}: ${e.message}`);
-                    return null;
-                });
-            } else {
-                videoUrl = await page.evaluate(() => {
-                    const video = document.querySelector('video');
-                    if (video?.src && !video.src.startsWith('blob:')) return video.src;
-                    const source = document.querySelector('video source');
-                    if (source?.src) return source.src;
-                    const scripts = Array.from(document.querySelectorAll('script'));
-                    for (const script of scripts) {
-                        const match = script.textContent.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/);
-                        if (match) return match[0];
-                    }
-                    return null;
-                }).catch(() => null);
             }
         }
 
@@ -354,25 +372,33 @@ app.post('/scrape', async (req, res) => {
             if (!browser || !browser.isConnected()) return;
             let providerPage = null;
             try {
-                providerPage = await context.newPage();
-                await providerPage.route('**/*', (route) => {
-                    if (['image', 'stylesheet', 'font'].includes(route.request().resourceType())) {
-                        route.abort();
-                    } else {
-                        route.continue();
-                    }
-                });
-
-                await providerPage.goto(provider.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-
-                let finalUrl = await providerPage.evaluate(() => {
-                    const redirMatch = document.body.innerHTML.match(/var redir = atob\("([^"]+)"\);/);
-                    return redirMatch ? atob(redirMatch[1]) : null;
-                }).catch(() => null);
-
-                // If no redir found, and it's not the reproductor, assume provider.url is the final embed URL
-                if (!finalUrl && !provider.url.includes('latanime.org/reproductor')) {
+                let finalUrl = null;
+                // If the provider.url is already a direct link (decoded from data-player), skip the reproductor logic
+                if (provider.url.startsWith('http') && !provider.url.includes('latanime.org/reproductor')) {
                     finalUrl = provider.url;
+                }
+
+                if (!finalUrl) {
+                    providerPage = await context.newPage();
+                    await providerPage.route('**/*', (route) => {
+                        if (['image', 'stylesheet', 'font'].includes(route.request().resourceType())) {
+                            route.abort();
+                        } else {
+                            route.continue();
+                        }
+                    });
+
+                    await providerPage.goto(provider.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+
+                    finalUrl = await providerPage.evaluate(() => {
+                        const redirMatch = document.body.innerHTML.match(/var redir = atob\("([^"]+)"\);/);
+                        return redirMatch ? atob(redirMatch[1]) : null;
+                    }).catch(() => null);
+
+                    // If no redir found, and it's not the reproductor, assume provider.url is the final embed URL
+                    if (!finalUrl && !provider.url.includes('latanime.org/reproductor')) {
+                        finalUrl = provider.url;
+                    }
                 }
 
                 if (finalUrl) {
@@ -403,7 +429,7 @@ app.post('/scrape', async (req, res) => {
         };
 
         // Process in concurrent batches
-        const batchSize = 3;
+        const batchSize = 5;
         for (let i = 0; i < providers.length; i += batchSize) {
             const batch = providers.slice(i, i + batchSize);
             await Promise.all(batch.map(p => processProvider(p)));
