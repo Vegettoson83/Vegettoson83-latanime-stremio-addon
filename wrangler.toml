@@ -1,7 +1,7 @@
 name = "latanime-stremio"
 main = "src/index.ts"
-compatibility_date = "2024-09-23"
-compatibility_flags = ["nodejs_compat_v2"]
+compatibility_date = "2025-09-15"
+compatibility_flags = ["nodejs_compat"]
 
 [browser]
 binding = "MYBROWSER"
