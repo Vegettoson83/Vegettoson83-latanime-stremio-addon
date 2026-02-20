@@ -468,6 +468,21 @@ export default {
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
 
+
+    // DEBUG: fetch a URL and return first 2000 chars + all m3u8/hls matches
+    if (path === "/debug") {
+      const target = url.searchParams.get("url");
+      if (!target) return json({ error: "no url param" });
+      try {
+        const html = await fetchHtml(target);
+        const m3u8s = [...html.matchAll(/["']([^"'\s]+\.m3u8[^"'\s]*)/gi)].map(m => m[1]);
+        const hls = [...html.matchAll(/'hls'\s*:\s*'([^']+)'/gi)].map(m => m[1]);
+        const file = [...html.matchAll(/file:\s*["']([^"']+)/gi)].map(m => m[1]);
+        const packed = html.includes("eval(function(p,a,c,k");
+        return json({ size: html.length, m3u8s, hls, file, packed, preview: html.slice(0, 1000) });
+      } catch(e) { return json({ error: String(e) }); }
+    }
+
     return new Response("Not found", { status: 404, headers: CORS });
   },
 };
