@@ -519,6 +519,20 @@ export default {
 
 
 
+
+    if (path === "/debug") {
+      const target = url.searchParams.get("url");
+      if (!target) return json({ error: "no url param" });
+      try {
+        const html = await fetchHtml(target);
+        const animeLinks = [...html.matchAll(/href=["'](?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9-]+)["']/gi)].map(m=>m[1]);
+        // Grab 800 chars around the first /anime/ link to see the card structure
+        const firstIdx = html.indexOf('/anime/');
+        const context = firstIdx > 0 ? html.slice(Math.max(0, firstIdx-300), firstIdx+500) : "not found";
+        return json({ size: html.length, animeLinksCount: animeLinks.length, first5: animeLinks.slice(0,5), context });
+      } catch(e) { return json({ error: String(e) }); }
+    }
+
     return new Response("Not found", { status: 404, headers: CORS });
   },
 };
