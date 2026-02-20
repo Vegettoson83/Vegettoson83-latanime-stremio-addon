@@ -118,9 +118,12 @@ function parseAnimeCards(html: string): { id: string; name: string; poster: stri
     const pos = m.index! + m[0].length;
     const block = html.slice(pos, pos + 600);
 
-    // Title: alt attribute on img, or title attribute
-    const titleM = block.match(/alt="([^"]{3,})"/) || block.match(/title="([^"]{3,})"/);
-    const name = titleM ? titleM[1].trim() : slug;
+    // Title: h3 first (search/directory pages), then alt, then title attribute
+    const titleM =
+      block.match(/<h3[^>]*>([^<]{3,})<\/h3>/i) ||
+      block.match(/alt="([^"]{3,})"/) ||
+      block.match(/title="([^"]{3,})"/);
+    const name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
 
     // Poster: data-src preferred (lazy load), then src
     const posterM =
@@ -562,16 +565,6 @@ export default {
 
 
 
-    if (path === "/debug") {
-      const target = url.searchParams.get("url");
-      if (!target) return json({ error: "no url param" });
-      try {
-        const html = await fetchHtml(target);
-        const firstIdx = html.indexOf('/anime/');
-        const context = firstIdx > 0 ? html.slice(Math.max(0, firstIdx-200), firstIdx+600) : "not found";
-        return json({ size: html.length, context });
-      } catch(e) { return json({ error: String(e) }); }
-    }
 
     return new Response("Not found", { status: 404, headers: CORS });
   },
