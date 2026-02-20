@@ -23,15 +23,14 @@ async function extractWithBrowser(embedUrl: string): Promise<string | null> {
 
         await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36");
 
-        // Intercept requests via CDP
-        const client = await page.createCDPSession();
-        await client.send("Network.enable");
-        client.on("Network.requestWillBeSent", (params: any) => {
-          if (streamUrl) return;
-          const u = params.request.url;
-          if (u.includes(".m3u8") || (u.match(/\.mp4/) && !u.includes("analytics"))) {
+        // Enable request interception — most reliable method in puppeteer
+        await page.setRequestInterception(true);
+        page.on("request", (req: any) => {
+          const u = req.url();
+          if (!streamUrl && (u.includes(".m3u8") || (u.includes(".mp4") && !u.includes("analytics")))) {
             streamUrl = u;
           }
+          req.continue();
         });
 
         await page.goto(embedUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
@@ -41,11 +40,11 @@ async function extractWithBrowser(embedUrl: string): Promise<string | null> {
         while (!streamUrl && Date.now() < deadline) {
           await new Promise(r => setTimeout(r, 500));
           if (!streamUrl) {
-            const found = await page.evaluate(() => {
-              const v = document.querySelector("video");
+            const found: string | null = await page.evaluate(() => {
+              const v = document.querySelector("video") as HTMLVideoElement | null;
               if (v?.src?.includes(".m3u8")) return v.src;
               if (v?.currentSrc?.includes(".m3u8")) return v.currentSrc;
-              for (const s of document.querySelectorAll("script:not([src])")) {
+              for (const s of Array.from(document.querySelectorAll("script:not([src])"))) {
                 const m = s.textContent?.match(/["'`](https?:\/\/[^"'`\s]{10,}\.m3u8[^"'`\s]*)/);
                 if (m) return m[1];
               }
