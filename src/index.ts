@@ -97,6 +97,7 @@ function parseAnimeCards(html: string): { id: string; name: string; poster: stri
     results.push({ id: `latanime:${slug}`, name, poster });
   }
 
+  // Pattern 1: homepage/emision — <a href="/anime/slug" class="anime-card|thumb">
   for (const m of html.matchAll(
     /<a[^>]+href="(?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9-]+)"[^>]*class="[^"]*(?:anime-card|thumb)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi
   )) extractCard(m[1], m[2]);
@@ -105,6 +106,19 @@ function parseAnimeCards(html: string): { id: string; name: string; poster: stri
     /<a[^>]*class="[^"]*(?:anime-card|thumb)[^"]*"[^>]*href="(?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9-]+)"[^>]*>([\s\S]*?)<\/a>/gi
   )) extractCard(m[1], m[2]);
 
+  // Pattern 2: /animes directory — <div class="series">...<a href="/anime/slug">
+  if (results.length === 0) {
+    for (const m of html.matchAll(
+      /<div[^>]*class="[^"]*series[^"]*"[^>]*>([\s\S]{0,1000}?)<\/div>\s*<\/div>/gi
+    )) {
+      const block = m[1];
+      const slugM = block.match(/href="(?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9-]+)"/i);
+      if (!slugM) continue;
+      extractCard(slugM[1], block);
+    }
+  }
+
+  // Pattern 3: generic fallback — any /anime/ link
   if (results.length === 0) {
     for (const m of html.matchAll(
       /<a[^>]+href="(?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9-]+)"[^>]*>([\s\S]{0,800}?)<\/a>/gi
@@ -504,16 +518,6 @@ export default {
 
 
 
-    if (path === "/debug") {
-      const target = url.searchParams.get("url");
-      if (!target) return json({ error: "no url param" });
-      try {
-        const html = await fetchHtml(target);
-        const animeLinks = [...html.matchAll(/href=["'](?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9-]+)["']/gi)].map(m=>m[1]);
-        const classes = [...new Set([...html.matchAll(/class=["']([^"']+)["']/gi)].map(m=>m[1]))].filter(c=>c.match(/card|anime|item|post|serie|thumb/i));
-        return json({ size: html.length, animeLinks: animeLinks.slice(0,5), classes: classes.slice(0,20), preview: html.slice(0,600) });
-      } catch(e) { return json({ error: String(e) }); }
-    }
 
     return new Response("Not found", { status: 404, headers: CORS });
   },
