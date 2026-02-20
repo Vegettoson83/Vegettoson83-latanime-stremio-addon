@@ -7,14 +7,14 @@ const ADDON_ID = "com.latanime.stremio";
 const BASE_URL = "https://latanime.org";
 // Env vars are set per-request from the Worker env object
 let TMDB_KEY = "";
-let BRIDGE_URL = "";
+let PLAYWRIGHT_URL = "";
 let BRIDGE_KEY = "";
 
 async function extractViaBridge(embedUrl: string): Promise<string | null> {
-  if (!BRIDGE_URL) return null;
+  if (!PLAYWRIGHT_URL) return null;
   try {
     const r = await fetch(
-      `${BRIDGE_URL}/extract?url=${encodeURIComponent(embedUrl)}`,
+      `${PLAYWRIGHT_URL}/extract?url=${encodeURIComponent(embedUrl)}`,
       {
         headers: { "x-api-key": BRIDGE_KEY },
         signal: AbortSignal.timeout(25000),
@@ -540,7 +540,7 @@ export default {
   async fetch(request: Request, env: Record<string, string>): Promise<Response> {
     // Read env vars per-request (Cloudflare Workers pattern)
     TMDB_KEY = env?.TMDB_API_KEY || "";
-    BRIDGE_URL = env?.BRIDGE_URL || "";
+    PLAYWRIGHT_URL = env?.PLAYWRIGHT_URL || "";
     BRIDGE_KEY = env?.BRIDGE_API_KEY || "";
 
     const url = new URL(request.url);
@@ -602,7 +602,7 @@ export default {
       const testUrl = url.searchParams.get("url") || "https://voe.sx/e/nsjnujyoylgi";
       const bridgeResult = await extractViaBridge(testUrl);
       return json({
-        BRIDGE_URL,
+        PLAYWRIGHT_URL,
         BRIDGE_KEY: BRIDGE_KEY ? "set" : "not set",
         testUrl,
         result: bridgeResult,
