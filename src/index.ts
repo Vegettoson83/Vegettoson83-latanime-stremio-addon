@@ -5,6 +5,35 @@
 
 const ADDON_ID = "com.latanime.stremio";
 const BASE_URL = "https://latanime.org";
+const TMDB_KEY = (typeof globalThis !== "undefined" && (globalThis as any).TMDB_API_KEY) || "";
+const TMDB_BASE = "https://api.themoviedb.org/3";
+const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
+
+async function fetchTmdb(animeName: string): Promise<{ poster: string; background: string; description: string; year: string; genres: string[] } | null> {
+  if (!TMDB_KEY) return null;
+  // Strip language suffix (Latino, Castellano) for better TMDB match
+  const cleanName = animeName
+    .replace(/\s+(Latino|Castellano|Japones|Japonés|Sub\s+Español)$/i, "")
+    .replace(/\s+S(\d+)$/i, " Season $1")
+    .trim();
+  try {
+    const r = await fetch(
+      `${TMDB_BASE}/search/tv?api_key=${TMDB_KEY}&query=${encodeURIComponent(cleanName)}&language=es-ES`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (!r.ok) return null;
+    const data = await r.json() as { results?: any[] };
+    const hit = data.results?.[0];
+    if (!hit) return null;
+    return {
+      poster: hit.poster_path ? `${TMDB_IMG}${hit.poster_path}` : "",
+      background: hit.backdrop_path ? `https://image.tmdb.org/t/p/w1280${hit.backdrop_path}` : "",
+      description: hit.overview || "",
+      year: hit.first_air_date?.slice(0, 4) || "",
+      genres: [],
+    };
+  } catch { return null; }
+}
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -121,11 +150,44 @@ function toMetaPreview(card: { id: string; name: string; poster: string }) {
   };
 }
 
+async function searchAnimes(query: string): Promise<{ id: string; name: string; poster: string }[]> {
+  // Step 1: get CSRF token from homepage
+  const homeHtml = await fetchHtml(BASE_URL + "/");
+  const csrfM = homeHtml.match(/name="csrf-token"[^>]+content="([^"]+)"/i)
+    || homeHtml.match(/content="([^"]+)"[^>]+name="csrf-token"/i);
+  const csrf = csrfM ? csrfM[1] : "";
+
+  // Step 2: POST to /buscar_ajax
+  try {
+    const r = await fetch(`${BASE_URL}/buscar_ajax`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-TOKEN": csrf,
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": BASE_URL + "/",
+        "Origin": BASE_URL,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+      },
+      body: JSON.stringify({ q: query }),
+    });
+    if (r.ok) {
+      const html = await r.text();
+      const results = parseAnimeCards(html);
+      if (results.length > 0) return results;
+    }
+  } catch { /* fall through */ }
+
+  // Fallback: scrape /buscar
+  const html = await fetchHtml(`${BASE_URL}/buscar?q=${encodeURIComponent(query)}`);
+  return parseAnimeCards(html);
+}
+
 async function getCatalog(catalogId: string, extra: Record<string, string>) {
   const search = extra.search?.trim();
   if (search) {
-    const html = await fetchHtml(`${BASE_URL}/buscar?q=${encodeURIComponent(search)}`);
-    return { metas: parseAnimeCards(html).map(toMetaPreview) };
+    const results = await searchAnimes(search);
+    return { metas: results.map(toMetaPreview) };
   }
   if (catalogId === "latanime-airing") {
     const html = await fetchHtml(`${BASE_URL}/emision`);
@@ -186,16 +248,23 @@ async function getMeta(id: string) {
   }
   episodes.sort((a, b) => a.number - b.number);
 
+  // Enrich with TMDB if available
+  const tmdb = await fetchTmdb(name);
+  const finalPoster = (tmdb?.poster) || poster;
+  const finalBg = (tmdb?.background) || poster;
+  const finalDesc = (tmdb?.description) || description;
+
   return {
     meta: {
       id,
       type: "series",
       name,
-      poster,
+      poster: finalPoster,
       posterShape: "poster",
-      background: poster,
-      description,
+      background: finalBg,
+      description: finalDesc,
       genres: genres.slice(0, 10),
+      releaseInfo: tmdb?.year || "",
       videos: episodes.map((ep) => ({
         id: ep.id,
         title: `Episodio ${ep.number}`,
