@@ -221,15 +221,10 @@ const EMBED_EXTRACTORS: {
     name: "VOE",
     pattern: /voe\.sx/i,
     extract: async (html) => {
-      const m = html.match(/'hls':\s*'([^']+)'/i) || html.match(/hls:\s*["']([^"']+\.m3u8[^"']*)/i);
-      return m ? [m[1]] : [];
-    },
-  },
-  {
-    name: "mp4upload",
-    pattern: /mp4upload\.com/i,
-    extract: async (html) => {
-      const m = html.match(/src:\s*["']([^"']+\.mp4[^"']*)/i);
+      // VOE stores HLS in a JS var: 'hls': 'https://...'
+      const m = html.match(/'hls':\s*'([^']+)'/i)
+        || html.match(/hls:\s*["']([^"']+\.m3u8[^"']*)/i)
+        || html.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)/i);
       return m ? [m[1]] : [];
     },
   },
@@ -237,37 +232,81 @@ const EMBED_EXTRACTORS: {
     name: "Filemoon",
     pattern: /filemoon\.|moonplayer\./i,
     extract: async (html) => {
+      // Try packed JS first
       const packed = html.match(/eval\(function\(p,a,c,k,e,(?:d|r)\)[\s\S]*?\)\)/);
-      if (!packed) {
-        const m3u8 = html.match(/file:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/);
-        return m3u8 ? [m3u8[1]] : [];
+      if (packed) {
+        const unpacked = unpackJs(packed[0]);
+        const m3u8 = unpacked.match(/https?:\/\/[^"'\s]+\.m3u8(?:[^"'\s]*)/);
+        if (m3u8) return [m3u8[0]];
       }
-      const unpacked = unpackJs(packed[0]);
-      console.error("[Filemoon] unpacked preview:", unpacked.slice(0, 200));
-      const m3u8 = unpacked.match(/https?:\/\/[^"'\s]+\.m3u8(?:[^"'\s]*)/);
-      return m3u8 ? [m3u8[0]] : [];
+      // Fallback: direct file reference
+      const m = html.match(/file:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)/i)
+        || html.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)/i);
+      return m ? [m[1]] : [];
+    },
+  },
+  {
+    name: "Hexload",
+    pattern: /hexload\.com/i,
+    extract: async (html) => {
+      const m = html.match(/file:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)/i)
+        || html.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)/i);
+      return m ? [m[1]] : [];
+    },
+  },
+  {
+    name: "DSVPlay",
+    pattern: /dsvplay\.com/i,
+    extract: async (html) => {
+      const m = html.match(/file:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)/i)
+        || html.match(/source\s+src=["'](https?:\/\/[^"']+)/i)
+        || html.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)/i);
+      return m ? [m[1]] : [];
+    },
+  },
+  {
+    name: "MXDrop",
+    pattern: /mxdrop\.to/i,
+    extract: async (html) => {
+      const m = html.match(/file:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)/i)
+        || html.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)/i);
+      return m ? [m[1]] : [];
+    },
+  },
+  {
+    name: "Lulu",
+    pattern: /luluvid\.com/i,
+    extract: async (html) => {
+      const m = html.match(/file:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)/i)
+        || html.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)/i);
+      return m ? [m[1]] : [];
+    },
+  },
+  {
+    name: "mp4upload",
+    pattern: /mp4upload\.com/i,
+    extract: async (html) => {
+      const m = html.match(/src:\s*["'](https?:\/\/[^"']+\.mp4[^"']*)/i)
+        || html.match(/file:\s*["'](https?:\/\/[^"']+\.mp4[^"']*)/i);
+      return m ? [m[1]] : [];
+    },
+  },
+  {
+    name: "SaveFiles",
+    pattern: /savefiles\.com/i,
+    extract: async (html) => {
+      const m = html.match(/file:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)/i)
+        || html.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)/i)
+        || html.match(/src:\s*["'](https?:\/\/[^"']+\.mp4[^"']*)/i);
+      return m ? [m[1]] : [];
     },
   },
   {
     name: "VidGuard",
     pattern: /vidguard\.|vidhide\.|vgfplay\./i,
     extract: async (html) => {
-      const m3u8 = html.match(/hls:\s*["']?(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-      return m3u8 ? [m3u8[1]] : [];
-    },
-  },
-  {
-    name: "StreamSB",
-    pattern: /streamsb\.|sbplay\.|sbfull\.|sbthe\./i,
-    extract: async (_html, embedUrl) => {
-      const idM = embedUrl.match(/\/e\/([a-zA-Z0-9]+)/);
-      if (!idM) return [];
-      const apiUrl = embedUrl.replace(/\/e\//, "/sources48/").replace(/\?.*/, "");
-      try {
-        const r = await fetch(apiUrl, { headers: { watchsb: "streamsb", referer: embedUrl } });
-        const d = await r.json() as { stream_data?: { file?: string } };
-        return d?.stream_data?.file ? [d.stream_data.file] : [];
-      } catch { return []; }
+      const m = html.match(/hls:\s*["']?(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
+      return m ? [m[1]] : [];
     },
   },
   {
@@ -284,10 +323,14 @@ const EMBED_EXTRACTORS: {
     },
   },
   {
+    // Generic fallback — catches any host with an m3u8 or mp4 in the page
     name: "Generic",
     pattern: /.*/,
     extract: async (html) => {
-      return [...html.matchAll(/["'](https?:\/\/[^"'\s]+\.m3u8(?:[^"'\s]*))["']/gi)].map((m) => m[1]);
+      const m3u8s = [...html.matchAll(/["'](https?:\/\/[^"'\s]+\.m3u8(?:[^"'\s]*))["']/gi)].map(m => m[1]);
+      if (m3u8s.length) return m3u8s;
+      const mp4s = [...html.matchAll(/["'](https?:\/\/[^"'\s]+\.mp4(?:[^"'\s]*))["']/gi)].map(m => m[1]);
+      return mp4s;
     },
   },
 ];
