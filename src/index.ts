@@ -17,14 +17,31 @@ async function extractViaBridge(embedUrl: string): Promise<string | null> {
       `${PLAYWRIGHT_URL}/extract?url=${encodeURIComponent(embedUrl)}`,
       {
         headers: { "x-api-key": BRIDGE_KEY },
-        signal: AbortSignal.timeout(25000),
+        signal: AbortSignal.timeout(30000),
       }
     );
+    const text = await r.text();
     if (!r.ok) return null;
-    const data = await r.json() as { url?: string };
+    const data = JSON.parse(text) as { url?: string };
     return data.url || null;
-  } catch {
+  } catch (e) {
     return null;
+  }
+}
+
+async function extractViaBridgeDebug(embedUrl: string): Promise<{ url: string | null; status: number; body: string; error: string }> {
+  if (!PLAYWRIGHT_URL) return { url: null, status: 0, body: "", error: "PLAYWRIGHT_URL not set" };
+  try {
+    const r = await fetch(
+      `${PLAYWRIGHT_URL}/extract?url=${encodeURIComponent(embedUrl)}`,
+      { headers: { "x-api-key": BRIDGE_KEY }, signal: AbortSignal.timeout(35000) }
+    );
+    const body = await r.text();
+    let url = null;
+    try { url = JSON.parse(body)?.url || null; } catch {}
+    return { url, status: r.status, body: body.slice(0, 300), error: "" };
+  } catch (e: any) {
+    return { url: null, status: 0, body: "", error: String(e) };
   }
 }
 const TMDB_BASE = "https://api.themoviedb.org/3";
@@ -600,12 +617,12 @@ export default {
 
     if (path === "/debug-bridge") {
       const testUrl = url.searchParams.get("url") || "https://voe.sx/e/nsjnujyoylgi";
-      const bridgeResult = await extractViaBridge(testUrl);
+      const bridgeResult = await extractViaBridgeDebug(testUrl);
       return json({
         PLAYWRIGHT_URL,
         BRIDGE_KEY: BRIDGE_KEY ? "set" : "not set",
         testUrl,
-        result: bridgeResult,
+        ...bridgeResult,
       });
     }
 
