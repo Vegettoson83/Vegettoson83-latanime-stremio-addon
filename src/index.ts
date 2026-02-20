@@ -449,6 +449,38 @@ export default {
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
 
+
+    if (path === "/debug-stream") {
+      const testId = url.searchParams.get("id") || "latanime:jujutsu-kaisen-s3-latino:1";
+      const parts = testId.replace("latanime:", "").split(":");
+      const slug = parts[0];
+      const epNum = parts[1] || "1";
+      const epUrl = `${BASE_URL}/ver/${slug}-episodio-${epNum}`;
+      try {
+        const html = await fetchHtml(epUrl);
+        const embeds: { b64: string; url: string; name: string }[] = [];
+        const seen = new Set<string>();
+        for (const m of html.matchAll(/<a[^>]+data-player="([A-Za-z0-9+/=]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
+          const b64 = m[1];
+          if (seen.has(b64)) continue;
+          seen.add(b64);
+          let embedUrl = "";
+          try { embedUrl = atob(b64); } catch { continue; }
+          if (embedUrl.startsWith("//")) embedUrl = `https:${embedUrl}`;
+          embeds.push({ b64: b64.slice(0, 20) + "...", url: embedUrl, name: m[2].replace(/<[^>]+>/g, "").trim() });
+        }
+        const hasBrowser = !!env.BROWSER;
+        // Test one extraction
+        let testExtract = null;
+        if (embeds.length > 0 && hasBrowser) {
+          testExtract = await extractStreamFromEmbed(embeds[0].url, env);
+        }
+        return json({ epUrl, embedCount: embeds.length, embeds: embeds.slice(0, 6), hasBrowser, testExtract });
+      } catch(e) {
+        return json({ error: String(e) });
+      }
+    }
+
     return new Response("Not found", { status: 404, headers: CORS });
   },
 };
