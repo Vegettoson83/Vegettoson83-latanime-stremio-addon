@@ -76,10 +76,15 @@ function parseAnimeCards(html: string): { id: string; name: string; poster: stri
     seen.add(slug);
     const titleM =
       block.match(/title="([^"]+)"/) ||
+      block.match(/alt="([^"]+)"/) ||
       block.match(/class="[^"]*title[^"]*"[^>]*>([^<]+)</);
     let name = titleM ? titleM[1] : slug;
     name = name.replace(/<[^>]+>/g, "").trim();
-    const posterM = block.match(/(?:src|data-src)=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)/i);
+    // Prefer data-src (lazy loaded), grab thumbs/ or assets/ paths
+    const posterM =
+      block.match(/data-src=["'](https?:\/\/latanime\.org\/[^"']+\.(?:jpg|jpeg|png|webp)[^"']*)/i) ||
+      block.match(/src=["'](https?:\/\/latanime\.org\/[^"']+\.(?:jpg|jpeg|png|webp)[^"']*)/i) ||
+      block.match(/data-src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)/i);
     const poster = posterM
       ? (posterM[1].startsWith("http") ? posterM[1] : `${BASE_URL}${posterM[1]}`)
       : "";
@@ -128,7 +133,7 @@ function toMetaPreview(card: { id: string; name: string; poster: string }) {
 async function getCatalog(catalogId: string, extra: Record<string, string>) {
   const search = extra.search?.trim();
   if (search) {
-    const html = await fetchHtml(`${BASE_URL}/animes?q=${encodeURIComponent(search)}`);
+    const html = await fetchHtml(`${BASE_URL}/buscar?q=${encodeURIComponent(search)}`);
     return { metas: parseAnimeCards(html).map(toMetaPreview) };
   }
   if (catalogId === "latanime-airing") {
@@ -143,37 +148,46 @@ async function getMeta(id: string) {
   const slug = id.replace("latanime:", "");
   const html = await fetchHtml(`${BASE_URL}/anime/${slug}`);
 
+  // Title is in <h2> tag
   const titleM =
-    html.match(/<h1[^>]*class="[^"]*title[^"]*"[^>]*>([\s\S]*?)<\/h1>/i) ||
-    html.match(/<title>(.*?)\s*[-–|].*?<\/title>/i);
+    html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i) ||
+    html.match(/<title>(.*?)\s*[—\-|].*?<\/title>/i);
   const name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
 
+  // Poster: og:image meta tag is most reliable
   const posterM =
-    html.match(/<img[^>]+class="[^"]*(?:cover|poster|anime-img)[^"]*"[^>]+(?:src|data-src)="([^"]+)"/i) ||
-    html.match(/(?:src|data-src)="(https?:\/\/latanime\.org\/[^"]*\.(?:jpg|png|webp|jpeg)[^"]*)"/i);
-  const poster = posterM
-    ? (posterM[1].startsWith("http") ? posterM[1] : `${BASE_URL}${posterM[1]}`)
-    : "";
+    html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i) ||
+    html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i) ||
+    html.match(/src="(https?:\/\/latanime\.org\/thumbs\/imagen\/[^"]+)"/i);
+  const poster = posterM ? posterM[1] : "";
 
+  // Description: <p class="my-2 opacity-75">
   const descM =
-    html.match(/<div[^>]*class="[^"]*sinopsis[^"]*"[^>]*>([\s\S]*?)<\/div>/i) ||
-    html.match(/<p[^>]*class="[^"]*desc[^"]*"[^>]*>([\s\S]*?)<\/p>/i);
+    html.match(/<p[^>]*class="[^"]*opacity[^"]*"[^>]*>([\s\S]*?)<\/p>/i) ||
+    html.match(/<meta[^>]+name="description"[^>]+content="([^"]+)"/i) ||
+    html.match(/<meta[^>]+content="([^"]+)"[^>]+name="description"/i);
   const description = descM ? descM[1].replace(/<[^>]+>/g, "").trim() : "";
 
+  // Genres: <a href="/genero/..."><div class="btn">Genre</div></a>
   const genres: string[] = [];
-  for (const gm of html.matchAll(/class="[^"]*genre[^"]*"[^>]*>([\s\S]*?)<\/(?:a|span|div)>/gi)) {
+  for (const gm of html.matchAll(/href="[^"]*\/genero\/[^"]*"[^>]*>([\s\S]*?)<\/a>/gi)) {
     const g = gm[1].replace(/<[^>]+>/g, "").trim();
     if (g) genres.push(g);
   }
 
-  const episodes: { id: string; number: number }[] = [];
+  // Episodes: <a href="/ver/slug-episodio-N">
+  const episodes: { id: string; number: number; epSlug: string }[] = [];
   const seenEps = new Set<string>();
   for (const em of html.matchAll(
     /href=["'](?:https?:\/\/latanime\.org)?\/ver\/([a-z0-9-]+-episodio-(\d+(?:\.\d+)?))["']/gi
   )) {
     if (seenEps.has(em[1])) continue;
     seenEps.add(em[1]);
-    episodes.push({ id: `latanime:${slug}:${parseFloat(em[2])}`, number: parseFloat(em[2]) });
+    episodes.push({
+      id: `latanime:${slug}:${parseFloat(em[2])}`,
+      number: parseFloat(em[2]),
+      epSlug: em[1],
+    });
   }
   episodes.sort((a, b) => a.number - b.number);
 
@@ -184,6 +198,7 @@ async function getMeta(id: string) {
       name,
       poster,
       posterShape: "poster",
+      background: poster,
       description,
       genres: genres.slice(0, 10),
       videos: episodes.map((ep) => ({
