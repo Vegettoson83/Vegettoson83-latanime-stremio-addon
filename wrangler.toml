@@ -5,5 +5,5 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 TMDB_API_KEY = ""
-PLAYWRIGHT_URL = ""
+PLAYWRIGHT_URL = "https://latanime-bridge.onrender.com"
 BRIDGE_API_KEY = ""
