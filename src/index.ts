@@ -561,6 +561,18 @@ export default {
 
 
 
+
+    if (path === "/debug") {
+      const target = url.searchParams.get("url");
+      if (!target) return json({ error: "no url param" });
+      try {
+        const html = await fetchHtml(target);
+        const firstIdx = html.indexOf('/anime/');
+        const context = firstIdx > 0 ? html.slice(Math.max(0, firstIdx-200), firstIdx+600) : "not found";
+        return json({ size: html.length, context });
+      } catch(e) { return json({ error: String(e) }); }
+    }
+
     return new Response("Not found", { status: 404, headers: CORS });
   },
 };
