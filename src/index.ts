@@ -220,10 +220,21 @@ const EMBED_EXTRACTORS: {
   {
     name: "VOE",
     pattern: /voe\.sx/i,
-    extract: async (html) => {
-      // VOE stores HLS in a JS var: 'hls': 'https://...'
+    extract: async (html, embedUrl) => {
+      // VOE redirects to lancewhosedifficult.com via JS — follow it
+      const redirectM = html.match(/window\.location\.href\s*=\s*['"]([^'"]+lancewhosedifficult[^'"]+)['"]/i)
+        || html.match(/window\.location\.href\s*=\s*['"]([^'"]+\/e\/[^'"]+)['"]/i);
+      if (redirectM) {
+        try {
+          const redirectHtml = await fetchHtml(redirectM[1]);
+          const m = redirectHtml.match(/'hls':\s*'([^']+)'/i)
+            || redirectHtml.match(/hls:\s*["']([^"']+\.m3u8[^"']*)/i)
+            || redirectHtml.match(/sources?\s*:\s*\[\s*{[^}]*file:\s*["']([^"']+)/i)
+            || redirectHtml.match(/["'](https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
+          return m ? [m[1]] : [];
+        } catch { return []; }
+      }
       const m = html.match(/'hls':\s*'([^']+)'/i)
-        || html.match(/hls:\s*["']([^"']+\.m3u8[^"']*)/i)
         || html.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)/i);
       return m ? [m[1]] : [];
     },
@@ -267,7 +278,17 @@ const EMBED_EXTRACTORS: {
   {
     name: "MXDrop",
     pattern: /mxdrop\.to/i,
-    extract: async (html) => {
+    extract: async (html, embedUrl) => {
+      // MXDrop also redirects via JS like VOE
+      const redirectM = html.match(/window\.location\.href\s*=\s*['"]([^'"]+\/e\/[^'"]+)['"]/i);
+      if (redirectM) {
+        try {
+          const redirectHtml = await fetchHtml(redirectM[1]);
+          const m = redirectHtml.match(/file:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)/i)
+            || redirectHtml.match(/["'](https?:\/\/[^"']+\.m3u8[^"'\s]*)/i);
+          return m ? [m[1]] : [];
+        } catch { return []; }
+      }
       const m = html.match(/file:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)/i)
         || html.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)/i);
       return m ? [m[1]] : [];
