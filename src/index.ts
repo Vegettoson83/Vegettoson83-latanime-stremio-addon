@@ -540,7 +540,7 @@ export default {
   async fetch(request: Request, env: Record<string, string>): Promise<Response> {
     // Read env vars per-request (Cloudflare Workers pattern)
     TMDB_KEY = env?.TMDB_API_KEY || "";
-    PLAYWRIGHT_URL = env?.PLAYWRIGHT_URL || "";
+    PLAYWRIGHT_URL = (env?.PLAYWRIGHT_URL || "").trim();
     BRIDGE_KEY = env?.BRIDGE_API_KEY || "";
 
     const url = new URL(request.url);
