@@ -6,6 +6,26 @@
 const ADDON_ID = "com.latanime.stremio";
 const BASE_URL = "https://latanime.org";
 const TMDB_KEY = (typeof globalThis !== "undefined" && (globalThis as any).TMDB_API_KEY) || "";
+const BRIDGE_URL = (typeof globalThis !== "undefined" && (globalThis as any).BRIDGE_URL) || "";
+const BRIDGE_KEY = (typeof globalThis !== "undefined" && (globalThis as any).BRIDGE_API_KEY) || "";
+
+async function extractViaBridge(embedUrl: string): Promise<string | null> {
+  if (!BRIDGE_URL) return null;
+  try {
+    const r = await fetch(
+      `${BRIDGE_URL}/extract?url=${encodeURIComponent(embedUrl)}`,
+      {
+        headers: { "x-api-key": BRIDGE_KEY },
+        signal: AbortSignal.timeout(25000),
+      }
+    );
+    if (!r.ok) return null;
+    const data = await r.json() as { url?: string };
+    return data.url || null;
+  } catch {
+    return null;
+  }
+}
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
 
@@ -502,8 +522,13 @@ async function getStreams(rawId: string) {
         streams.push({ url, title: `▶ ${embed.name} — Latino`, behaviorHints: { notWebReady: false } });
       }
     } else {
-      // JS-rendered player — surface as external/web stream so user can still open it
-      streams.push({ url: embed.url, title: `🌐 ${embed.name} — Latino`, behaviorHints: { notWebReady: true } });
+      // Try Playwright bridge for JS-rendered hosts
+      const bridgeUrl = await extractViaBridge(embed.url);
+      if (bridgeUrl) {
+        streams.push({ url: bridgeUrl, title: `▶ ${embed.name} — Latino`, behaviorHints: { notWebReady: false } });
+      } else {
+        streams.push({ url: embed.url, title: `🌐 ${embed.name} — Latino`, behaviorHints: { notWebReady: true } });
+      }
     }
   }
 

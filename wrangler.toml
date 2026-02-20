@@ -5,3 +5,5 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 TMDB_API_KEY = ""
+BRIDGE_URL = ""
+BRIDGE_API_KEY = ""
