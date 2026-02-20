@@ -1,7 +1,10 @@
 name = "latanime-stremio"
 main = "src/index.ts"
-compatibility_date = "2024-01-01"
-compatibility_flags = ["nodejs_compat"]
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat_v2"]
+
+[browser]
+binding = "MYBROWSER"
 
 [vars]
 TMDB_API_KEY = ""

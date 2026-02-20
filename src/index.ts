@@ -5,43 +5,86 @@
 
 const ADDON_ID = "com.latanime.stremio";
 const BASE_URL = "https://latanime.org";
-// Env vars are set per-request from the Worker env object
+// Env vars set per-request
 let TMDB_KEY = "";
-let PLAYWRIGHT_URL = "";
+let PLAYWRIGHT_URL = "";  // Render bridge fallback (legacy)
 let BRIDGE_KEY = "";
+let CF_BROWSER: any = null; // Cloudflare Browser Rendering binding
 
-async function extractViaBridge(embedUrl: string): Promise<string | null> {
-  if (!PLAYWRIGHT_URL) return null;
-  try {
-    const r = await fetch(
-      `${PLAYWRIGHT_URL}/extract?url=${encodeURIComponent(embedUrl)}`,
-      {
-        headers: { "x-api-key": BRIDGE_KEY },
-        signal: AbortSignal.timeout(55000),
+async function extractWithBrowser(embedUrl: string): Promise<string | null> {
+  // Try Cloudflare Browser Rendering first (native, no external server)
+  if (CF_BROWSER) {
+    try {
+      const puppeteer = await import("@cloudflare/puppeteer");
+      const browser = await puppeteer.default.launch(CF_BROWSER);
+      try {
+        const page = await browser.newPage();
+        let streamUrl: string | null = null;
+
+        await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36");
+
+        // Intercept requests via CDP
+        const client = await page.createCDPSession();
+        await client.send("Network.enable");
+        client.on("Network.requestWillBeSent", (params: any) => {
+          if (streamUrl) return;
+          const u = params.request.url;
+          if (u.includes(".m3u8") || (u.match(/\.mp4/) && !u.includes("analytics"))) {
+            streamUrl = u;
+          }
+        });
+
+        await page.goto(embedUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+
+        // Wait up to 25s for stream URL
+        const deadline = Date.now() + 25000;
+        while (!streamUrl && Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 500));
+          if (!streamUrl) {
+            const found = await page.evaluate(() => {
+              const v = document.querySelector("video");
+              if (v?.src?.includes(".m3u8")) return v.src;
+              if (v?.currentSrc?.includes(".m3u8")) return v.currentSrc;
+              for (const s of document.querySelectorAll("script:not([src])")) {
+                const m = s.textContent?.match(/["'`](https?:\/\/[^"'`\s]{10,}\.m3u8[^"'`\s]*)/);
+                if (m) return m[1];
+              }
+              return null;
+            }).catch(() => null);
+            if (found) streamUrl = found;
+          }
+        }
+
+        return streamUrl;
+      } finally {
+        await browser.close().catch(() => {});
       }
-    );
-    const text = await r.text();
-    if (!r.ok) return null;
-    const data = JSON.parse(text) as { url?: string };
-    return data.url || null;
-  } catch (e) {
-    return null;
+    } catch (e) {
+      console.error("CF Browser Rendering error:", String(e));
+    }
   }
-}
 
-async function extractViaBridgeDebug(embedUrl: string): Promise<{ url: string | null; status: number; body: string; error: string }> {
-  if (!PLAYWRIGHT_URL) return { url: null, status: 0, body: "", error: "PLAYWRIGHT_URL not set" };
+  // Fallback: Render bridge
+  if (!PLAYWRIGHT_URL) return null;
   try {
     const r = await fetch(
       `${PLAYWRIGHT_URL}/extract?url=${encodeURIComponent(embedUrl)}`,
       { headers: { "x-api-key": BRIDGE_KEY }, signal: AbortSignal.timeout(55000) }
     );
-    const body = await r.text();
-    let url = null;
-    try { url = JSON.parse(body)?.url || null; } catch {}
-    return { url, status: r.status, body: body.slice(0, 300), error: "" };
+    const text = await r.text();
+    if (!r.ok) return null;
+    const data = JSON.parse(text) as { url?: string };
+    return data.url || null;
+  } catch { return null; }
+}
+
+async function extractViaBridgeDebug(embedUrl: string): Promise<{ url: string | null; status: number; body: string; error: string; cfBrowser: boolean }> {
+  const cfAvailable = !!CF_BROWSER;
+  try {
+    const url = await extractWithBrowser(embedUrl);
+    return { url, status: url ? 200 : 404, body: "", error: "", cfBrowser: cfAvailable };
   } catch (e: any) {
-    return { url: null, status: 0, body: "", error: String(e) };
+    return { url: null, status: 0, body: "", error: String(e), cfBrowser: cfAvailable };
   }
 }
 const TMDB_BASE = "https://api.themoviedb.org/3";
@@ -541,7 +584,7 @@ async function getStreams(rawId: string) {
       }
     } else {
       // Try Playwright bridge for JS-rendered hosts
-      const bridgeUrl = await extractViaBridge(embed.url);
+      const bridgeUrl = await extractWithBrowser(embed.url);
       if (bridgeUrl) {
         streams.push({ url: bridgeUrl, title: `▶ ${embed.name} — Latino`, behaviorHints: { notWebReady: false } });
       } else {
@@ -558,6 +601,7 @@ export default {
     // Read env vars per-request (Cloudflare Workers pattern)
     TMDB_KEY = env?.TMDB_API_KEY || "";
     PLAYWRIGHT_URL = (env?.PLAYWRIGHT_URL || "").trim();
+    CF_BROWSER = env?.MYBROWSER || null;
     BRIDGE_KEY = env?.BRIDGE_API_KEY || "";
 
     const url = new URL(request.url);
