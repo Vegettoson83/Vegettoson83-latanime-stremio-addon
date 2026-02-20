@@ -389,27 +389,33 @@ async function getStreams(rawId: string) {
     return { streams: [] };
   }
 
-  const streams: { url: string; title: string; behaviorHints: { notWebReady: boolean } }[] = [];
+  const streams: { url: string; title: string; behaviorHints?: Record<string, unknown> }[] = [];
 
-  for (const embed of embedUrls.slice(0, 8)) {
-    try {
+  // Run all extractors in parallel with a timeout
+  const results = await Promise.allSettled(
+    embedUrls.slice(0, 9).map(async (embed) => {
       const extractor = EMBED_EXTRACTORS.find((e) => e.pattern.test(embed.url));
-      if (!extractor) continue;
-      let embedHtml = "";
-      try { embedHtml = await fetchHtml(embed.url); }
-      catch (e) { console.error(`[fetchHtml] failed for ${embed.url}:`, e); continue; }
-      const urls = await extractor.extract(embedHtml, embed.url);
-      for (const streamUrl of urls) {
-        if (streamUrl?.startsWith("http")) {
-          streams.push({
-            url: streamUrl,
-            title: `🌎 ${embed.name} — Latino`,
-            behaviorHints: { notWebReady: false },
-          });
-        }
+      if (!extractor) return { embed, directUrls: [] as string[] };
+      try {
+        const embedHtml = await fetchHtml(embed.url);
+        const urls = await extractor.extract(embedHtml, embed.url);
+        return { embed, directUrls: urls.filter((u) => u?.startsWith("http")) };
+      } catch {
+        return { embed, directUrls: [] as string[] };
       }
-    } catch (e) {
-      console.error(`[getStreams] extractor threw for ${embed.url}:`, e);
+    })
+  );
+
+  for (const r of results) {
+    if (r.status !== "fulfilled") continue;
+    const { embed, directUrls } = r.value;
+    if (directUrls.length > 0) {
+      for (const url of directUrls) {
+        streams.push({ url, title: `▶ ${embed.name} — Latino`, behaviorHints: { notWebReady: false } });
+      }
+    } else {
+      // JS-rendered player — surface as external/web stream so user can still open it
+      streams.push({ url: embed.url, title: `🌐 ${embed.name} — Latino`, behaviorHints: { notWebReady: true } });
     }
   }
 
