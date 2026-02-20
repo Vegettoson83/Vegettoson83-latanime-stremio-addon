@@ -17,7 +17,7 @@ async function extractViaBridge(embedUrl: string): Promise<string | null> {
       `${PLAYWRIGHT_URL}/extract?url=${encodeURIComponent(embedUrl)}`,
       {
         headers: { "x-api-key": BRIDGE_KEY },
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(55000),
       }
     );
     const text = await r.text();
@@ -34,7 +34,7 @@ async function extractViaBridgeDebug(embedUrl: string): Promise<{ url: string | 
   try {
     const r = await fetch(
       `${PLAYWRIGHT_URL}/extract?url=${encodeURIComponent(embedUrl)}`,
-      { headers: { "x-api-key": BRIDGE_KEY }, signal: AbortSignal.timeout(35000) }
+      { headers: { "x-api-key": BRIDGE_KEY }, signal: AbortSignal.timeout(55000) }
     );
     const body = await r.text();
     let url = null;
