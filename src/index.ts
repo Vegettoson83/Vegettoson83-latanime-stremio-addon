@@ -597,6 +597,18 @@ export default {
 
 
 
+
+    if (path === "/debug-bridge") {
+      const testUrl = url.searchParams.get("url") || "https://voe.sx/e/nsjnujyoylgi";
+      const bridgeResult = await extractViaBridge(testUrl);
+      return json({
+        BRIDGE_URL,
+        BRIDGE_KEY: BRIDGE_KEY ? "set" : "not set",
+        testUrl,
+        result: bridgeResult,
+      });
+    }
+
     return new Response("Not found", { status: 404, headers: CORS });
   },
 };
