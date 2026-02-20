@@ -50,6 +50,12 @@ const MANIFEST = {
       name: "Latanime — En Emisión",
       extra: [],
     },
+    {
+      type: "series",
+      id: "latanime-directory",
+      name: "Latanime — Directorio",
+      extra: [{ name: "search", isRequired: false }],
+    },
   ],
   idPrefixes: ["latanime:"],
 };
@@ -138,6 +144,10 @@ async function getCatalog(catalogId: string, extra: Record<string, string>) {
   }
   if (catalogId === "latanime-airing") {
     const html = await fetchHtml(`${BASE_URL}/emision`);
+    return { metas: parseAnimeCards(html).map(toMetaPreview) };
+  }
+  if (catalogId === "latanime-directory") {
+    const html = await fetchHtml(`${BASE_URL}/animes`);
     return { metas: parseAnimeCards(html).map(toMetaPreview) };
   }
   const html = await fetchHtml(`${BASE_URL}/`);
