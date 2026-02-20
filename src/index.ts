@@ -503,6 +503,18 @@ export default {
 
 
 
+
+    if (path === "/debug") {
+      const target = url.searchParams.get("url");
+      if (!target) return json({ error: "no url param" });
+      try {
+        const html = await fetchHtml(target);
+        const animeLinks = [...html.matchAll(/href=["'](?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9-]+)["']/gi)].map(m=>m[1]);
+        const classes = [...new Set([...html.matchAll(/class=["']([^"']+)["']/gi)].map(m=>m[1]))].filter(c=>c.match(/card|anime|item|post|serie|thumb/i));
+        return json({ size: html.length, animeLinks: animeLinks.slice(0,5), classes: classes.slice(0,20), preview: html.slice(0,600) });
+      } catch(e) { return json({ error: String(e) }); }
+    }
+
     return new Response("Not found", { status: 404, headers: CORS });
   },
 };
