@@ -491,6 +491,22 @@ export default {
 
 
 
+
+    if (path === "/debug") {
+      const target = url.searchParams.get("url");
+      if (!target) return json({ error: "no url param" });
+      try {
+        const html = await fetchHtml(target);
+        const m3u8s = [...html.matchAll(/["']([^"'\s]+\.m3u8[^"'\s]*)/gi)].map(m => m[1]);
+        const packed = html.includes("eval(function(p,a,c,k");
+        const file = [...html.matchAll(/(?:file|src|url)\s*:\s*["']([^"']{20,})/gi)].map(m=>m[1]).filter(x=>x.includes('http'));
+        const b64urls = [...html.matchAll(/["']([A-Za-z0-9+\/]{60,}={0,2})["']/g)].map(m=>{try{return atob(m[1])}catch{return null}}).filter(x=>x&&x.startsWith('http'));
+        const m3u8idx = html.indexOf('.m3u8');
+        const context = m3u8idx > 0 ? html.slice(Math.max(0,m3u8idx-200), m3u8idx+300) : "";
+        return json({ size: html.length, m3u8s, packed, file, b64urls: b64urls.slice(0,3), context, preview: html.slice(0, 600) });
+      } catch(e) { return json({ error: String(e) }); }
+    }
+
     return new Response("Not found", { status: 404, headers: CORS });
   },
 };
