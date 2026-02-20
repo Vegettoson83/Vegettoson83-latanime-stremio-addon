@@ -499,11 +499,12 @@ export default {
         const html = await fetchHtml(target);
         const m3u8s = [...html.matchAll(/["']([^"'\s]+\.m3u8[^"'\s]*)/gi)].map(m => m[1]);
         const packed = html.includes("eval(function(p,a,c,k");
-        const file = [...html.matchAll(/(?:file|src|url)\s*:\s*["']([^"']{20,})/gi)].map(m=>m[1]).filter(x=>x.includes('http'));
-        const b64urls = [...html.matchAll(/["']([A-Za-z0-9+\/]{60,}={0,2})["']/g)].map(m=>{try{return atob(m[1])}catch{return null}}).filter(x=>x&&x.startsWith('http'));
-        const m3u8idx = html.indexOf('.m3u8');
-        const context = m3u8idx > 0 ? html.slice(Math.max(0,m3u8idx-200), m3u8idx+300) : "";
-        return json({ size: html.length, m3u8s, packed, file, b64urls: b64urls.slice(0,3), context, preview: html.slice(0, 600) });
+        const pass_md5 = [...html.matchAll(/\/pass_md5\/[^"'\s]+/gi)].map(m=>m[0]);
+        const ajaxUrls = [...html.matchAll(/(?:ajax|api|url)\s*[=:]\s*["']([^"']+)/gi)].map(m=>m[1]).filter(x=>x.length>5);
+        const scripts = [...html.matchAll(/<script[^>]*src=["']([^"']+)/gi)].map(m=>m[1]);
+        const mp4s = [...html.matchAll(/["']([^"'\s]+\.mp4[^"'\s]*)/gi)].map(m=>m[1]);
+        const allUrls = [...html.matchAll(/https?:\/\/[^"'\s<>]{20,}/gi)].map(m=>m[0]);
+        return json({ size: html.length, m3u8s, mp4s, packed, pass_md5, ajaxUrls: ajaxUrls.slice(0,5), scripts: scripts.slice(0,5), allUrls: allUrls.slice(0,8), preview: html.slice(0, 800) });
       } catch(e) { return json({ error: String(e) }); }
     }
 
