@@ -492,21 +492,6 @@ export default {
 
 
 
-    if (path === "/debug") {
-      const target = url.searchParams.get("url");
-      if (!target) return json({ error: "no url param" });
-      try {
-        const html = await fetchHtml(target);
-        const m3u8s = [...html.matchAll(/["']([^"'\s]+\.m3u8[^"'\s]*)/gi)].map(m => m[1]);
-        const packed = html.includes("eval(function(p,a,c,k");
-        const pass_md5 = [...html.matchAll(/\/pass_md5\/[^"'\s]+/gi)].map(m=>m[0]);
-        const ajaxUrls = [...html.matchAll(/(?:ajax|api|url)\s*[=:]\s*["']([^"']+)/gi)].map(m=>m[1]).filter(x=>x.length>5);
-        const scripts = [...html.matchAll(/<script[^>]*src=["']([^"']+)/gi)].map(m=>m[1]);
-        const mp4s = [...html.matchAll(/["']([^"'\s]+\.mp4[^"'\s]*)/gi)].map(m=>m[1]);
-        const allUrls = [...html.matchAll(/https?:\/\/[^"'\s<>]{20,}/gi)].map(m=>m[0]);
-        return json({ size: html.length, m3u8s, mp4s, packed, pass_md5, ajaxUrls: ajaxUrls.slice(0,5), scripts: scripts.slice(0,5), allUrls: allUrls.slice(0,8), preview: html.slice(0, 800) });
-      } catch(e) { return json({ error: String(e) }); }
-    }
 
     return new Response("Not found", { status: 404, headers: CORS });
   },
