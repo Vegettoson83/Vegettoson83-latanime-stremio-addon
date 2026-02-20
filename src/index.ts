@@ -490,7 +490,7 @@ export default {
     }
 
 
-    // DEBUG: fetch a URL and return first 2000 chars + all m3u8/hls matches
+    // DEBUG
     if (path === "/debug") {
       const target = url.searchParams.get("url");
       if (!target) return json({ error: "no url param" });
@@ -498,9 +498,16 @@ export default {
         const html = await fetchHtml(target);
         const m3u8s = [...html.matchAll(/["']([^"'\s]+\.m3u8[^"'\s]*)/gi)].map(m => m[1]);
         const hls = [...html.matchAll(/'hls'\s*:\s*'([^']+)'/gi)].map(m => m[1]);
-        const file = [...html.matchAll(/file:\s*["']([^"']+)/gi)].map(m => m[1]);
+        const sources = [...html.matchAll(/sources?\s*[=:]\s*[\[{]["']?([^"'\]},]+)/gi)].map(m=>m[1]);
+        const wibble = [...html.matchAll(/wibble\s*=\s*["']([^"']+)/gi)].map(m=>m[1]);
+        const file = [...html.matchAll(/(?:file|src|url)\s*:\s*["']([^"']{20,})/gi)].map(m=>m[1]).filter(x=>x.includes('http'));
+        const b64urls = [...html.matchAll(/["']([A-Za-z0-9+\/]{60,}={0,2})["']/g)].map(m=>{try{return atob(m[1])}catch{return null}}).filter(x=>x&&x.startsWith('http'));
         const packed = html.includes("eval(function(p,a,c,k");
-        return json({ size: html.length, m3u8s, hls, file, packed, preview: html.slice(0, 1000) });
+        // Grab 500 chars around "m3u8" or "hls" if found
+        const m3u8idx = html.indexOf('.m3u8');
+        const hlsidx = html.indexOf("'hls'");
+        const context = m3u8idx > 0 ? html.slice(Math.max(0,m3u8idx-100), m3u8idx+200) : (hlsidx > 0 ? html.slice(Math.max(0,hlsidx-100), hlsidx+200) : "");
+        return json({ size: html.length, m3u8s, hls, sources, wibble, file, b64urls: b64urls.slice(0,3), packed, context, preview: html.slice(0, 800) });
       } catch(e) { return json({ error: String(e) }); }
     }
 
