@@ -77,64 +77,38 @@ function parseAnimeCards(html: string): { id: string; name: string; poster: stri
   const results: { id: string; name: string; poster: string }[] = [];
   const seen = new Set<string>();
 
-  function extractCard(slug: string, block: string) {
-    if (seen.has(slug)) return;
+  // Find all /anime/slug links and grab surrounding context for title/poster
+  for (const m of html.matchAll(
+    /href=["'](?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9][a-z0-9-]+)["']/gi
+  )) {
+    const slug = m[1];
+    if (seen.has(slug)) continue;
     seen.add(slug);
-    const titleM =
-      block.match(/title="([^"]+)"/) ||
-      block.match(/alt="([^"]+)"/) ||
-      block.match(/class="[^"]*title[^"]*"[^>]*>([^<]+)</);
-    let name = titleM ? titleM[1] : slug;
-    name = name.replace(/<[^>]+>/g, "").trim();
-    // Prefer data-src (lazy loaded), grab thumbs/ or assets/ paths
+
+    // Grab up to 600 chars after the link for poster/title
+    const pos = m.index! + m[0].length;
+    const block = html.slice(pos, pos + 600);
+
+    // Title: alt attribute on img, or title attribute
+    const titleM = block.match(/alt="([^"]{3,})"/) || block.match(/title="([^"]{3,})"/);
+    const name = titleM ? titleM[1].trim() : slug;
+
+    // Poster: data-src preferred (lazy load), then src
     const posterM =
-      block.match(/data-src=["'](https?:\/\/latanime\.org\/[^"']+\.(?:jpg|jpeg|png|webp)[^"']*)/i) ||
-      block.match(/src=["'](https?:\/\/latanime\.org\/[^"']+\.(?:jpg|jpeg|png|webp)[^"']*)/i) ||
-      block.match(/data-src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)/i);
+      block.match(/data-src="(https?:\/\/latanime\.org\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
+      block.match(/data-src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
+      block.match(/src="(https?:\/\/latanime\.org\/(?:thumbs|assets)\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/);
     const poster = posterM
-      ? (posterM[1].startsWith("http") ? posterM[1] : `${BASE_URL}${posterM[1]}`)
+      ? (posterM[1].startsWith("http") ? posterM[1] : BASE_URL + posterM[1])
       : "";
-    results.push({ id: `latanime:${slug}`, name, poster });
+
+    // Skip nav/menu links (they appear in navbar too)
+    if (!name || name.length < 2) continue;
+
+    results.push({ id: "latanime:" + slug, name, poster });
   }
 
-  // Pattern 1: homepage/emision — <a href="/anime/slug" class="anime-card|thumb">
-  for (const m of html.matchAll(
-    /<a[^>]+href="(?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9-]+)"[^>]*class="[^"]*(?:anime-card|thumb)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi
-  )) extractCard(m[1], m[2]);
-
-  for (const m of html.matchAll(
-    /<a[^>]*class="[^"]*(?:anime-card|thumb)[^"]*"[^>]*href="(?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9-]+)"[^>]*>([\s\S]*?)<\/a>/gi
-  )) extractCard(m[1], m[2]);
-
-  // Pattern 2: /animes directory — <a href="/anime/slug"><div class="series">...
-  if (results.length === 0) {
-    for (const m of html.matchAll(
-      /<a[^>]+href="(?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9-]+)"[^>]*>\s*<div[^>]*class="[^"]*series[^"]*"[^>]*>([\s\S]{0,600}?)<\/div>\s*<\/a>/gi
-    )) {
-      extractCard(m[1], m[2]);
-    }
-  }
-
-  // Pattern 3: generic fallback — any /anime/ link
-  if (results.length === 0) {
-    for (const m of html.matchAll(
-      /<a[^>]+href="(?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9-]+)"[^>]*>([\s\S]{0,800}?)<\/a>/gi
-    )) {
-      const block = m[2];
-      const titleM =
-        block.match(/title="([^"]+)"/) ||
-        block.match(/<p[^>]*>([\s\S]*?)<\/p>/) ||
-        block.match(/<h\d[^>]*>([\s\S]*?)<\/h\d>/);
-      const name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : m[1];
-      const posterM = block.match(/(?:src|data-src)=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)/i);
-      const poster = posterM
-        ? (posterM[1].startsWith("http") ? posterM[1] : `${BASE_URL}${posterM[1]}`)
-        : "";
-      if (!seen.has(m[1])) { seen.add(m[1]); results.push({ id: `latanime:${m[1]}`, name, poster }); }
-    }
-  }
-
-  return results.slice(0, 50);
+  return results.slice(0, 100);
 }
 
 function toMetaPreview(card: { id: string; name: string; poster: string }) {
