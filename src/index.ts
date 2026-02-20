@@ -218,6 +218,22 @@ const EMBED_EXTRACTORS: {
   extract: (html: string, embedUrl: string) => Promise<string[]>;
 }[] = [
   {
+    name: "VOE",
+    pattern: /voe\.sx/i,
+    extract: async (html) => {
+      const m = html.match(/'hls':\s*'([^']+)'/i) || html.match(/hls:\s*["']([^"']+\.m3u8[^"']*)/i);
+      return m ? [m[1]] : [];
+    },
+  },
+  {
+    name: "mp4upload",
+    pattern: /mp4upload\.com/i,
+    extract: async (html) => {
+      const m = html.match(/src:\s*["']([^"']+\.mp4[^"']*)/i);
+      return m ? [m[1]] : [];
+    },
+  },
+  {
     name: "Filemoon",
     pattern: /filemoon\.|moonplayer\./i,
     extract: async (html) => {
@@ -306,81 +322,51 @@ async function getStreams(rawId: string) {
   const epUrl = `${BASE_URL}/ver/${slug}-episodio-${epNum}`;
   const html = await fetchHtml(epUrl);
 
-  const dataKeyM =
-    html.match(/class="[^"]*player[^"]*"[^>]*data-key="([A-Za-z0-9+/=]+)"/i) ||
-    html.match(/data-key="([A-Za-z0-9+/=]+)"[^>]*class="[^"]*player[^"]*"/i) ||
-    html.match(/data-key="([A-Za-z0-9+/=]+)"/);
-  let baseUrl = "";
-  if (dataKeyM) { try { baseUrl = atob(dataKeyM[1]); } catch { /* empty */ } }
-
+  // Each <li id="play-video"><a class="play-video" data-player="BASE64_FULL_URL">name</a></li>
+  // data-player is a base64-encoded FULL embed URL — no base key needed
   const embedUrls: { url: string; name: string }[] = [];
   const seen = new Set<string>();
 
-  function addEmbed(dataPlayer: string, name: string) {
-    if (!dataPlayer || seen.has(dataPlayer)) return;
-    seen.add(dataPlayer);
-    const cleanName = name.replace(/<[^>]+>/g, "").trim().toLowerCase();
-    let embedUrl: string;
-    if (cleanName === "yourupload") {
-      try { embedUrl = atob(dataPlayer); } catch { return; }
-    } else {
-      embedUrl = baseUrl ? baseUrl + dataPlayer : dataPlayer;
-    }
-    if (!embedUrl) return;
-    if (embedUrl.startsWith("//")) embedUrl = `https:${embedUrl}`;
-    if (!embedUrl.startsWith("http")) return;
-    embedUrls.push({ url: embedUrl, name: name.replace(/<[^>]+>/g, "").trim() || "Player" });
+  for (const m of html.matchAll(/<a[^>]+data-player="([A-Za-z0-9+/=]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
+    const b64 = m[1];
+    const rawName = m[2].replace(/<[^>]+>/g, "").trim() || "Player";
+    if (seen.has(b64)) continue;
+    seen.add(b64);
+
+    let embedUrl = "";
+    try { embedUrl = atob(b64); } catch { continue; }
+    if (!embedUrl.startsWith("http")) embedUrl = embedUrl.startsWith("//") ? `https:${embedUrl}` : "";
+    if (!embedUrl) continue;
+
+    embedUrls.push({ url: embedUrl, name: rawName });
   }
-
-  for (const ulM of html.matchAll(/class="[^"]*cap_repro[^"]*"[^>]*>([\s\S]*?)<\/(?:ul|div)>/gi)) {
-    for (const aM of ulM[1].matchAll(/<a[^>]+data-player="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi)) {
-      addEmbed(aM[1], aM[2]);
-    }
-  }
-  for (const liM of html.matchAll(/<li[^>]*class="[^"]*cap_repro[^"]*"[^>]*>([\s\S]*?)<\/li>/gi)) {
-    for (const aM of liM[1].matchAll(/<a[^>]+data-player="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi)) {
-      addEmbed(aM[1], aM[2]);
-    }
-  }
-
-  const playVideoM = html.match(/id="play-video"[\s\S]{0,300}?data-player="([^"]+)"/i);
-  if (playVideoM) addEmbed(playVideoM[1], "Default");
-
-  const videoLoadingM = html.match(/id="videoLoading"[^>]*data-video="([^"]+)"/i);
-  if (videoLoadingM) addEmbed(videoLoadingM[1], "VideoLoading");
-
-  for (const m of html.matchAll(/data-player="([^"]+)"/gi)) addEmbed(m[1], "Player");
 
   if (embedUrls.length === 0) {
-    console.error(`[getStreams] 0 embeds found. URL: ${epUrl}`);
+    console.error(`[getStreams] 0 embeds found at ${epUrl}`);
     return { streams: [] };
   }
 
   const streams: { url: string; title: string; behaviorHints: { notWebReady: boolean } }[] = [];
 
-  for (const embed of embedUrls.slice(0, 6)) {
+  for (const embed of embedUrls.slice(0, 8)) {
     try {
       const extractor = EMBED_EXTRACTORS.find((e) => e.pattern.test(embed.url));
       if (!extractor) continue;
       let embedHtml = "";
-      try {
-        embedHtml = await fetchHtml(embed.url);
-      } catch (e) {
-        console.error(`[getStreams] fetchHtml failed for ${embed.url}:`, e);
-        continue;
-      }
+      try { embedHtml = await fetchHtml(embed.url); }
+      catch (e) { console.error(`[fetchHtml] failed for ${embed.url}:`, e); continue; }
       const urls = await extractor.extract(embedHtml, embed.url);
       for (const streamUrl of urls) {
         if (streamUrl?.startsWith("http")) {
           streams.push({
             url: streamUrl,
-            title: `🌎 ${embed.name || extractor.name} — Latino`,
+            title: `🌎 ${embed.name} — Latino`,
             behaviorHints: { notWebReady: false },
           });
         }
       }
     } catch (e) {
-      console.error(`[getStreams] Extractor threw for ${embed.url}:`, e);
+      console.error(`[getStreams] extractor threw for ${embed.url}:`, e);
     }
   }
 
