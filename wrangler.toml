@@ -3,8 +3,6 @@ main = "src/index.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat_v2"]
 
-[browser]
-binding = "BROWSER"
-
 [vars]
-TMDB_KEY = ""
+TMDB_KEY   = ""
+BRIDGE_URL = "https://latanime-bridge.onrender.com"
