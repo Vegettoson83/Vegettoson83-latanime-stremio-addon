@@ -208,24 +208,29 @@ async function getStreams(rawId: string, env: Env) {
   const streams: { url: string; title: string; behaviorHints: { notWebReady: boolean } }[] = [];
 
   if (bridgeUrl) {
-    // Parallel extraction via Render bridge — cap at 4 concurrent
-    const settled = await Promise.allSettled(
-      embedUrls.slice(0, 4).map(async (embed) => {
+    // Parallel extraction — all at once, take whatever succeeds within 45s
+    const results = await Promise.allSettled(
+      embedUrls.map(async (embed) => {
         const streamUrl = await extractViaBridge(embed.url, bridgeUrl);
         return streamUrl ? { url: streamUrl, name: embed.name } : null;
       })
     );
-    for (const r of settled) {
+    const extractedNames = new Set<string>();
+    for (const r of results) {
       if (r.status === "fulfilled" && r.value) {
         streams.push({ url: r.value.url, title: `▶ ${r.value.name} — Latino`, behaviorHints: { notWebReady: false } });
+        extractedNames.add(r.value.name);
       }
     }
-  }
-
-  // Web fallback for remaining embeds
-  for (const embed of embedUrls) {
-    const alreadyExtracted = streams.some(s => s.title.includes(embed.name));
-    if (!alreadyExtracted) {
+    // Web fallback only for hosts that failed extraction
+    for (const embed of embedUrls) {
+      if (!extractedNames.has(embed.name)) {
+        streams.push({ url: embed.url, title: `🌐 ${embed.name} — Latino`, behaviorHints: { notWebReady: true } });
+      }
+    }
+  } else {
+    // No bridge — all web fallback
+    for (const embed of embedUrls) {
       streams.push({ url: embed.url, title: `🌐 ${embed.name} — Latino`, behaviorHints: { notWebReady: true } });
     }
   }
