@@ -285,48 +285,32 @@ async function extractStreamFromEmbed(embedUrl: string, env: Env): Promise<strin
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
     );
-    await page.setExtraHTTPHeaders({
-      "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-      "Referer": BASE_URL,
-    });
-    await page.setRequestInterception(true);
 
     let streamUrl: string | null = null;
-    let resolveStream: (url: string) => void;
+    let resolveStream!: (url: string) => void;
     const streamPromise = new Promise<string>((res) => { resolveStream = res; });
 
-    page.on("request", (req: any) => {
-      const u = req.url();
-
-      if (!streamUrl && u.includes(".m3u8")) {
-        streamUrl = u;
-        resolveStream(u);
-        req.abort();
-        return;
-      }
-
-      if (!streamUrl && u.includes(".mp4") && !u.includes("analytics") && !u.includes("track")) {
-        streamUrl = u;
-        resolveStream(u);
-        req.abort();
-        return;
-      }
-
-      const blocked = ["googlesyndication", "doubleclick", "facebook.com/tr",
-                       "analytics", "adserver", "popads", "adnxs"];
-      if (blocked.some((b) => u.includes(b))) { req.abort(); return; }
-
-      const rt = req.resourceType();
-      if (["image", "font", "media"].includes(rt)) { req.abort(); return; }
-
-      req.continue();
+    // CDP Network interception — supported in @cloudflare/puppeteer
+    const client = await page.createCDPSession();
+    await client.send("Network.enable");
+    await client.send("Network.setBlockedURLs", {
+      urls: ["*googlesyndication*", "*doubleclick*", "*analytics*", "*adserver*", "*popads*"],
     });
 
-    await page.goto(embedUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+    client.on("Network.requestWillBeSent", (params: any) => {
+      if (streamUrl) return;
+      const u: string = params.request.url;
+      if (u.includes(".m3u8") || (u.includes(".mp4") && !u.includes("analytics") && !u.includes("track"))) {
+        streamUrl = u;
+        resolveStream(u);
+      }
+    });
+
+    await page.goto(embedUrl, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
 
     const result = await Promise.race([
       streamPromise,
-      new Promise<null>((res) => setTimeout(() => res(null), 12000)),
+      new Promise<null>((res) => setTimeout(() => res(null), 15000)),
     ]);
 
     return result;
