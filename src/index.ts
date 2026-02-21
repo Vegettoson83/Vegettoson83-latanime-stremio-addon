@@ -249,6 +249,20 @@ export default {
       return json({ tmdbKey: tmdbKey ? "set" : "not set", bridgeUrl: bridgeUrl || "not set" });
     }
 
+    if (path === "/debug-bridge") {
+      const testUrl = url.searchParams.get("url") || "https://luluvid.com/e/t66o00zj95a9";
+      if (!bridgeUrl) return json({ error: "BRIDGE_URL not set" });
+      try {
+        const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(testUrl)}`, {
+          signal: AbortSignal.timeout(50000),
+        });
+        const body = await r.text();
+        return json({ status: r.status, body, testUrl, bridgeUrl });
+      } catch(e: any) {
+        return json({ error: String(e), testUrl, bridgeUrl });
+      }
+    }
+
     const catM = path.match(/^\/catalog\/([^/]+)\/([^/]+?)(?:\/([^/]+))?\.json$/);
     if (catM) {
       const [, , catalogId, extraStr] = catM;
