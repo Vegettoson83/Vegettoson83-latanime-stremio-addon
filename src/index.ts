@@ -171,14 +171,40 @@ async function getMeta(id: string, tmdbKey: string) {
 }
 
 // ─── DIRECT EXTRACTORS (no browser needed) ───────────────────────────────────
+
+// mp4upload: file URL is in the HTML
 async function extractMp4upload(embedUrl: string): Promise<string | null> {
   try {
     const html = await fetchHtml(embedUrl);
-    // mp4upload stores the file URL in a jwplayer setup or eval block
     const m =
       html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/) ||
       html.match(/src:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/) ||
       html.match(/file:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+
+// latanime /reproductor proxy: they proxy every embed through their own server
+// URL pattern: https://latanime.org/reproductor?url=btoa(embedUrl)
+// Their page contains the actual player HTML which may expose the stream
+async function extractViaReproductor(embedUrl: string): Promise<string | null> {
+  try {
+    const b64 = btoa(embedUrl);
+    const reproUrl = `${BASE_URL}/reproductor?url=${b64}`;
+    const html = await fetch(reproUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Referer": BASE_URL,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    }).then(r => r.text());
+
+    // Look for m3u8 or mp4 URLs in the proxied HTML
+    const m =
+      html.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/) ||
+      html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
+      html.match(/source\s+src=["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/) ||
+      html.match(/["'](https?:\/\/[^"']+\.mp4[^"']{0,50})["']/);
     return m ? m[1] : null;
   } catch { return null; }
 }
@@ -229,6 +255,10 @@ async function getStreams(rawId: string, env: Env) {
           const streamUrl = await extractMp4upload(embed.url);
           return streamUrl ? { url: streamUrl, name: embed.name } : null;
         }
+        // Try latanime /reproductor proxy first (no external server needed!)
+        const reproUrl = await extractViaReproductor(embed.url);
+        if (reproUrl) return { url: reproUrl, name: embed.name };
+        // Fallback to Render bridge
         const streamUrl = await extractViaBridge(embed.url, bridgeUrl);
         return streamUrl ? { url: streamUrl, name: embed.name } : null;
       })
