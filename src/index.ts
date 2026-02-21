@@ -184,6 +184,27 @@ async function extractMp4upload(embedUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
+// hexload: POST to /api/source/FILE_ID returns mp4 URL
+async function extractHexload(embedUrl: string): Promise<string | null> {
+  try {
+    const fileId = embedUrl.split("embed-").pop()?.split("/")[0];
+    if (!fileId) return null;
+    const r = await fetch(`https://hexload.com/api/source/${fileId}`, {
+      method: "POST",
+      headers: {
+        "Referer": embedUrl,
+        "Origin": "https://hexload.com",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: `r=&d=${encodeURIComponent("https://hexload.com")}`,
+    });
+    const data = await r.json() as { data?: { file?: string }[] };
+    return data?.data?.[0]?.file || null;
+  } catch { return null; }
+}
+
 // latanime /reproductor proxy: they proxy every embed through their own server
 async function extractViaReproductor(embedUrl: string): Promise<string | null> {
   try {
@@ -268,9 +289,14 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
     // Parallel extraction — all at once, take whatever succeeds within 45s
     const results = await Promise.allSettled(
       embedUrls.map(async (embed) => {
-        // mp4upload: extract directly from HTML (no browser needed, faster)
+        // mp4upload: extract directly from HTML
         if (embed.url.includes("mp4upload.com")) {
           const streamUrl = await extractMp4upload(embed.url);
+          return streamUrl ? { url: streamUrl, name: embed.name } : null;
+        }
+        // hexload: POST API
+        if (embed.url.includes("hexload.com")) {
+          const streamUrl = await extractHexload(embed.url);
           return streamUrl ? { url: streamUrl, name: embed.name } : null;
         }
         // 1. Try direct extraction with correct Referer header
