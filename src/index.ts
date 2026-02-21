@@ -239,7 +239,7 @@ async function extractViaBridge(embedUrl: string, bridgeUrl: string): Promise<st
   } catch { return null; }
 }
 
-async function getStreams(rawId: string, env: Env) {
+async function getStreams(rawId: string, env: Env, request?: Request) {
   const parts = rawId.replace("latanime:", "").split(":");
   if (parts.length < 2) return { streams: [] };
   const [slug, epNum] = parts;
@@ -289,8 +289,16 @@ async function getStreams(rawId: string, env: Env) {
       if (r.status === "fulfilled" && r.value) {
         const streamUrl = r.value.url;
         // Determine correct referrer based on stream CDN origin
+        // For m3u8 streams: proxy through Worker to rewrite segment URLs
+        // then Stremio fetches segments directly with proxyHeaders
+        const isHls = streamUrl.includes(".m3u8");
+        const workerBase = new URL(request.url).origin;
+        const finalUrl = isHls
+          ? `${workerBase}/proxy/m3u8?url=${btoa(streamUrl)}&ref=${encodeURIComponent("https://latanime.org/")}`
+          : streamUrl;
+
         streams.push({
-          url: streamUrl,
+          url: finalUrl,
           title: `▶ ${r.value.name} — Latino`,
           behaviorHints: {
             notWebReady: false,
@@ -381,10 +389,47 @@ export default {
       const cached = cacheGet(`stream:${id}`);
       if (cached) return json(cached);
       try {
-        const result = await getStreams(id, env);
+        const result = await getStreams(id, env, request);
         if ((result.streams as unknown[]).length > 0) cacheSet(`stream:${id}`, result, TTL.stream);
         return json(result);
       } catch (e) { return json({ streams: [], error: String(e) }); }
+    }
+
+    // M3U8 proxy — fetches manifest with correct headers, rewrites to absolute URLs
+    if (path === "/proxy/m3u8") {
+      const m3u8Url = url.searchParams.get("url");
+      const referer = url.searchParams.get("ref") || "https://latanime.org/";
+      if (!m3u8Url) return new Response("Missing url", { status: 400 });
+      try {
+        const decoded = atob(m3u8Url);
+        const r = await fetch(decoded, {
+          headers: {
+            "Referer": referer,
+            "Origin": referer.replace(/\/$/, ""),
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+          }
+        });
+        if (!r.ok) return new Response(`Upstream error: ${r.status}`, { status: r.status });
+        const m3u8Text = await r.text();
+        const base = decoded.substring(0, decoded.lastIndexOf("/") + 1);
+        // Rewrite relative segment/playlist URLs to absolute
+        const rewritten = m3u8Text.split("
+").map(line => {
+          if (line.startsWith("#") || line.trim() === "") return line;
+          if (line.startsWith("http")) return line;
+          return base + line.trim();
+        }).join("
+");
+        return new Response(rewritten, {
+          headers: {
+            ...CORS,
+            "Content-Type": "application/vnd.apple.mpegurl",
+            "Access-Control-Allow-Origin": "*",
+          }
+        });
+      } catch(e) {
+        return new Response(String(e), { status: 500 });
+      }
     }
 
     return new Response("Not found", { status: 404, headers: CORS });
