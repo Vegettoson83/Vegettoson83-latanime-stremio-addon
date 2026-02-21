@@ -287,7 +287,26 @@ async function getStreams(rawId: string, env: Env) {
     const extractedNames = new Set<string>();
     for (const r of results) {
       if (r.status === "fulfilled" && r.value) {
-        streams.push({ url: r.value.url, title: `▶ ${r.value.name} — Latino`, behaviorHints: { notWebReady: false } });
+        const streamUrl = r.value.url;
+        // Determine correct referrer based on stream CDN origin
+        let referrerUrl = BASE_URL;
+        if (streamUrl.includes("mp4upload") || streamUrl.includes("mp4upload.com")) {
+          referrerUrl = "https://www.mp4upload.com/";
+        } else if (streamUrl.includes("tnmr.org") || streamUrl.includes("luluvid")) {
+          referrerUrl = "https://luluvid.com/";
+        } else if (streamUrl.includes("filemoon") || streamUrl.includes("r66nv9ed")) {
+          referrerUrl = "https://filemoon.sx/";
+        } else if (streamUrl.includes("voe") || streamUrl.includes("cloudatacdn")) {
+          referrerUrl = "https://voe.sx/";
+        }
+        streams.push({
+          url: streamUrl,
+          title: `▶ ${r.value.name} — Latino`,
+          behaviorHints: {
+            notWebReady: false,
+            referrerUrl,
+          }
+        });
         extractedNames.add(r.value.name);
       }
     }
