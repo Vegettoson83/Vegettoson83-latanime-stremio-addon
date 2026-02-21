@@ -438,14 +438,12 @@ export default {
         if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
         const m3u8Text = await r.text();
         // Rewrite ALL segment/playlist URLs through our segment proxy
-        const rewritten = m3u8Text.split("
-").map(line => {
+        const rewritten = m3u8Text.split("\n").map(line => {
           const trimmed = line.trim();
           if (trimmed.startsWith("#") || trimmed === "") return line;
           const absUrl = trimmed.startsWith("http") ? trimmed : base + trimmed;
           return `${workerBase}/proxy/seg?url=${btoa(absUrl)}&ref=${encodeURIComponent(referer)}`;
-        }).join("
-");
+        }).join("\n");
         return new Response(rewritten, {
           headers: {
             "Content-Type": "application/vnd.apple.mpegurl",
