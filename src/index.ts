@@ -289,16 +289,6 @@ async function getStreams(rawId: string, env: Env) {
       if (r.status === "fulfilled" && r.value) {
         const streamUrl = r.value.url;
         // Determine correct referrer based on stream CDN origin
-        let referrerUrl = BASE_URL;
-        if (streamUrl.includes("mp4upload") || streamUrl.includes("mp4upload.com")) {
-          referrerUrl = "https://www.mp4upload.com/";
-        } else if (streamUrl.includes("tnmr.org") || streamUrl.includes("luluvid")) {
-          referrerUrl = "https://luluvid.com/";
-        } else if (streamUrl.includes("filemoon") || streamUrl.includes("r66nv9ed")) {
-          referrerUrl = "https://filemoon.sx/";
-        } else if (streamUrl.includes("voe") || streamUrl.includes("cloudatacdn")) {
-          referrerUrl = "https://voe.sx/";
-        }
         streams.push({
           url: streamUrl,
           title: `▶ ${r.value.name} — Latino`,
@@ -306,8 +296,8 @@ async function getStreams(rawId: string, env: Env) {
             notWebReady: false,
             proxyHeaders: {
               request: {
-                "Referer": referrerUrl,
-                "Origin": referrerUrl.replace(/\/$/, ""),
+                "Referer": "https://latanime.org/",
+                "Origin": "https://latanime.org",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
               }
             }
