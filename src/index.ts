@@ -170,6 +170,19 @@ async function getMeta(id: string, tmdbKey: string) {
   };
 }
 
+// ─── DIRECT EXTRACTORS (no browser needed) ───────────────────────────────────
+async function extractMp4upload(embedUrl: string): Promise<string | null> {
+  try {
+    const html = await fetchHtml(embedUrl);
+    // mp4upload stores the file URL in a jwplayer setup or eval block
+    const m =
+      html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/) ||
+      html.match(/src:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/) ||
+      html.match(/file:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+
 // ─── BRIDGE EXTRACTION ────────────────────────────────────────────────────────
 async function extractViaBridge(embedUrl: string, bridgeUrl: string): Promise<string | null> {
   try {
@@ -211,6 +224,11 @@ async function getStreams(rawId: string, env: Env) {
     // Parallel extraction — all at once, take whatever succeeds within 45s
     const results = await Promise.allSettled(
       embedUrls.map(async (embed) => {
+        // mp4upload: extract directly from HTML (no browser needed, faster)
+        if (embed.url.includes("mp4upload.com")) {
+          const streamUrl = await extractMp4upload(embed.url);
+          return streamUrl ? { url: streamUrl, name: embed.name } : null;
+        }
         const streamUrl = await extractViaBridge(embed.url, bridgeUrl);
         return streamUrl ? { url: streamUrl, name: embed.name } : null;
       })
