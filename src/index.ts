@@ -302,13 +302,7 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
           title: `▶ ${r.value.name} — Latino`,
           behaviorHints: {
             notWebReady: false,
-            proxyHeaders: {
-              request: {
-                "Referer": "https://latanime.org/",
-                "Origin": "https://latanime.org",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-              }
-            }
+
           }
         });
         extractedNames.add(r.value.name);
@@ -395,36 +389,65 @@ export default {
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
 
-    // M3U8 proxy — fetches manifest with correct headers, rewrites to absolute URLs
+    // Full transparent proxy — Worker fetches everything, pipes to Stremio
     if (path === "/proxy/m3u8") {
       const m3u8Url = url.searchParams.get("url");
       const referer = url.searchParams.get("ref") || "https://latanime.org/";
       if (!m3u8Url) return new Response("Missing url", { status: 400 });
       try {
         const decoded = atob(m3u8Url);
+        const base = decoded.substring(0, decoded.lastIndexOf("/") + 1);
+        const workerBase = new URL(request.url).origin;
         const r = await fetch(decoded, {
           headers: {
             "Referer": referer,
-            "Origin": referer.replace(/\/$/, ""),
+            "Origin": "https://latanime.org",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
           }
         });
-        if (!r.ok) return new Response(`Upstream error: ${r.status}`, { status: r.status });
+        if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
         const m3u8Text = await r.text();
-        const base = decoded.substring(0, decoded.lastIndexOf("/") + 1);
-        // Rewrite relative segment/playlist URLs to absolute
+        // Rewrite ALL segment/playlist URLs through our segment proxy
         const rewritten = m3u8Text.split("
 ").map(line => {
-          if (line.startsWith("#") || line.trim() === "") return line;
-          if (line.startsWith("http")) return line;
-          return base + line.trim();
+          const trimmed = line.trim();
+          if (trimmed.startsWith("#") || trimmed === "") return line;
+          const absUrl = trimmed.startsWith("http") ? trimmed : base + trimmed;
+          return `${workerBase}/proxy/seg?url=${btoa(absUrl)}&ref=${encodeURIComponent(referer)}`;
         }).join("
 ");
         return new Response(rewritten, {
           headers: {
-            ...CORS,
             "Content-Type": "application/vnd.apple.mpegurl",
             "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-cache",
+          }
+        });
+      } catch(e) {
+        return new Response(String(e), { status: 500 });
+      }
+    }
+
+    // Segment proxy — pipes TS segments from CDN to Stremio
+    if (path === "/proxy/seg") {
+      const segUrl = url.searchParams.get("url");
+      const referer = url.searchParams.get("ref") || "https://latanime.org/";
+      if (!segUrl) return new Response("Missing url", { status: 400 });
+      try {
+        const decoded = atob(segUrl);
+        const r = await fetch(decoded, {
+          headers: {
+            "Referer": referer,
+            "Origin": "https://latanime.org",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+          }
+        });
+        if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
+        return new Response(r.body, {
+          headers: {
+            "Content-Type": r.headers.get("Content-Type") || "video/MP2T",
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=3600",
           }
         });
       } catch(e) {
