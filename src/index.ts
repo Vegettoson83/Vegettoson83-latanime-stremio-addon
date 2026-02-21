@@ -304,7 +304,13 @@ async function getStreams(rawId: string, env: Env) {
           title: `▶ ${r.value.name} — Latino`,
           behaviorHints: {
             notWebReady: false,
-            referrerUrl,
+            proxyHeaders: {
+              request: {
+                "Referer": referrerUrl,
+                "Origin": referrerUrl.replace(/\/$/, ""),
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+              }
+            }
           }
         });
         extractedNames.add(r.value.name);
