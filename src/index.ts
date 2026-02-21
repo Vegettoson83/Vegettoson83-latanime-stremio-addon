@@ -389,6 +389,36 @@ export default {
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
 
+    // Debug: fetch any embed URL from Worker's CF IP and return HTML + found URLs
+    if (path === "/debug-host") {
+      const embedUrl = url.searchParams.get("url");
+      if (!embedUrl) return new Response("Missing url", { status: 400 });
+      try {
+        const r = await fetch(embedUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+            "Referer": "https://latanime.org/",
+            "Origin": "https://latanime.org",
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Language": "es-ES,es;q=0.9",
+          }
+        });
+        const html = await r.text();
+        // Extract all interesting URLs
+        const urls = [...html.matchAll(/["'`](https?:\/\/[^"'`\s]{15,}\.(?:mp4|mkv|m3u8|ts)[^"'`\s]*)/gi)]
+          .map(m => m[1]);
+        return Response.json({
+          status: r.status,
+          contentType: r.headers.get("content-type"),
+          htmlLen: html.length,
+          foundUrls: urls,
+          htmlSnippet: html.slice(0, 2000),
+        }, { headers: CORS });
+      } catch(e) {
+        return Response.json({ error: String(e) }, { headers: CORS });
+      }
+    }
+
     // Full transparent proxy — Worker fetches everything, pipes to Stremio
     if (path === "/proxy/m3u8") {
       const m3u8Url = url.searchParams.get("url");
