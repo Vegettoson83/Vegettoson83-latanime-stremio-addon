@@ -329,6 +329,40 @@ async function extractDirect(embedUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
+// savefiles.com / streamhls.to — direct HLS extraction
+// Flow: savefiles.com/{code} → streamhls.to/e/{code} → scrape master.m3u8
+async function extractSavefiles(embedUrl: string): Promise<string | null> {
+  try {
+    // Normalize to streamhls embed URL
+    // Possible inputs:
+    //   https://savefiles.com/hxhufbkiftyf
+    //   https://streamhls.to/e/hxhufbkiftyf
+    let fileCode: string | null = null;
+
+    const sfMatch = embedUrl.match(/savefiles\.com\/([a-z0-9]+)/i);
+    const shMatch = embedUrl.match(/streamhls\.to\/e\/([a-z0-9]+)/i);
+    if (sfMatch) fileCode = sfMatch[1];
+    else if (shMatch) fileCode = shMatch[1];
+    if (!fileCode) return null;
+
+    const embedPageUrl = `https://streamhls.to/e/${fileCode}`;
+    const html = await fetch(embedPageUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Referer": "https://savefiles.com/",
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+      },
+    }).then(r => r.text());
+
+    // Look for HLS m3u8 in page source
+    const m =
+      html.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/) ||
+      html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
+      html.match(/source\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+
 // ─── BRIDGE EXTRACTION ────────────────────────────────────────────────────────
 async function extractViaBridge(embedUrl: string, bridgeUrl: string): Promise<string | null> {
   try {
@@ -390,6 +424,11 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
           const streamUrl = await extractHexload(embed.url);
           return streamUrl ? { url: streamUrl, name: embed.name } : null;
         }
+        // savefiles / streamhls: direct HLS from embed page
+        if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to")) {
+          const streamUrl = await extractSavefiles(embed.url);
+          return streamUrl ? { url: streamUrl, name: embed.name } : null;
+        }
         // 1. Try direct extraction with correct Referer header
         const directUrl = await extractDirect(embed.url);
         if (directUrl) return { url: directUrl, name: embed.name };
@@ -409,7 +448,7 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
         // For m3u8 streams: proxy through Worker to rewrite segment URLs
         // then Stremio fetches segments directly with proxyHeaders
         const isHls = streamUrl.includes(".m3u8");
-        const workerBase = new URL(request.url).origin;
+        const workerBase = request ? new URL(request.url).origin : "";
         const finalUrl = isHls
           ? `${workerBase}/proxy/m3u8?url=${btoa(streamUrl)}&ref=${encodeURIComponent("https://latanime.org/")}`
           : streamUrl;
@@ -455,6 +494,15 @@ export default {
     // Debug
     if (path === "/debug") {
       return json({ tmdbKey: tmdbKey ? "set" : "not set", bridgeUrl: bridgeUrl || "not set" });
+    }
+
+    // Quick savefiles/streamhls test
+    if (path === "/debug-savefiles") {
+      const code = url.searchParams.get("code") || "hxhufbkiftyf";
+      const testUrl = `https://savefiles.com/${code}`;
+      const t0 = Date.now();
+      const streamUrl = await extractSavefiles(testUrl);
+      return json({ code, streamUrl, ms: Date.now() - t0 });
     }
 
     if (path === "/debug-bridge") {
