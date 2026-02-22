@@ -37,9 +37,9 @@ const TTL = { catalog: 10 * 60 * 1000, meta: 2 * 60 * 60 * 1000, stream: 30 * 60
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "3.2.0",
+  version: "3.3.0",
   name: "Latanime",
-  description: "Anime Latino y Castellano desde latanime.org",
+  description: "Anime Latino y Castellano desde latanime.org — hexload + savefiles",
   logo: "https://latanime.org/public/img/logito.png",
   resources: ["catalog", "meta", "stream"],
   types: ["series"],
