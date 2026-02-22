@@ -489,7 +489,7 @@ export default {
           contentType: r.headers.get("content-type"),
           htmlLen: html.length,
           foundUrls: urls,
-          htmlSnippet: html.slice(0, 1000),
+          htmlSnippet: html.slice(0, 5000),
           extra,
         }, { headers: CORS });
       } catch(e) {
