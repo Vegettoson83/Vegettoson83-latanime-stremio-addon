@@ -215,24 +215,43 @@ async function extractFilemoon(embedUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
-// hexload: POST to /api/source/FILE_ID returns mp4 URL
+// hexload: POST to /download with op=download3 returns mp4 URL
 async function extractHexload(embedUrl: string): Promise<string | null> {
   try {
-    const fileId = embedUrl.split("embed-").pop()?.split("/")[0];
+    // Extract file ID from embed URL: /embed-k5el8mvrft9y -> k5el8mvrft9y
+    const fileId = embedUrl.split("embed-").pop()?.split(/[/?]/)[0];
     if (!fileId) return null;
-    const r = await fetch(`https://hexload.com/api/source/${fileId}`, {
+
+    // First fetch the embed page to get cookies/session
+    const embedR = await fetch(embedUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Referer": "https://latanime.org/",
+      }
+    });
+    const cookies = embedR.headers.get("set-cookie") || "";
+
+    // POST to /download to get the actual mp4 URL
+    const r = await fetch("https://hexload.com/download", {
       method: "POST",
       headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
         "Referer": embedUrl,
         "Origin": "https://hexload.com",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
         "Content-Type": "application/x-www-form-urlencoded",
         "X-Requested-With": "XMLHttpRequest",
+        "Cookie": cookies,
       },
-      body: `r=&d=${encodeURIComponent("https://hexload.com")}`,
+      body: new URLSearchParams({
+        op: "download3",
+        id: fileId,
+        ajax: "1",
+        method_free: "1",
+      }).toString(),
     });
-    const data = await r.json() as { data?: { file?: string }[] };
-    return data?.data?.[0]?.file || null;
+    const data = await r.json() as { msg?: string; result?: { url?: string } };
+    if (data.msg === "OK" && data.result?.url) return data.result.url;
+    return null;
   } catch { return null; }
 }
 
