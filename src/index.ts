@@ -549,6 +549,39 @@ export default {
       return json({ tmdbKey: tmdbKey ? "set" : "not set", bridgeUrl: bridgeUrl || "not set" });
     }
 
+    // Dump raw streamhls embed HTML for diagnosis
+    if (path === "/debug-streamhls") {
+      const code = url.searchParams.get("code") || "hxhufbkiftyf";
+      const embedUrl = `https://streamhls.to/e/${code}`;
+      try {
+        const r = await fetch(embedUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+            "Referer": "https://savefiles.com/",
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+          },
+        });
+        const html = await r.text();
+        // Extract all JS fetch/XHR calls, source URLs, and interesting variables
+        const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map(m => m[1]).join("\n");
+        const interesting = {
+          status: r.status,
+          htmlLen: html.length,
+          // Find all URLs in page
+          urls: [...html.matchAll(/["'`](https?:\/\/[^"'`\s]{10,})["'`]/g)].map(m => m[1]),
+          // Find fetch() calls
+          fetchCalls: [...scripts.matchAll(/fetch\s*\(\s*["'`]([^"'`]+)["'`]/g)].map(m => m[1]),
+          // Find XHR open calls
+          xhrCalls: [...scripts.matchAll(/\.open\s*\([^,]+,\s*["'`]([^"'`]+)["'`]/g)].map(m => m[1]),
+          // Find source/file/hls variables
+          sourceVars: [...scripts.matchAll(/(?:source|file|hls|stream|src)\s*[:=]\s*["'`]([^"'`\s]{10,})["'`]/gi)].map(m => m[1]),
+          // First 6000 chars of HTML
+          htmlSnippet: html.slice(0, 6000),
+        };
+        return json(interesting);
+      } catch(e: any) { return json({ error: String(e) }); }
+    }
+
     // Quick savefiles/streamhls test
     if (path === "/debug-savefiles") {
       const code = url.searchParams.get("code") || "hxhufbkiftyf";
