@@ -457,27 +457,38 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
     for (const r of results) {
       if (r.status === "fulfilled" && r.value) {
         const streamUrl = r.value.url;
-        // Determine correct referrer based on stream CDN origin
-        // For m3u8 streams: proxy through Worker to rewrite segment URLs
-        // then Stremio fetches segments directly with proxyHeaders
         const isHls = streamUrl.includes(".m3u8");
+        const isSavefiles = streamUrl.includes("savefiles.com") || streamUrl.includes("s3.savefiles") || streamUrl.includes("s2.savefiles");
         const workerBase = request ? new URL(request.url).origin : "";
-        // Use the correct referer for each CDN
-        const streamReferer = streamUrl.includes("savefiles.com") || streamUrl.includes("s3.savefiles")
-          ? "https://streamhls.to/"
-          : "https://latanime.org/";
-        const finalUrl = isHls
-          ? `${workerBase}/proxy/m3u8?url=${encodeUrl(streamUrl)}&ref=${encodeURIComponent(streamReferer)}`
-          : streamUrl;
 
-        streams.push({
-          url: finalUrl,
+        let finalUrl: string;
+        const streamEntry: Record<string, unknown> = {
           title: `▶ ${r.value.name} — Latino`,
-          behaviorHints: {
-            notWebReady: false,
+          behaviorHints: { notWebReady: false },
+        };
 
-          }
-        });
+        if (isHls && isSavefiles) {
+          // Savefiles segments already have auth tokens in URL — no proxy needed
+          // Send raw m3u8 directly; Stremio follows absolute URLs natively
+          finalUrl = streamUrl;
+          streamEntry.behaviorHints = {
+            notWebReady: false,
+            proxyHeaders: {
+              request: {
+                "Referer": "https://streamhls.to/",
+                "Origin": "https://streamhls.to",
+              }
+            }
+          };
+        } else if (isHls) {
+          const streamReferer = "https://latanime.org/";
+          finalUrl = `${workerBase}/proxy/m3u8?url=${encodeUrl(streamUrl)}&ref=${encodeURIComponent(streamReferer)}`;
+        } else {
+          finalUrl = streamUrl;
+        }
+
+        streamEntry.url = finalUrl;
+        streams.push(streamEntry as { url: string; title: string; behaviorHints: { notWebReady: boolean } });
         extractedNames.add(r.value.name);
       }
     }
