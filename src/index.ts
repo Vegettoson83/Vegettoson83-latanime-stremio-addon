@@ -6,6 +6,8 @@
 interface Env {
   TMDB_KEY?:    string;
   BRIDGE_URL?:  string;  // https://latanime-bridge.onrender.com
+  MFP_URL?:     string;  // https://latanime-bridge.onrender.com:8888 (MediaFlow Proxy)
+  MFP_PASSWORD?: string; // latanime
 }
 
 const ADDON_ID = "com.latanime.stremio";
@@ -507,7 +509,21 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
   if (embedUrls.length === 0) return { streams: [] };
 
   const bridgeUrl = (env.BRIDGE_URL || "").trim();
+  const mfpBase   = (env.MFP_URL || (bridgeUrl ? bridgeUrl.replace(/\/$/, "") + ":8888" : "")).trim();
+  const mfpPass   = (env.MFP_PASSWORD || "latanime").trim();
   const streams: { url: string; title: string; behaviorHints: { notWebReady: boolean } }[] = [];
+
+  // Build a proxied HLS URL via MediaFlow Proxy (handles multi-level HLS + headers natively)
+  function mfpHlsUrl(m3u8Url: string, referer: string): string {
+    if (!mfpBase) return m3u8Url; // fallback: raw URL
+    const params = new URLSearchParams({
+      d: m3u8Url,
+      h_Referer: referer,
+      h_Origin: new URL(referer).origin,
+      api_password: mfpPass,
+    });
+    return `${mfpBase}/proxy/hls/manifest.m3u8?${params}`;
+  }
 
   if (bridgeUrl) {
     // Parallel extraction — all at once, take whatever succeeds within 45s
@@ -579,10 +595,9 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
         };
 
         if (isHls && isSavefiles) {
-          // Route through worker proxy with correct referer
-          finalUrl = `${workerBase}/proxy/m3u8?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://streamhls.to/")}`;
+          finalUrl = mfpHlsUrl(streamUrl, "https://streamhls.to/");
         } else if (isHls) {
-          finalUrl = `${workerBase}/proxy/m3u8?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://latanime.org/")}`;
+          finalUrl = mfpHlsUrl(streamUrl, "https://latanime.org/");
         } else {
           finalUrl = streamUrl;
         }
