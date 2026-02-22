@@ -509,7 +509,7 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
   if (embedUrls.length === 0) return { streams: [] };
 
   const bridgeUrl = (env.BRIDGE_URL || "").trim();
-  const mfpBase   = (env.MFP_URL || (bridgeUrl ? bridgeUrl.replace(/\/$/, "") + ":8888" : "")).trim();
+  const mfpBase   = (env.MFP_URL || bridgeUrl).trim().replace(/\/$/, "");
   const mfpPass   = (env.MFP_PASSWORD || "latanime").trim();
   const streams: { url: string; title: string; behaviorHints: { notWebReady: boolean } }[] = [];
 
