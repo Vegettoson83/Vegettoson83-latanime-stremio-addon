@@ -184,6 +184,37 @@ async function extractMp4upload(embedUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
+// filemoon: unpack eval(function(p,a,c,k,e,d)) to get m3u8
+async function extractFilemoon(embedUrl: string): Promise<string | null> {
+  try {
+    const r = await fetch(embedUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Referer": "https://latanime.org/",
+      }
+    });
+    const html = await r.text();
+
+    // Find packed JS block: eval(function(p,a,c,k,e,d){...}('packed',base,count,'dict'))
+    const m = html.match(/eval\(function\(p,a,c,k,e,(?:d|r)\)\{.+?\}\('([\s\S]+?)',(\d+),(\d+),'([\s\S]+?)'\.split\('\|'\)\)\)/);
+    if (!m) return null;
+
+    const packed = m[1];
+    const base = parseInt(m[2]);
+    const dict = m[4].split("|");
+
+    // Unpack: replace each base-N token with dict lookup
+    const unpacked = packed.replace(/\w+/g, (word) => {
+      const n = parseInt(word, base);
+      return (n < dict.length && dict[n]) ? dict[n] : word;
+    });
+
+    // Extract m3u8 URL from unpacked string
+    const url = unpacked.match(/https?:\/\/[^"'\s]+\.m3u8[^"'\s]*/);
+    return url ? url[0] : null;
+  } catch { return null; }
+}
+
 // hexload: POST to /api/source/FILE_ID returns mp4 URL
 async function extractHexload(embedUrl: string): Promise<string | null> {
   try {
@@ -292,6 +323,11 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
         // mp4upload: extract directly from HTML
         if (embed.url.includes("mp4upload.com")) {
           const streamUrl = await extractMp4upload(embed.url);
+          return streamUrl ? { url: streamUrl, name: embed.name } : null;
+        }
+        // filemoon: unpack eval() to get m3u8
+        if (embed.url.includes("filemoon.sx") || embed.url.includes("filemoon.to")) {
+          const streamUrl = await extractFilemoon(embed.url);
           return streamUrl ? { url: streamUrl, name: embed.name } : null;
         }
         // hexload: POST API
