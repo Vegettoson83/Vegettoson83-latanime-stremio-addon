@@ -330,21 +330,47 @@ async function extractDirect(embedUrl: string): Promise<string | null> {
 }
 
 // savefiles.com / streamhls.to — direct HLS extraction
-// Flow: savefiles.com/{code} → streamhls.to/e/{code} → scrape master.m3u8
+// Strategy 1: savefiles public API /file/encodings → direct link
+// Strategy 2: scrape streamhls.to/e/{code} for m3u8 in HTML
+// Strategy 3: POST to streamhls.to API (same pattern as other hosters)
 async function extractSavefiles(embedUrl: string): Promise<string | null> {
   try {
-    // Normalize to streamhls embed URL
-    // Possible inputs:
-    //   https://savefiles.com/hxhufbkiftyf
-    //   https://streamhls.to/e/hxhufbkiftyf
     let fileCode: string | null = null;
-
     const sfMatch = embedUrl.match(/savefiles\.com\/([a-z0-9]+)/i);
     const shMatch = embedUrl.match(/streamhls\.to\/e\/([a-z0-9]+)/i);
     if (sfMatch) fileCode = sfMatch[1];
     else if (shMatch) fileCode = shMatch[1];
     if (!fileCode) return null;
 
+    // Strategy 1: savefiles public API with example key (no-auth tier)
+    try {
+      const apiR = await fetch(
+        `https://savefiles.com/api/file/encodings?key=4505yqombojzeakvb&file_code=${fileCode}`,
+        { headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" } }
+      );
+      if (apiR.ok) {
+        const data = await apiR.json() as { result?: { link?: string; quality?: string; status?: string }[] };
+        // Prefer highest quality with READY status, fallback to any link
+        const ready = (data.result || []).filter(r => r.status === "READY" || r.link);
+        const best = ready.find(r => r.quality === "h") || ready[0];
+        if (best?.link) {
+          // The link may itself be an HTML redirect page — follow it
+          const linkR = await fetch(best.link, {
+            headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://savefiles.com/" },
+            redirect: "follow",
+          });
+          const linkHtml = await linkR.text();
+          const m = linkHtml.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/) ||
+                    linkHtml.match(/["'`](https?:\/\/[^"'`\s]+\.mp4[^"'`\s]*)["'`]/);
+          if (m) return m[1];
+          // If the final URL itself is an m3u8/mp4, return it
+          const finalUrl = linkR.url;
+          if (finalUrl.includes(".m3u8") || finalUrl.includes(".mp4")) return finalUrl;
+        }
+      }
+    } catch { /* fall through */ }
+
+    // Strategy 2: scrape streamhls embed page
     const embedPageUrl = `https://streamhls.to/e/${fileCode}`;
     const html = await fetch(embedPageUrl, {
       headers: {
@@ -354,12 +380,39 @@ async function extractSavefiles(embedUrl: string): Promise<string | null> {
       },
     }).then(r => r.text());
 
-    // Look for HLS m3u8 in page source
     const m =
       html.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/) ||
       html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
       html.match(/source\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/);
-    return m ? m[1] : null;
+    if (m) return m[1];
+
+    // Strategy 3: POST to streamhls API (common videohost pattern)
+    const fileIdMatch = html.match(/(?:file_code|fileId|file_id)\s*[:=]\s*["'`]?([a-z0-9]+)["'`]?/i);
+    const hashMatch   = html.match(/(?:hash|_token)\s*[:=]\s*["'`]([^"'`\s]{8,})["'`]/i);
+    if (fileIdMatch) {
+      const postData: Record<string, string> = { r: "https://savefiles.com/", d: "streamhls.to" };
+      if (hashMatch) postData.hash = hashMatch[1];
+      postData.file_code = fileIdMatch[1];
+      const apiR2 = await fetch(`https://streamhls.to/api/source/${fileIdMatch[1]}`, {
+        method: "POST",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+          "Referer": embedPageUrl,
+          "Origin": "https://streamhls.to",
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        body: new URLSearchParams(postData).toString(),
+      });
+      if (apiR2.ok) {
+        const d = await apiR2.json() as { data?: { file?: string; label?: string }[] };
+        const sources = d.data || [];
+        const best2 = sources.find(s => s.label?.includes("1080") || s.label?.includes("720")) || sources[0];
+        if (best2?.file) return best2.file;
+      }
+    }
+
+    return null;
   } catch { return null; }
 }
 
@@ -499,10 +552,17 @@ export default {
     // Quick savefiles/streamhls test
     if (path === "/debug-savefiles") {
       const code = url.searchParams.get("code") || "hxhufbkiftyf";
-      const testUrl = `https://savefiles.com/${code}`;
       const t0 = Date.now();
-      const streamUrl = await extractSavefiles(testUrl);
-      return json({ code, streamUrl, ms: Date.now() - t0 });
+      // Also expose raw API response for diagnosis
+      let apiRaw: unknown = null;
+      try {
+        const r = await fetch(`https://savefiles.com/api/file/encodings?key=4505yqombojzeakvb&file_code=${code}`, {
+          headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
+        });
+        apiRaw = { status: r.status, body: await r.text() };
+      } catch(e: any) { apiRaw = { error: String(e) }; }
+      const streamUrl = await extractSavefiles(`https://savefiles.com/${code}`);
+      return json({ code, streamUrl, apiRaw, ms: Date.now() - t0 });
     }
 
     if (path === "/debug-bridge") {
