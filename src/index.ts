@@ -23,6 +23,10 @@ function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: CORS });
 }
 
+// URL-safe base64: handles URLs with commas, underscores, special chars
+function encodeUrl(url: string): string { return btoa(encodeURIComponent(url)); }
+function decodeUrl(b64: string): string { return decodeURIComponent(atob(b64)); }
+
 const CACHE = new Map<string, { data: unknown; expires: number }>();
 function cacheGet(key: string): unknown | null {
   const e = CACHE.get(key);
@@ -463,7 +467,7 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
           ? "https://streamhls.to/"
           : "https://latanime.org/";
         const finalUrl = isHls
-          ? `${workerBase}/proxy/m3u8?url=${btoa(streamUrl)}&ref=${encodeURIComponent(streamReferer)}`
+          ? `${workerBase}/proxy/m3u8?url=${encodeUrl(streamUrl)}&ref=${encodeURIComponent(streamReferer)}`
           : streamUrl;
 
         streams.push({
@@ -649,7 +653,7 @@ export default {
       const referer = url.searchParams.get("ref") || "https://latanime.org/";
       if (!m3u8Url) return new Response("Missing url", { status: 400 });
       try {
-        const decoded = atob(m3u8Url);
+        const decoded = decodeUrl(m3u8Url);
         const base = decoded.substring(0, decoded.lastIndexOf("/") + 1);
         const workerBase = new URL(request.url).origin;
         const r = await fetch(decoded, {
@@ -669,9 +673,9 @@ export default {
           const absUrl = trimmed.startsWith("http") ? trimmed : base + trimmed;
           // Variant playlists go through /proxy/m3u8, segments through /proxy/seg
           if (isMaster || absUrl.includes(".m3u8")) {
-            return `${workerBase}/proxy/m3u8?url=${btoa(absUrl)}&ref=${encodeURIComponent(referer)}`;
+            return `${workerBase}/proxy/m3u8?url=${encodeUrl(absUrl)}&ref=${encodeURIComponent(referer)}`;
           }
-          return `${workerBase}/proxy/seg?url=${btoa(absUrl)}&ref=${encodeURIComponent(referer)}`;
+          return `${workerBase}/proxy/seg?url=${encodeUrl(absUrl)}&ref=${encodeURIComponent(referer)}`;
         }).join("\n");
         return new Response(rewritten, {
           headers: {
@@ -691,7 +695,7 @@ export default {
       const referer = url.searchParams.get("ref") || "https://latanime.org/";
       if (!segUrl) return new Response("Missing url", { status: 400 });
       try {
-        const decoded = atob(segUrl);
+        const decoded = decodeUrl(segUrl);
         const r = await fetch(decoded, {
           headers: {
             "Referer": referer,
