@@ -468,13 +468,20 @@ export default {
         const urls = [...html.matchAll(/["'`](https?:\/\/[^"'`\s]{15,}\.(?:mp4|mkv|m3u8|ts)[^"'`\s]*)/gi)]
           .map(m => m[1]);
 
-        // If hexload, also fetch /myjs.js to find the video URL
-        let myjs = null;
+        // Extra: fetch /myjs.js for hexload
+        let extra: Record<string, string> = {};
         if (embedUrl.includes("hexload.com")) {
           const jsR = await fetch("https://hexload.com/myjs.js?9", {
             headers: { ...hdrs, "Referer": embedUrl }
           });
-          myjs = await jsR.text();
+          extra.myjs = (await jsR.text()).slice(0, 3000);
+        }
+
+        // Test filemoon unpacker inline
+        if (embedUrl.includes("filemoon")) {
+          const m = html.match(/eval\(function\(p,a,c,k,e,(?:d|r)\)\{.+?\}\('([\s\S]+?)',(\d+),(\d+),'([\s\S]+?)'\.split\('\|'\)\)\)/);
+          extra.packedFound = m ? "YES" : "NO";
+          extra.packedSnippet = html.includes("eval(function") ? html.substring(html.indexOf("eval(function"), html.indexOf("eval(function") + 200) : "eval(function NOT FOUND";
         }
 
         return Response.json({
@@ -482,8 +489,8 @@ export default {
           contentType: r.headers.get("content-type"),
           htmlLen: html.length,
           foundUrls: urls,
-          htmlSnippet: html.slice(0, 1500),
-          myjs: myjs?.slice(0, 3000),
+          htmlSnippet: html.slice(0, 1000),
+          extra,
         }, { headers: CORS });
       } catch(e) {
         return Response.json({ error: String(e) }, { headers: CORS });
