@@ -329,10 +329,9 @@ async function extractDirect(embedUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
-// savefiles.com / streamhls.to — direct HLS extraction
-// Strategy 1: savefiles public API /file/encodings → direct link
-// Strategy 2: scrape streamhls.to/e/{code} for m3u8 in HTML
-// Strategy 3: POST to streamhls.to API (same pattern as other hosters)
+// savefiles.com / streamhls.to
+// The embed page is a click-to-play shell. On click it POSTs form to /dl
+// with op=embed + file_code, which returns the actual video player HTML with m3u8.
 async function extractSavefiles(embedUrl: string): Promise<string | null> {
   try {
     let fileCode: string | null = null;
@@ -342,77 +341,34 @@ async function extractSavefiles(embedUrl: string): Promise<string | null> {
     else if (shMatch) fileCode = shMatch[1];
     if (!fileCode) return null;
 
-    // Strategy 1: savefiles public API with example key (no-auth tier)
-    try {
-      const apiR = await fetch(
-        `https://savefiles.com/api/file/encodings?key=4505yqombojzeakvb&file_code=${fileCode}`,
-        { headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" } }
-      );
-      if (apiR.ok) {
-        const data = await apiR.json() as { result?: { link?: string; quality?: string; status?: string }[] };
-        // Prefer highest quality with READY status, fallback to any link
-        const ready = (data.result || []).filter(r => r.status === "READY" || r.link);
-        const best = ready.find(r => r.quality === "h") || ready[0];
-        if (best?.link) {
-          // The link may itself be an HTML redirect page — follow it
-          const linkR = await fetch(best.link, {
-            headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://savefiles.com/" },
-            redirect: "follow",
-          });
-          const linkHtml = await linkR.text();
-          const m = linkHtml.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/) ||
-                    linkHtml.match(/["'`](https?:\/\/[^"'`\s]+\.mp4[^"'`\s]*)["'`]/);
-          if (m) return m[1];
-          // If the final URL itself is an m3u8/mp4, return it
-          const finalUrl = linkR.url;
-          if (finalUrl.includes(".m3u8") || finalUrl.includes(".mp4")) return finalUrl;
-        }
-      }
-    } catch { /* fall through */ }
-
-    // Strategy 2: scrape streamhls embed page
     const embedPageUrl = `https://streamhls.to/e/${fileCode}`;
-    const html = await fetch(embedPageUrl, {
+
+    // POST to /dl — replicates the play button click
+    const dlR = await fetch(`https://streamhls.to/dl`, {
+      method: "POST",
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": "https://savefiles.com/",
+        "Referer": embedPageUrl,
+        "Origin": "https://streamhls.to",
+        "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
       },
-    }).then(r => r.text());
+      body: new URLSearchParams({
+        op: "embed",
+        file_code: fileCode,
+        auto: "1",
+        referer: "https://savefiles.com/",
+      }).toString(),
+      redirect: "follow",
+    });
+
+    const html = await dlR.text();
 
     const m =
       html.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/) ||
       html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
-      html.match(/source\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/);
-    if (m) return m[1];
-
-    // Strategy 3: POST to streamhls API (common videohost pattern)
-    const fileIdMatch = html.match(/(?:file_code|fileId|file_id)\s*[:=]\s*["'`]?([a-z0-9]+)["'`]?/i);
-    const hashMatch   = html.match(/(?:hash|_token)\s*[:=]\s*["'`]([^"'`\s]{8,})["'`]/i);
-    if (fileIdMatch) {
-      const postData: Record<string, string> = { r: "https://savefiles.com/", d: "streamhls.to" };
-      if (hashMatch) postData.hash = hashMatch[1];
-      postData.file_code = fileIdMatch[1];
-      const apiR2 = await fetch(`https://streamhls.to/api/source/${fileIdMatch[1]}`, {
-        method: "POST",
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-          "Referer": embedPageUrl,
-          "Origin": "https://streamhls.to",
-          "Content-Type": "application/x-www-form-urlencoded",
-          "X-Requested-With": "XMLHttpRequest",
-        },
-        body: new URLSearchParams(postData).toString(),
-      });
-      if (apiR2.ok) {
-        const d = await apiR2.json() as { data?: { file?: string; label?: string }[] };
-        const sources = d.data || [];
-        const best2 = sources.find(s => s.label?.includes("1080") || s.label?.includes("720")) || sources[0];
-        if (best2?.file) return best2.file;
-      }
-    }
-
-    return null;
+      html.match(/["'`](https?:\/\/[^"'`\s]+\.mp4[^"'`\s]*)["'`]/);
+    return m ? m[1] : null;
   } catch { return null; }
 }
 
@@ -549,36 +505,26 @@ export default {
       return json({ tmdbKey: tmdbKey ? "set" : "not set", bridgeUrl: bridgeUrl || "not set" });
     }
 
-    // Dump raw streamhls embed HTML for diagnosis
+    // Dump raw streamhls /dl POST response for diagnosis
     if (path === "/debug-streamhls") {
       const code = url.searchParams.get("code") || "hxhufbkiftyf";
-      const embedUrl = `https://streamhls.to/e/${code}`;
+      const embedPageUrl = `https://streamhls.to/e/${code}`;
       try {
-        const r = await fetch(embedUrl, {
+        const r = await fetch(`https://streamhls.to/dl`, {
+          method: "POST",
           headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-            "Referer": "https://savefiles.com/",
+            "Referer": embedPageUrl,
+            "Origin": "https://streamhls.to",
+            "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
           },
+          body: new URLSearchParams({ op: "embed", file_code: code, auto: "1", referer: "https://savefiles.com/" }).toString(),
+          redirect: "follow",
         });
         const html = await r.text();
-        // Extract all JS fetch/XHR calls, source URLs, and interesting variables
-        const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map(m => m[1]).join("\n");
-        const interesting = {
-          status: r.status,
-          htmlLen: html.length,
-          // Find all URLs in page
-          urls: [...html.matchAll(/["'`](https?:\/\/[^"'`\s]{10,})["'`]/g)].map(m => m[1]),
-          // Find fetch() calls
-          fetchCalls: [...scripts.matchAll(/fetch\s*\(\s*["'`]([^"'`]+)["'`]/g)].map(m => m[1]),
-          // Find XHR open calls
-          xhrCalls: [...scripts.matchAll(/\.open\s*\([^,]+,\s*["'`]([^"'`]+)["'`]/g)].map(m => m[1]),
-          // Find source/file/hls variables
-          sourceVars: [...scripts.matchAll(/(?:source|file|hls|stream|src)\s*[:=]\s*["'`]([^"'`\s]{10,})["'`]/gi)].map(m => m[1]),
-          // First 6000 chars of HTML
-          htmlSnippet: html.slice(0, 6000),
-        };
-        return json(interesting);
+        const urls = [...html.matchAll(/["'`](https?:\/\/[^"'`\s]{10,})["'`]/g)].map(m => m[1]);
+        return json({ status: r.status, finalUrl: r.url, htmlLen: html.length, urls, htmlSnippet: html.slice(0, 5000) });
       } catch(e: any) { return json({ error: String(e) }); }
     }
 
