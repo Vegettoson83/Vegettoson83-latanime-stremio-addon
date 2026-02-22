@@ -608,7 +608,6 @@ export default {
     if (path === "/debug-savefiles") {
       const code = url.searchParams.get("code") || "hxhufbkiftyf";
       const t0 = Date.now();
-      // Also expose raw API response for diagnosis
       let apiRaw: unknown = null;
       try {
         const r = await fetch(`https://savefiles.com/api/file/encodings?key=4505yqombojzeakvb&file_code=${code}`, {
@@ -617,7 +616,11 @@ export default {
         apiRaw = { status: r.status, body: await r.text() };
       } catch(e: any) { apiRaw = { error: String(e) }; }
       const streamUrl = await extractSavefiles(`https://savefiles.com/${code}`);
-      return json({ code, streamUrl, apiRaw, ms: Date.now() - t0 });
+      const workerBase = new URL(request.url).origin;
+      const proxyUrl = streamUrl
+        ? `${workerBase}/proxy/m3u8?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://streamhls.to/")}`
+        : null;
+      return json({ code, streamUrl, proxyUrl, apiRaw, ms: Date.now() - t0 });
     }
 
     if (path === "/debug-bridge") {
