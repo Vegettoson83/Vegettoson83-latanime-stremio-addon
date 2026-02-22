@@ -513,6 +513,74 @@ export default {
       return json({ tmdbKey: tmdbKey ? "set" : "not set", bridgeUrl: bridgeUrl || "not set" });
     }
 
+    // Test the full proxy chain for a savefiles stream
+    if (path === "/debug-proxy") {
+      const code = url.searchParams.get("code") || "hxhufbkiftyf";
+      const results: Record<string, unknown> = {};
+      try {
+        // Step 1: get m3u8 URL
+        const embedUrl = `https://savefiles.com/${code}`;
+        const streamUrl = await extractSavefiles(embedUrl);
+        results.streamUrl = streamUrl;
+        if (!streamUrl) return json({ error: "extractSavefiles returned null", results });
+
+        // Step 2: fetch master m3u8 directly
+        const masterR = await fetch(streamUrl, {
+          headers: {
+            "Referer": "https://streamhls.to/",
+            "Origin": "https://streamhls.to",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+          }
+        });
+        results.masterStatus = masterR.status;
+        const masterText = await masterR.text();
+        results.masterLen = masterText.length;
+        results.masterSnippet = masterText.slice(0, 1000);
+
+        // Step 3: find first variant playlist URL
+        const lines = masterText.split("\n").filter(l => l.trim() && !l.startsWith("#"));
+        const firstVariant = lines[0]?.trim();
+        results.firstVariant = firstVariant;
+        if (!firstVariant) return json({ error: "no variant found in master", results });
+
+        const variantUrl = firstVariant.startsWith("http")
+          ? firstVariant
+          : streamUrl.substring(0, streamUrl.lastIndexOf("/") + 1) + firstVariant;
+        results.variantUrl = variantUrl;
+
+        // Step 4: fetch variant playlist
+        const varR = await fetch(variantUrl, {
+          headers: {
+            "Referer": "https://streamhls.to/",
+            "Origin": "https://streamhls.to",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+          }
+        });
+        results.variantStatus = varR.status;
+        const varText = await varR.text();
+        results.variantSnippet = varText.slice(0, 500);
+
+        // Step 5: find first segment and test it
+        const segLines = varText.split("\n").filter(l => l.trim() && !l.startsWith("#"));
+        const firstSeg = segLines[0]?.trim();
+        if (firstSeg) {
+          const segUrl2 = firstSeg.startsWith("http")
+            ? firstSeg
+            : variantUrl.substring(0, variantUrl.lastIndexOf("/") + 1) + firstSeg;
+          results.firstSegUrl = segUrl2;
+          const segR = await fetch(segUrl2, {
+            headers: {
+              "Referer": "https://streamhls.to/",
+              "User-Agent": "Mozilla/5.0",
+            }
+          });
+          results.segStatus = segR.status;
+          results.segContentType = segR.headers.get("content-type");
+        }
+      } catch(e: any) { results.error = String(e); }
+      return json(results);
+    }
+
     // Dump raw streamhls /dl POST response for diagnosis
     if (path === "/debug-streamhls") {
       const code = url.searchParams.get("code") || "hxhufbkiftyf";
