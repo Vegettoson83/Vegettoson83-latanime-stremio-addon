@@ -333,6 +333,102 @@ async function extractDirect(embedUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
+// dsvplay = DoodStream mirror — 3-step tokenized MP4
+async function extractDsvplay(embedUrl: string): Promise<string | null> {
+  try {
+    const host = new URL(embedUrl).origin;
+    const html = await fetch(embedUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Referer": host + "/",
+      }
+    }).then(r => r.text());
+
+    // Step 1: extract keysCode path
+    const keysM = html.match(/dsplayer\.hotkeys[^']*'([^']+).+?function/s) ||
+                  html.match(/\$\.get\s*\(\s*'([^']+)'/);
+    if (!keysM) return null;
+    const keysCode = keysM[1];
+
+    // Step 2: extract token
+    const tokenM = html.match(/makePlay.+?return[^?]+([^"'\n]+)/s) ||
+                   html.match(/token\s*=\s*'([^']+)'/);
+    if (!tokenM) return null;
+    const token = tokenM[1].trim();
+
+    // Step 3: GET the keys URL to get partial stream URL
+    const keysR = await fetch(`${host}${keysCode}`, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Referer": embedUrl,
+      }
+    });
+    const partial = await keysR.text();
+    if (!partial || !partial.startsWith("http")) return null;
+
+    // Step 4: build final URL: partial + random 10-char string + token + epoch seconds
+    const rand = Math.random().toString(36).substring(2, 12);
+    const epoch = Math.floor(Date.now() / 1000);
+    return `${partial.trim()}${rand}?token=${token}&expiry=${epoch}`;
+  } catch { return null; }
+}
+
+// luluvid = LuluStream — unpack eval() → m3u8
+async function extractLuluvid(embedUrl: string): Promise<string | null> {
+  try {
+    const html = await fetch(embedUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Referer": embedUrl,
+        "Origin": new URL(embedUrl).origin,
+      }
+    }).then(r => r.text());
+
+    // Try unpack first
+    const m = html.match(/eval\(function\(p,a,c,k,e,(?:d|r)\)\{.+?\}\('([\s\S]+?)',(\d+),(\d+),'([\s\S]+?)'\.split\('\|'\)\)\)/);
+    if (m) {
+      const packed = m[1], base = parseInt(m[2]), dict = m[4].split("|");
+      const unpacked = packed.replace(/\w+/g, w => {
+        const n = parseInt(w, base);
+        return (n < dict.length && dict[n]) ? dict[n] : w;
+      });
+      const url = unpacked.match(/https?:\/\/[^"'\s]+\.m3u8[^"'\s]*/);
+      if (url) return url[0];
+    }
+
+    // Fallback: direct match in HTML
+    const direct = html.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/);
+    return direct ? direct[1] : null;
+  } catch { return null; }
+}
+
+// mixdrop — unpack eval() → wurl="..."
+async function extractMixdrop(embedUrl: string): Promise<string | null> {
+  try {
+    const html = await fetch(embedUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Referer": "https://mixdrop.co/",
+        "Origin": "https://mixdrop.co",
+      }
+    }).then(r => r.text());
+
+    const m = html.match(/eval\(function\(p,a,c,k,e,(?:d|r)\)\{.+?\}\('([\s\S]+?)',(\d+),(\d+),'([\s\S]+?)'\.split\('\|'\)\)\)/);
+    if (!m) return null;
+
+    const packed = m[1], base = parseInt(m[2]), dict = m[4].split("|");
+    const unpacked = packed.replace(/\w+/g, w => {
+      const n = parseInt(w, base);
+      return (n < dict.length && dict[n]) ? dict[n] : w;
+    });
+
+    const wurl = unpacked.match(/wurl\s*=\s*"?([^";\s]+)"?/);
+    if (!wurl) return null;
+    const raw = wurl[1];
+    return raw.startsWith("http") ? raw : `https:${raw}`;
+  } catch { return null; }
+}
+
 // savefiles.com / streamhls.to
 // The embed page is a click-to-play shell. On click it POSTs form to /dl
 // with op=embed + file_code, which returns the actual video player HTML with m3u8.
@@ -435,6 +531,21 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
         // hexload: POST API
         if (embed.url.includes("hexload.com")) {
           const streamUrl = await extractHexload(embed.url);
+          return streamUrl ? { url: streamUrl, name: embed.name } : null;
+        }
+        // dsvplay / doodstream
+        if (embed.url.includes("dsvplay.com") || embed.url.includes("doodstream.com") || embed.url.includes("dood.")) {
+          const streamUrl = await extractDsvplay(embed.url);
+          return streamUrl ? { url: streamUrl, name: embed.name } : null;
+        }
+        // luluvid / lulustream
+        if (embed.url.includes("luluvid.com") || embed.url.includes("lulustream.com")) {
+          const streamUrl = await extractLuluvid(embed.url);
+          return streamUrl ? { url: streamUrl, name: embed.name } : null;
+        }
+        // mixdrop
+        if (embed.url.includes("mixdrop.")) {
+          const streamUrl = await extractMixdrop(embed.url);
           return streamUrl ? { url: streamUrl, name: embed.name } : null;
         }
         // savefiles / streamhls: direct HLS from embed page
