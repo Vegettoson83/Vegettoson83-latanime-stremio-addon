@@ -6,7 +6,7 @@
 interface Env {
   TMDB_KEY?:    string;
   BRIDGE_URL?:  string;  // https://latanime-bridge.onrender.com
-  MFP_URL?:     string;  // https://latanime-bridge.onrender.com:8888 (MediaFlow Proxy)
+  MFP_URL?:     string;  // Optional override, defaults to BRIDGE_URL (MFP proxied at /proxy)
   MFP_PASSWORD?: string; // latanime
 }
 
