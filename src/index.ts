@@ -464,7 +464,7 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
         let finalUrl: string;
         const streamEntry: Record<string, unknown> = {
           title: `▶ ${r.value.name} — Latino`,
-          behaviorHints: { notWebReady: false },
+          behaviorHints: { notWebReady: isHls },
         };
 
         if (isHls && isSavefiles) {
