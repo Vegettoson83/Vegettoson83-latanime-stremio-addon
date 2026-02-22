@@ -37,7 +37,7 @@ const TTL = { catalog: 10 * 60 * 1000, meta: 2 * 60 * 60 * 1000, stream: 30 * 60
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "3.1.0",
+  version: "3.2.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/public/img/logito.png",
@@ -215,6 +215,37 @@ async function extractFilemoon(embedUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
+// voe.sx: var source = 'URL' is in the HTML — or decoded from JSON blob
+async function extractVoe(embedUrl: string): Promise<string | null> {
+  try {
+    const html = await fetch(embedUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Referer": "https://latanime.org/",
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+      }
+    }).then(r => r.text());
+
+    // Primary: var source = '...' in plain HTML
+    const srcM =
+      html.match(/var\s+source\s*=\s*'(https?:\/\/[^']+\.(?:mp4|m3u8)[^']*)'/) ||
+      html.match(/var\s+source\s*=\s*"(https?:\/\/[^"]+\.(?:mp4|m3u8)[^"]*)"/) ||
+      html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.(?:mp4|m3u8)[^"]*)"/) ||
+      html.match(/sources\s*:\s*\[\s*\{\s*[^}]*file\s*:\s*'(https?:\/\/[^']+\.(?:mp4|m3u8)[^']*)'/);
+
+    if (srcM && !srcM[1].includes("test-videos") && !srcM[1].includes("bigbuck")) {
+      return srcM[1];
+    }
+
+    // Secondary: look for hls source or mp4 in script JSON
+    const hlsM = html.match(/"hls"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
+                 html.match(/hls_url\s*[:=]\s*["'`](https?:\/\/[^"'`]+)["'`]/);
+    if (hlsM) return hlsM[1];
+
+    return null;
+  } catch { return null; }
+}
+
 // hexload: POST to /download with op=download3 returns mp4 URL
 async function extractHexload(embedUrl: string): Promise<string | null> {
   try {
@@ -339,6 +370,11 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
     // Parallel extraction — all at once, take whatever succeeds within 45s
     const results = await Promise.allSettled(
       embedUrls.map(async (embed) => {
+        // voe.sx: var source is in plain HTML
+        if (embed.url.includes("voe.sx") || embed.url.includes("lancewhosedifficult.com") || embed.url.includes("voeunblocked.")) {
+          const streamUrl = await extractVoe(embed.url);
+          return streamUrl ? { url: streamUrl, name: embed.name } : null;
+        }
         // mp4upload: extract directly from HTML
         if (embed.url.includes("mp4upload.com")) {
           const streamUrl = await extractMp4upload(embed.url);
