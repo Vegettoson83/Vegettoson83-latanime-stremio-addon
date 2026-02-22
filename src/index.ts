@@ -458,8 +458,12 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
         // then Stremio fetches segments directly with proxyHeaders
         const isHls = streamUrl.includes(".m3u8");
         const workerBase = request ? new URL(request.url).origin : "";
+        // Use the correct referer for each CDN
+        const streamReferer = streamUrl.includes("savefiles.com") || streamUrl.includes("s3.savefiles")
+          ? "https://streamhls.to/"
+          : "https://latanime.org/";
         const finalUrl = isHls
-          ? `${workerBase}/proxy/m3u8?url=${btoa(streamUrl)}&ref=${encodeURIComponent("https://latanime.org/")}`
+          ? `${workerBase}/proxy/m3u8?url=${btoa(streamUrl)}&ref=${encodeURIComponent(streamReferer)}`
           : streamUrl;
 
         streams.push({
@@ -651,17 +655,22 @@ export default {
         const r = await fetch(decoded, {
           headers: {
             "Referer": referer,
-            "Origin": "https://latanime.org",
+            "Origin": new URL(referer).origin,
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
           }
         });
         if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
         const m3u8Text = await r.text();
-        // Rewrite ALL segment/playlist URLs through our segment proxy
+        const isMaster = m3u8Text.includes("#EXT-X-STREAM-INF");
+        // Rewrite ALL segment/playlist URLs through our proxy
         const rewritten = m3u8Text.split("\n").map(line => {
           const trimmed = line.trim();
           if (trimmed.startsWith("#") || trimmed === "") return line;
           const absUrl = trimmed.startsWith("http") ? trimmed : base + trimmed;
+          // Variant playlists go through /proxy/m3u8, segments through /proxy/seg
+          if (isMaster || absUrl.includes(".m3u8")) {
+            return `${workerBase}/proxy/m3u8?url=${btoa(absUrl)}&ref=${encodeURIComponent(referer)}`;
+          }
           return `${workerBase}/proxy/seg?url=${btoa(absUrl)}&ref=${encodeURIComponent(referer)}`;
         }).join("\n");
         return new Response(rewritten, {
