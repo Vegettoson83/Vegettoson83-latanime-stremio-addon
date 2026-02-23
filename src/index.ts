@@ -308,12 +308,26 @@ async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | 
     page.on("response", async (res) => {
       if (streamUrl) return;
       const url = res.url();
+      // Intercept m3u8 playlist requests
       if (
         (url.includes(".m3u8") || url.includes("/playlist") || url.includes("/master")) &&
         !url.includes("latanime.org")
       ) {
         streamUrl = url;
         console.log(`[browser] Intercepted m3u8: ${url}`);
+        return;
+      }
+      // Intercept JSON API responses that contain m3u8 URLs
+      const ct = res.headers()["content-type"] || "";
+      if (ct.includes("json") && !url.includes("latanime.org")) {
+        try {
+          const text = await res.text();
+          const m = text.match(/["'](https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/);
+          if (m) {
+            streamUrl = m[1];
+            console.log(`[browser] Found m3u8 in JSON response: ${streamUrl}`);
+          }
+        } catch {}
       }
     });
 
