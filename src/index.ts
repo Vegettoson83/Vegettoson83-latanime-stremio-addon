@@ -327,6 +327,29 @@ async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | 
       }),
     ]);
 
+    // Click play button if no stream found yet (handles click-to-play shells like streamhls)
+    if (!streamUrl) {
+      try {
+        const playSelectors = [
+          "#vid_play", ".play-button", "[id*='play']", "[class*='play']",
+          "button", ".jw-icon-display", ".vjs-big-play-button", "video"
+        ];
+        for (const sel of playSelectors) {
+          const el = await page.$(sel);
+          if (el) {
+            await el.click();
+            console.log(`[browser] Clicked: ${sel}`);
+            break;
+          }
+        }
+        // Wait up to 15s for stream after click
+        const deadline = Date.now() + 15000;
+        while (!streamUrl && Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 300));
+        }
+      } catch(e) { console.log("[browser] Click failed:", e); }
+    }
+
     if (!streamUrl) {
       streamUrl = await (page.evaluate as any)(() => {
         const video = (document as any).querySelector("video");
