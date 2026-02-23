@@ -413,18 +413,22 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   if (embedUrls.length === 0) return { streams: [] };
 
   const bridgeUrl = (env.BRIDGE_URL || "").trim();
-  const mfpBase = (env.MFP_URL || bridgeUrl).trim().replace(/\/$/, "");
+  const mfpBase = (env.MFP_URL || "").trim().replace(/\/$/, "");
   const mfpPass = (env.MFP_PASSWORD || "latanime").trim();
+  const workerBase = new URL(request.url).origin;
 
-  function mfpHlsUrl(m3u8Url: string, referer: string) {
-    if (!mfpBase) return m3u8Url;
-    const params = new URLSearchParams({
-      d: m3u8Url,
-      h_Referer: referer,
-      h_Origin: new URL(referer).origin,
-      api_password: mfpPass,
-    });
-    return `${mfpBase}/proxy/hls/manifest.m3u8?${params}`;
+  function hlsProxyUrl(m3u8Url: string, referer: string) {
+    // Use MFP if explicitly configured, otherwise use our own worker proxy
+    if (mfpBase) {
+      const params = new URLSearchParams({
+        d: m3u8Url,
+        h_Referer: referer,
+        h_Origin: new URL(referer).origin,
+        api_password: mfpPass,
+      });
+      return `${mfpBase}/proxy/hls/manifest.m3u8?${params}`;
+    }
+    return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(m3u8Url)}&ref=${encodeURIComponent(referer)}`;
   }
 
   const BROWSER_PLAYERS = ["filemoon", "voe.sx", "lancewhosedifficult", "voeunblocked", "mxdrop", "dsvplay", "doodstream"];
@@ -466,9 +470,9 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       const isSavefiles = streamUrl.includes("savefiles.com") || streamUrl.includes("s3.savefiles") || streamUrl.includes("s2.savefiles") || streamUrl.includes("streamhls.to");
       let finalUrl: string;
       if (isHls && isSavefiles) {
-        finalUrl = mfpHlsUrl(streamUrl, "https://streamhls.to/");
+        finalUrl = hlsProxyUrl(streamUrl, "https://streamhls.to/");
       } else if (isHls) {
-        finalUrl = mfpHlsUrl(streamUrl, "https://latanime.org/");
+        finalUrl = hlsProxyUrl(streamUrl, "https://latanime.org/");
       } else {
         finalUrl = streamUrl;
       }
