@@ -332,12 +332,12 @@ async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | 
     });
 
     await Promise.race([
-      page.goto(embedUrl, { waitUntil: "networkidle2", timeout: 45000 }),
+      page.goto(embedUrl, { waitUntil: "domcontentloaded", timeout: 30000 }),
       new Promise<void>((resolve) => {
         const interval = setInterval(() => {
           if (streamUrl) { clearInterval(interval); resolve(); }
         }, 300);
-        setTimeout(() => clearInterval(interval), 45000);
+        setTimeout(() => clearInterval(interval), 30000);
       }),
     ]);
 
@@ -356,8 +356,8 @@ async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | 
             break;
           }
         }
-        // Wait up to 15s for stream after click
-        const deadline = Date.now() + 15000;
+        // Wait up to 25s for stream after click (SPA players need time to boot + API call)
+        const deadline = Date.now() + 25000;
         while (!streamUrl && Date.now() < deadline) {
           await new Promise(r => setTimeout(r, 300));
         }
