@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "deploy": "wrangler deploy"
+    "deploy": "npx wrangler@4 deploy"
   },
   "devDependencies": {
     "@cloudflare/puppeteer": "^1.0.6",
