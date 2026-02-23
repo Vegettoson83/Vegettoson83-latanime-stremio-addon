@@ -289,9 +289,18 @@ async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | 
 
     const page = await browser.newPage();
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36");
+
+    // Spoof user activation so autoplay works without real click
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, "userActivation", {
+        get: () => ({ isActive: true, hasBeenActive: true }),
+        configurable: true,
+      });
+    });
+
     await page.setRequestInterception(true);
 
-    const BLOCK_TYPES = new Set(["image", "font", "stylesheet", "media"]);
+    const BLOCK_TYPES = new Set(["image", "font", "media"]);
     const BLOCK_HOSTS = ["google-analytics", "googletagmanager", "doubleclick", "facebook", "twitter", "adsbygoogle", "turnstile.cf"];
 
     page.on("request", (req) => {
