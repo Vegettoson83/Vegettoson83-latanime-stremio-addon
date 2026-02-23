@@ -473,6 +473,13 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         const url = extractPixeldrain(embed.url);
         return url ? { url, name: embed.name, isHls: false } : null;
       }
+      // Pixeldrain — transform URL directly, Stremio fetches from user's residential IP
+      if (embed.url.includes("pixeldrain.com")) {
+        const idM = embed.url.match(/pixeldrain\.com\/(?:u\/|l\/)([a-zA-Z0-9]+)/);
+        if (idM) return { url: `https://pixeldrain.com/api/file/${idM[1]}`, name: embed.name, isHls: false };
+        return null;
+      }
+
       if (embed.url.includes("hexload.com")) {
         const url = await extractHexload(embed.url);
         return url ? { url, name: embed.name, isHls: false } : null;
