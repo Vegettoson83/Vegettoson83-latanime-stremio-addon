@@ -250,6 +250,13 @@ async function extractSavefiles(embedUrl: string) {
   } catch { return null; }
 }
 
+
+function extractPixeldrain(embedUrl: string): string | null {
+  const m = embedUrl.match(/pixeldrain\.com\/u\/([a-zA-Z0-9]+)/);
+  if (!m) return null;
+  return `https://pixeldrain.com/api/file/${m[1]}/download`;
+}
+
 async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
   try {
     const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(embedUrl)}`, { signal: AbortSignal.timeout(50000) });
@@ -462,6 +469,10 @@ async function getStreams(rawId: string, env: Env, request: Request) {
 
   const results = await Promise.allSettled(
     embedUrls.map(async (embed) => {
+      if (embed.url.includes("pixeldrain.com")) {
+        const url = extractPixeldrain(embed.url);
+        return url ? { url, name: embed.name, isHls: false } : null;
+      }
       if (embed.url.includes("hexload.com")) {
         const url = await extractHexload(embed.url);
         return url ? { url, name: embed.name, isHls: false } : null;
