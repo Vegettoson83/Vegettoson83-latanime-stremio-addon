@@ -1,36 +1,31 @@
-/**
- * LATANIME STREMIO ADDON — v3.1
- * Cloudflare Worker + Render Bridge (Playwright)
- */
-
-interface Env {
-  TMDB_KEY?:    string;
-  BRIDGE_URL?:  string;  // https://latanime-bridge.onrender.com
-  MFP_URL?:     string;  // Optional override, defaults to BRIDGE_URL (MFP proxied at /proxy)
-  MFP_PASSWORD?: string; // latanime
-}
+import puppeteer from "@cloudflare/puppeteer";
 
 const ADDON_ID = "com.latanime.stremio";
-const BASE_URL  = "https://latanime.org";
+const BASE_URL = "https://latanime.org";
 const TMDB_BASE = "https://api.themoviedb.org/3";
-const TMDB_IMG  = "https://image.tmdb.org/t/p/w500";
+const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
 
 const CORS = {
-  "Access-Control-Allow-Origin":  "*",
+  "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "*",
   "Content-Type": "application/json",
 };
+
+interface Env {
+  MYBROWSER: Fetcher;
+  STREAM_CACHE: KVNamespace;
+  TMDB_KEY: string;
+  BRIDGE_URL: string;
+  MFP_URL: string;
+  MFP_PASSWORD: string;
+}
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: CORS });
 }
 
-// URL-safe base64: handles URLs with commas, underscores, special chars
-function encodeUrl(url: string): string { return btoa(encodeURIComponent(url)); }
-function decodeUrl(b64: string): string { return decodeURIComponent(atob(b64)); }
-
 const CACHE = new Map<string, { data: unknown; expires: number }>();
-function cacheGet(key: string): unknown | null {
+function cacheGet(key: string) {
   const e = CACHE.get(key);
   if (!e) return null;
   if (Date.now() > e.expires) { CACHE.delete(key); return null; }
@@ -39,19 +34,25 @@ function cacheGet(key: string): unknown | null {
 function cacheSet(key: string, data: unknown, ttlMs: number) {
   CACHE.set(key, { data, expires: Date.now() + ttlMs });
 }
-const TTL = { catalog: 10 * 60 * 1000, meta: 2 * 60 * 60 * 1000, stream: 30 * 60 * 1000 };
+
+const TTL = {
+  catalog: 10 * 60 * 1000,
+  meta: 2 * 60 * 60 * 1000,
+  stream: 30 * 60 * 1000,
+  browserStream: 2 * 60 * 60 * 1000,
+};
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "3.3.0",
+  version: "4.0.0",
   name: "Latanime",
-  description: "Anime Latino y Castellano desde latanime.org — hexload + savefiles",
+  description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/public/img/logito.png",
   resources: ["catalog", "meta", "stream"],
   types: ["series"],
   catalogs: [
-    { type: "series", id: "latanime-latest",   name: "Latanime — Recientes",  extra: [{ name: "search", isRequired: false }] },
-    { type: "series", id: "latanime-airing",   name: "Latanime — En Emisión", extra: [] },
+    { type: "series", id: "latanime-latest", name: "Latanime — Recientes", extra: [{ name: "search", isRequired: false }] },
+    { type: "series", id: "latanime-airing", name: "Latanime — En Emisión", extra: [] },
     { type: "series", id: "latanime-directory", name: "Latanime — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
   ],
   idPrefixes: ["latanime:"],
@@ -70,32 +71,38 @@ async function fetchHtml(url: string): Promise<string> {
   return r.text();
 }
 
-async function fetchTmdb(animeName: string, tmdbKey: string): Promise<{ poster: string; background: string; description: string; year: string } | null> {
+async function fetchTmdb(animeName: string, tmdbKey: string) {
   if (!tmdbKey) return null;
-  const cleanName = animeName.replace(/\s+(Latino|Castellano|Japones|Japonés|Sub\s+Español)$/i, "").replace(/\s+S(\d+)$/i, " Season $1").trim();
+  const cleanName = animeName
+    .replace(/\s+(Latino|Castellano|Japones|Japonés|Sub\s+Español)$/i, "")
+    .replace(/\s+S(\d+)$/i, " Season $1")
+    .trim();
   try {
-    const r = await fetch(`${TMDB_BASE}/search/tv?api_key=${tmdbKey}&query=${encodeURIComponent(cleanName)}&language=es-ES`, { headers: { Accept: "application/json" } });
+    const r = await fetch(
+      `${TMDB_BASE}/search/tv?api_key=${tmdbKey}&query=${encodeURIComponent(cleanName)}&language=es-ES`,
+      { headers: { Accept: "application/json" } }
+    );
     if (!r.ok) return null;
-    const data = await r.json() as { results?: Record<string, unknown>[] };
+    const data: any = await r.json();
     const hit = data.results?.[0];
     if (!hit) return null;
     return {
-      poster:      hit.poster_path   ? `${TMDB_IMG}${hit.poster_path}` : "",
-      background:  hit.backdrop_path ? `https://image.tmdb.org/t/p/w1280${hit.backdrop_path}` : "",
-      description: (hit.overview as string) || "",
-      year:        ((hit.first_air_date as string) || "").slice(0, 4),
+      poster: hit.poster_path ? `${TMDB_IMG}${hit.poster_path}` : "",
+      background: hit.backdrop_path ? `https://image.tmdb.org/t/p/w1280${hit.backdrop_path}` : "",
+      description: hit.overview || "",
+      year: (hit.first_air_date || "").slice(0, 4),
     };
   } catch { return null; }
 }
 
-function parseAnimeCards(html: string): { id: string; name: string; poster: string }[] {
+function parseAnimeCards(html: string) {
   const results: { id: string; name: string; poster: string }[] = [];
   const seen = new Set<string>();
   for (const m of html.matchAll(/href=["'](?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9][a-z0-9-]+)["']/gi)) {
     const slug = m[1];
     if (seen.has(slug)) continue;
     seen.add(slug);
-    const pos   = m.index! + m[0].length;
+    const pos = m.index! + m[0].length;
     const block = html.slice(pos, pos + 600);
     const titleM = block.match(/<h3[^>]*>([^<]{3,})<\/h3>/i) || block.match(/alt="([^"]{3,})"/) || block.match(/title="([^"]{3,})"/);
     const name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
@@ -104,7 +111,9 @@ function parseAnimeCards(html: string): { id: string; name: string; poster: stri
       block.match(/data-src="(https?:\/\/latanime\.org\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
       block.match(/data-src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
       block.match(/src="(https?:\/\/latanime\.org\/(?:thumbs|assets)\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/);
-    const poster = posterM ? (posterM[1].startsWith("http") ? posterM[1] : `${BASE_URL}${posterM[1]}`) : "";
+    const poster = posterM
+      ? posterM[1].startsWith("http") ? posterM[1] : `${BASE_URL}${posterM[1]}`
+      : "";
     results.push({ id: `latanime:${slug}`, name, poster });
   }
   return results.slice(0, 100);
@@ -114,7 +123,7 @@ function toMetaPreview(c: { id: string; name: string; poster: string }) {
   return { id: c.id, type: "series", name: c.name, poster: c.poster || `${BASE_URL}/public/img/anime.png`, posterShape: "poster" };
 }
 
-async function searchAnimes(query: string): Promise<{ id: string; name: string; poster: string }[]> {
+async function searchAnimes(query: string) {
   const homeHtml = await fetchHtml(`${BASE_URL}/`);
   const csrfM = homeHtml.match(/name="csrf-token"[^>]+content="([^"]+)"/i) || homeHtml.match(/content="([^"]+)"[^>]+name="csrf-token"/i);
   const csrf = csrfM ? csrfM[1] : "";
@@ -124,8 +133,12 @@ async function searchAnimes(query: string): Promise<{ id: string; name: string; 
       headers: { "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "Referer": `${BASE_URL}/`, "Origin": BASE_URL, "User-Agent": "Mozilla/5.0" },
       body: JSON.stringify({ q: query }),
     });
-    if (r.ok) { const html = await r.text(); const results = parseAnimeCards(html); if (results.length > 0) return results; }
-  } catch { /* fall through */ }
+    if (r.ok) {
+      const html = await r.text();
+      const results = parseAnimeCards(html);
+      if (results.length > 0) return results;
+    }
+  } catch { }
   return parseAnimeCards(await fetchHtml(`${BASE_URL}/buscar?q=${encodeURIComponent(query)}`));
 }
 
@@ -176,296 +189,59 @@ async function getMeta(id: string, tmdbKey: string) {
   };
 }
 
-// ─── DIRECT EXTRACTORS (no browser needed) ───────────────────────────────────
-
-// mp4upload: file URL is in the HTML
-async function extractMp4upload(embedUrl: string): Promise<string | null> {
+async function extractMp4upload(embedUrl: string) {
   try {
     const html = await fetchHtml(embedUrl);
-    const m =
-      html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/) ||
-      html.match(/src:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/) ||
-      html.match(/file:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/);
+    const m = html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/) || html.match(/src:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/) || html.match(/file:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/);
     return m ? m[1] : null;
   } catch { return null; }
 }
 
-// filemoon: unpack eval(function(p,a,c,k,e,d)) to get m3u8
-async function extractFilemoon(embedUrl: string): Promise<string | null> {
+async function extractHexload(embedUrl: string) {
   try {
-    const r = await fetch(embedUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": "https://latanime.org/",
-      }
-    });
-    const html = await r.text();
-
-    // Find packed JS block: eval(function(p,a,c,k,e,d){...}('packed',base,count,'dict'))
-    const m = html.match(/eval\(function\(p,a,c,k,e,(?:d|r)\)\{.+?\}\('([\s\S]+?)',(\d+),(\d+),'([\s\S]+?)'\.split\('\|'\)\)\)/);
-    if (!m) return null;
-
-    const packed = m[1];
-    const base = parseInt(m[2]);
-    const dict = m[4].split("|");
-
-    // Unpack: replace each base-N token with dict lookup
-    const unpacked = packed.replace(/\w+/g, (word) => {
-      const n = parseInt(word, base);
-      return (n < dict.length && dict[n]) ? dict[n] : word;
-    });
-
-    // Extract m3u8 URL from unpacked string
-    const url = unpacked.match(/https?:\/\/[^"'\s]+\.m3u8[^"'\s]*/);
-    return url ? url[0] : null;
-  } catch { return null; }
-}
-
-// voe.sx: var source = 'URL' is in the HTML — or decoded from JSON blob
-async function extractVoe(embedUrl: string): Promise<string | null> {
-  try {
-    const html = await fetch(embedUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": "https://latanime.org/",
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-      }
-    }).then(r => r.text());
-
-    // Primary: var source = '...' in plain HTML
-    const srcM =
-      html.match(/var\s+source\s*=\s*'(https?:\/\/[^']+\.(?:mp4|m3u8)[^']*)'/) ||
-      html.match(/var\s+source\s*=\s*"(https?:\/\/[^"]+\.(?:mp4|m3u8)[^"]*)"/) ||
-      html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.(?:mp4|m3u8)[^"]*)"/) ||
-      html.match(/sources\s*:\s*\[\s*\{\s*[^}]*file\s*:\s*'(https?:\/\/[^']+\.(?:mp4|m3u8)[^']*)'/);
-
-    if (srcM && !srcM[1].includes("test-videos") && !srcM[1].includes("bigbuck")) {
-      return srcM[1];
-    }
-
-    // Secondary: look for hls source or mp4 in script JSON
-    const hlsM = html.match(/"hls"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
-                 html.match(/hls_url\s*[:=]\s*["'`](https?:\/\/[^"'`]+)["'`]/);
-    if (hlsM) return hlsM[1];
-
-    return null;
-  } catch { return null; }
-}
-
-// hexload: POST to /download with op=download3 returns mp4 URL
-async function extractHexload(embedUrl: string): Promise<string | null> {
-  try {
-    // Extract file ID from embed URL: /embed-k5el8mvrft9y -> k5el8mvrft9y
     const fileId = embedUrl.split("embed-").pop()?.split(/[/?]/)[0];
     if (!fileId) return null;
-
-    // First fetch the embed page to get cookies/session
     const embedR = await fetch(embedUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": "https://latanime.org/",
-      }
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36", "Referer": "https://latanime.org/" },
     });
     const cookies = embedR.headers.get("set-cookie") || "";
-
-    // POST to /download to get the actual mp4 URL
     const r = await fetch("https://hexload.com/download", {
       method: "POST",
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": embedUrl,
-        "Origin": "https://hexload.com",
+        "Referer": embedUrl, "Origin": "https://hexload.com",
         "Content-Type": "application/x-www-form-urlencoded",
-        "X-Requested-With": "XMLHttpRequest",
-        "Cookie": cookies,
+        "X-Requested-With": "XMLHttpRequest", "Cookie": cookies,
       },
-      body: new URLSearchParams({
-        op: "download3",
-        id: fileId,
-        ajax: "1",
-        method_free: "1",
-      }).toString(),
+      body: new URLSearchParams({ op: "download3", id: fileId, ajax: "1", method_free: "1" }).toString(),
     });
-    const data = await r.json() as { msg?: string; result?: { url?: string } };
+    const data: any = await r.json();
     if (data.msg === "OK" && data.result?.url) return data.result.url;
     return null;
   } catch { return null; }
 }
 
-// latanime /reproductor proxy: they proxy every embed through their own server
-async function extractViaReproductor(embedUrl: string): Promise<string | null> {
-  try {
-    const b64 = btoa(embedUrl);
-    const reproUrl = `${BASE_URL}/reproductor?url=${b64}`;
-    const html = await fetch(reproUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": BASE_URL,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-    }).then(r => r.text());
-    const m =
-      html.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/) ||
-      html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
-      html.match(/["'](https?:\/\/[^"']+\.mp4[^"']{0,50})["']/);
-    return m ? m[1] : null;
-  } catch { return null; }
-}
-
-// Direct host extractors — send correct Referer per host to bypass hotlink protection
-async function extractDirect(embedUrl: string): Promise<string | null> {
-  try {
-    const origin = new URL(embedUrl).origin;
-    const html = await fetch(embedUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": origin + "/",           // send host's OWN domain as referer
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9",
-        "X-Requested-With": "XMLHttpRequest",
-      },
-    }).then(r => r.text());
-
-    const m =
-      html.match(/["'`](https?:\/\/[^"'`\s]{10,}\.m3u8[^"'`\s]*)["'`]/) ||
-      html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
-      html.match(/hls[Uu]rl\s*[=:]\s*["'`](https?:\/\/[^"'`]+)["'`]/) ||
-      html.match(/source\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/);
-    return m ? m[1] : null;
-  } catch { return null; }
-}
-
-// dsvplay = DoodStream mirror — 3-step tokenized MP4
-async function extractDsvplay(embedUrl: string): Promise<string | null> {
-  try {
-    const host = new URL(embedUrl).origin;
-    const html = await fetch(embedUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": host + "/",
-      }
-    }).then(r => r.text());
-
-    // Step 1: extract keysCode path
-    const keysM = html.match(/dsplayer\.hotkeys[^']*'([^']+).+?function/s) ||
-                  html.match(/\$\.get\s*\(\s*'([^']+)'/);
-    if (!keysM) return null;
-    const keysCode = keysM[1];
-
-    // Step 2: extract token
-    const tokenM = html.match(/makePlay.+?return[^?]+([^"'\n]+)/s) ||
-                   html.match(/token\s*=\s*'([^']+)'/);
-    if (!tokenM) return null;
-    const token = tokenM[1].trim();
-
-    // Step 3: GET the keys URL to get partial stream URL
-    const keysR = await fetch(`${host}${keysCode}`, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": embedUrl,
-      }
-    });
-    const partial = await keysR.text();
-    if (!partial || !partial.startsWith("http")) return null;
-
-    // Step 4: build final URL: partial + random 10-char string + token + epoch seconds
-    const rand = Math.random().toString(36).substring(2, 12);
-    const epoch = Math.floor(Date.now() / 1000);
-    return `${partial.trim()}${rand}?token=${token}&expiry=${epoch}`;
-  } catch { return null; }
-}
-
-// luluvid = LuluStream — unpack eval() → m3u8
-async function extractLuluvid(embedUrl: string): Promise<string | null> {
-  try {
-    const html = await fetch(embedUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": embedUrl,
-        "Origin": new URL(embedUrl).origin,
-      }
-    }).then(r => r.text());
-
-    // Try unpack first
-    const m = html.match(/eval\(function\(p,a,c,k,e,(?:d|r)\)\{.+?\}\('([\s\S]+?)',(\d+),(\d+),'([\s\S]+?)'\.split\('\|'\)\)\)/);
-    if (m) {
-      const packed = m[1], base = parseInt(m[2]), dict = m[4].split("|");
-      const unpacked = packed.replace(/\w+/g, w => {
-        const n = parseInt(w, base);
-        return (n < dict.length && dict[n]) ? dict[n] : w;
-      });
-      const url = unpacked.match(/https?:\/\/[^"'\s]+\.m3u8[^"'\s]*/);
-      if (url) return url[0];
-    }
-
-    // Fallback: direct match in HTML
-    const direct = html.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/);
-    return direct ? direct[1] : null;
-  } catch { return null; }
-}
-
-// mixdrop — unpack eval() → wurl="..."
-async function extractMixdrop(embedUrl: string): Promise<string | null> {
-  try {
-    const html = await fetch(embedUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": "https://mixdrop.co/",
-        "Origin": "https://mixdrop.co",
-      }
-    }).then(r => r.text());
-
-    const m = html.match(/eval\(function\(p,a,c,k,e,(?:d|r)\)\{.+?\}\('([\s\S]+?)',(\d+),(\d+),'([\s\S]+?)'\.split\('\|'\)\)\)/);
-    if (!m) return null;
-
-    const packed = m[1], base = parseInt(m[2]), dict = m[4].split("|");
-    const unpacked = packed.replace(/\w+/g, w => {
-      const n = parseInt(w, base);
-      return (n < dict.length && dict[n]) ? dict[n] : w;
-    });
-
-    const wurl = unpacked.match(/wurl\s*=\s*"?([^";\s]+)"?/);
-    if (!wurl) return null;
-    const raw = wurl[1];
-    return raw.startsWith("http") ? raw : `https:${raw}`;
-  } catch { return null; }
-}
-
-// savefiles.com / streamhls.to
-// The embed page is a click-to-play shell. On click it POSTs form to /dl
-// with op=embed + file_code, which returns the actual video player HTML with m3u8.
-async function extractSavefiles(embedUrl: string): Promise<string | null> {
+async function extractSavefiles(embedUrl: string) {
   try {
     let fileCode: string | null = null;
-    const sfMatch = embedUrl.match(/savefiles\.com\/([a-z0-9]+)/i);
+    const sfMatch = embedUrl.match(/savefiles\.com\/(?:e\/)?([a-z0-9]+)/i);
     const shMatch = embedUrl.match(/streamhls\.to\/e\/([a-z0-9]+)/i);
     if (sfMatch) fileCode = sfMatch[1];
     else if (shMatch) fileCode = shMatch[1];
     if (!fileCode) return null;
-
     const embedPageUrl = `https://streamhls.to/e/${fileCode}`;
-
-    // POST to /dl — replicates the play button click
     const dlR = await fetch(`https://streamhls.to/dl`, {
       method: "POST",
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": embedPageUrl,
-        "Origin": "https://streamhls.to",
+        "Referer": embedPageUrl, "Origin": "https://streamhls.to",
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
       },
-      body: new URLSearchParams({
-        op: "embed",
-        file_code: fileCode,
-        auto: "1",
-        referer: "https://savefiles.com/",
-      }).toString(),
+      body: new URLSearchParams({ op: "embed", file_code: fileCode, auto: "1", referer: "https://savefiles.com/" }).toString(),
       redirect: "follow",
     });
-
     const html = await dlR.text();
-
     const m =
       html.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/) ||
       html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
@@ -474,26 +250,131 @@ async function extractSavefiles(embedUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
-// ─── BRIDGE EXTRACTION ────────────────────────────────────────────────────────
-async function extractViaBridge(embedUrl: string, bridgeUrl: string): Promise<string | null> {
+async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
   try {
-    const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(embedUrl)}`, {
-      signal: AbortSignal.timeout(50000),
-    });
+    const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(embedUrl)}`, { signal: AbortSignal.timeout(50000) });
     if (!r.ok) return null;
-    const data = await r.json() as { url?: string };
+    const data: any = await r.json();
     return data.url || null;
   } catch { return null; }
 }
 
-async function getStreams(rawId: string, env: Env, request?: Request) {
+async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | null> {
+  if (!env.MYBROWSER) return null;
+
+  const cacheKey = `br:${embedUrl}`;
+  if (env.STREAM_CACHE) {
+    const cached = await env.STREAM_CACHE.get(cacheKey);
+    if (cached) {
+      console.log(`[browser] KV cache hit for ${embedUrl}`);
+      return cached;
+    }
+  }
+
+  let browser = null;
+  try {
+    let sessionId: string | undefined;
+    try {
+      const sessions = await (puppeteer as any).sessions(env.MYBROWSER);
+      const free = sessions.filter((s: any) => !s.connectionId);
+      if (free.length > 0) {
+        sessionId = free[Math.floor(Math.random() * free.length)].sessionId;
+        console.log(`[browser] Reusing session ${sessionId}`);
+      }
+    } catch { }
+
+    browser = sessionId
+      ? await puppeteer.connect(env.MYBROWSER, sessionId)
+      : await puppeteer.launch(env.MYBROWSER);
+
+    const page = await browser.newPage();
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36");
+    await page.setRequestInterception(true);
+
+    const BLOCK_TYPES = new Set(["image", "font", "stylesheet", "media"]);
+    const BLOCK_HOSTS = ["google-analytics", "googletagmanager", "doubleclick", "facebook", "twitter", "adsbygoogle", "turnstile.cf"];
+
+    page.on("request", (req) => {
+      const type = req.resourceType();
+      const url = req.url();
+      if (BLOCK_TYPES.has(type) || BLOCK_HOSTS.some((h) => url.includes(h))) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
+    let streamUrl: string | null = null;
+    page.on("response", async (res) => {
+      if (streamUrl) return;
+      const url = res.url();
+      if (
+        (url.includes(".m3u8") || url.includes("/playlist") || url.includes("/master")) &&
+        !url.includes("latanime.org")
+      ) {
+        streamUrl = url;
+        console.log(`[browser] Intercepted m3u8: ${url}`);
+      }
+    });
+
+    await Promise.race([
+      page.goto(embedUrl, { waitUntil: "networkidle2", timeout: 45000 }),
+      new Promise<void>((resolve) => {
+        const interval = setInterval(() => {
+          if (streamUrl) { clearInterval(interval); resolve(); }
+        }, 300);
+        setTimeout(() => clearInterval(interval), 45000);
+      }),
+    ]);
+
+    if (!streamUrl) {
+      streamUrl = await (page.evaluate as any)(() => {
+        const video = (document as any).querySelector("video");
+        if (video?.src && !video.src.startsWith("blob:")) return video.src;
+        const source = (document as any).querySelector("video source");
+        return source?.getAttribute("src") || null;
+      });
+    }
+
+    if (!streamUrl) {
+      streamUrl = await (page.evaluate as any)(() => {
+        const scripts = Array.from((document as any).querySelectorAll("script:not([src])")).map((s: any) => (s as any).textContent || "");
+        const combined = scripts.join("\n");
+        const m =
+          combined.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/) ||
+          combined.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
+          combined.match(/source\s*[:=]\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/);
+        return m ? m[1] : null;
+      });
+    }
+
+    await page.close();
+
+    if (streamUrl && env.STREAM_CACHE) {
+      await env.STREAM_CACHE.put(cacheKey, streamUrl, { expirationTtl: TTL.browserStream / 1000 });
+      console.log(`[browser] Cached to KV: ${streamUrl}`);
+    }
+
+    return streamUrl;
+  } catch (e) {
+    console.error("[browser] Error:", e);
+    return null;
+  } finally {
+    if (browser) {
+      try { browser.disconnect(); } catch { }
+    }
+  }
+}
+
+async function getStreams(rawId: string, env: Env, request: Request) {
   const parts = rawId.replace("latanime:", "").split(":");
   if (parts.length < 2) return { streams: [] };
   const [slug, epNum] = parts;
-  const html = await fetchHtml(`${BASE_URL}/ver/${slug}-episodio-${epNum}`);
 
+  const html = await fetchHtml(`${BASE_URL}/ver/${slug}-episodio-${epNum}`);
   const embedUrls: { url: string; name: string }[] = [];
   const seen = new Set<string>();
+
   for (const m of html.matchAll(/<a[^>]+data-player="([A-Za-z0-9+/=]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
     const b64 = m[1];
     const name = m[2].replace(/<[^>]+>/g, "").trim() || "Player";
@@ -509,13 +390,11 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
   if (embedUrls.length === 0) return { streams: [] };
 
   const bridgeUrl = (env.BRIDGE_URL || "").trim();
-  const mfpBase   = (env.MFP_URL || bridgeUrl).trim().replace(/\/$/, "");
-  const mfpPass   = (env.MFP_PASSWORD || "latanime").trim();
-  const streams: { url: string; title: string; behaviorHints: { notWebReady: boolean } }[] = [];
+  const mfpBase = (env.MFP_URL || bridgeUrl).trim().replace(/\/$/, "");
+  const mfpPass = (env.MFP_PASSWORD || "latanime").trim();
 
-  // Build a proxied HLS URL via MediaFlow Proxy (handles multi-level HLS + headers natively)
-  function mfpHlsUrl(m3u8Url: string, referer: string): string {
-    if (!mfpBase) return m3u8Url; // fallback: raw URL
+  function mfpHlsUrl(m3u8Url: string, referer: string) {
+    if (!mfpBase) return m3u8Url;
     const params = new URLSearchParams({
       d: m3u8Url,
       h_Referer: referer,
@@ -525,97 +404,58 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
     return `${mfpBase}/proxy/hls/manifest.m3u8?${params}`;
   }
 
-  if (bridgeUrl) {
-    // Parallel extraction — all at once, take whatever succeeds within 45s
-    const results = await Promise.allSettled(
-      embedUrls.map(async (embed) => {
-        // voe.sx: var source is in plain HTML
-        if (embed.url.includes("voe.sx") || embed.url.includes("lancewhosedifficult.com") || embed.url.includes("voeunblocked.")) {
-          const streamUrl = await extractVoe(embed.url);
-          return streamUrl ? { url: streamUrl, name: embed.name } : null;
-        }
-        // mp4upload: extract directly from HTML
-        if (embed.url.includes("mp4upload.com")) {
-          const streamUrl = await extractMp4upload(embed.url);
-          return streamUrl ? { url: streamUrl, name: embed.name } : null;
-        }
-        // filemoon: unpack eval() to get m3u8
-        if (embed.url.includes("filemoon.sx") || embed.url.includes("filemoon.to")) {
-          const streamUrl = await extractFilemoon(embed.url);
-          return streamUrl ? { url: streamUrl, name: embed.name } : null;
-        }
-        // hexload: POST API
-        if (embed.url.includes("hexload.com")) {
-          const streamUrl = await extractHexload(embed.url);
-          return streamUrl ? { url: streamUrl, name: embed.name } : null;
-        }
-        // dsvplay / doodstream
-        if (embed.url.includes("dsvplay.com") || embed.url.includes("doodstream.com") || embed.url.includes("dood.")) {
-          const streamUrl = await extractDsvplay(embed.url);
-          return streamUrl ? { url: streamUrl, name: embed.name } : null;
-        }
-        // luluvid / lulustream
-        if (embed.url.includes("luluvid.com") || embed.url.includes("lulustream.com")) {
-          const streamUrl = await extractLuluvid(embed.url);
-          return streamUrl ? { url: streamUrl, name: embed.name } : null;
-        }
-        // mixdrop
-        if (embed.url.includes("mixdrop.")) {
-          const streamUrl = await extractMixdrop(embed.url);
-          return streamUrl ? { url: streamUrl, name: embed.name } : null;
-        }
-        // savefiles / streamhls: direct HLS from embed page
-        if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to")) {
-          const streamUrl = await extractSavefiles(embed.url);
-          return streamUrl ? { url: streamUrl, name: embed.name } : null;
-        }
-        // 1. Try direct extraction with correct Referer header
-        const directUrl = await extractDirect(embed.url);
-        if (directUrl) return { url: directUrl, name: embed.name };
-        // 2. Try latanime /reproductor proxy
-        const reproUrl = await extractViaReproductor(embed.url);
-        if (reproUrl) return { url: reproUrl, name: embed.name };
-        // 3. Fallback to Render bridge
-        const streamUrl = await extractViaBridge(embed.url, bridgeUrl);
-        return streamUrl ? { url: streamUrl, name: embed.name } : null;
-      })
-    );
-    const extractedNames = new Set<string>();
-    for (const r of results) {
-      if (r.status === "fulfilled" && r.value) {
-        const streamUrl = r.value.url;
-        const isHls = streamUrl.includes(".m3u8");
-        const isSavefiles = streamUrl.includes("savefiles.com") || streamUrl.includes("s3.savefiles") || streamUrl.includes("s2.savefiles");
-        const workerBase = request ? new URL(request.url).origin : "";
+  const BROWSER_PLAYERS = ["filemoon", "voe.sx", "lancewhosedifficult", "voeunblocked", "mxdrop", "dsvplay", "doodstream"];
+  const needsBrowser = (url: string) => BROWSER_PLAYERS.some((p) => url.includes(p));
 
-        let finalUrl: string;
-        const streamEntry: Record<string, unknown> = {
-          title: `▶ ${r.value.name} — Latino`,
-          behaviorHints: { notWebReady: isHls },
-        };
+  const streams: any[] = [];
+  const extractedNames = new Set<string>();
 
-        if (isHls && isSavefiles) {
-          finalUrl = mfpHlsUrl(streamUrl, "https://streamhls.to/");
-        } else if (isHls) {
-          finalUrl = mfpHlsUrl(streamUrl, "https://latanime.org/");
-        } else {
-          finalUrl = streamUrl;
-        }
-
-        streamEntry.url = finalUrl;
-        streams.push(streamEntry as { url: string; title: string; behaviorHints: { notWebReady: boolean } });
-        extractedNames.add(r.value.name);
+  const results = await Promise.allSettled(
+    embedUrls.map(async (embed) => {
+      if (embed.url.includes("hexload.com")) {
+        const url = await extractHexload(embed.url);
+        return url ? { url, name: embed.name, isHls: false } : null;
       }
-    }
-    // Web fallback only for hosts that failed extraction
-    for (const embed of embedUrls) {
-      if (!extractedNames.has(embed.name)) {
-        streams.push({ url: embed.url, title: `🌐 ${embed.name} — Latino`, behaviorHints: { notWebReady: true } });
+      if (embed.url.includes("mp4upload.com")) {
+        const url = await extractMp4upload(embed.url);
+        return url ? { url, name: embed.name, isHls: false } : null;
       }
+      if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to")) {
+        const url = await extractSavefiles(embed.url);
+        return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
+      }
+      if (needsBrowser(embed.url)) {
+        let url = await extractWithBrowser(embed.url, env);
+        if (!url && bridgeUrl) url = await extractViaBridge(embed.url, bridgeUrl);
+        return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
+      }
+      if (bridgeUrl) {
+        const url = await extractViaBridge(embed.url, bridgeUrl);
+        if (url) return { url, name: embed.name, isHls: url.includes(".m3u8") };
+      }
+      return null;
+    })
+  );
+
+  for (const r of results) {
+    if (r.status === "fulfilled" && r.value) {
+      const { url: streamUrl, name, isHls } = r.value;
+      const isSavefiles = streamUrl.includes("savefiles.com") || streamUrl.includes("s3.savefiles") || streamUrl.includes("s2.savefiles") || streamUrl.includes("streamhls.to");
+      let finalUrl: string;
+      if (isHls && isSavefiles) {
+        finalUrl = mfpHlsUrl(streamUrl, "https://streamhls.to/");
+      } else if (isHls) {
+        finalUrl = mfpHlsUrl(streamUrl, "https://latanime.org/");
+      } else {
+        finalUrl = streamUrl;
+      }
+      streams.push({ url: finalUrl, title: `▶ ${name} — Latino`, behaviorHints: { notWebReady: isHls } });
+      extractedNames.add(name);
     }
-  } else {
-    // No bridge — all web fallback
-    for (const embed of embedUrls) {
+  }
+
+  for (const embed of embedUrls) {
+    if (!extractedNames.has(embed.name)) {
       streams.push({ url: embed.url, title: `🌐 ${embed.name} — Latino`, behaviorHints: { notWebReady: true } });
     }
   }
@@ -623,130 +463,47 @@ async function getStreams(rawId: string, env: Env, request?: Request) {
   return { streams };
 }
 
-// ─── ROUTER ───────────────────────────────────────────────────────────────────
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url  = new URL(request.url);
+    const url = new URL(request.url);
     const path = url.pathname;
-    const tmdbKey  = (env.TMDB_KEY  || "").trim();
+    const tmdbKey = (env.TMDB_KEY || "").trim();
     const bridgeUrl = (env.BRIDGE_URL || "").trim();
 
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     if (path === "/" || path === "/manifest.json") return json(MANIFEST);
 
-    // Debug
     if (path === "/debug") {
-      return json({ tmdbKey: tmdbKey ? "set" : "not set", bridgeUrl: bridgeUrl || "not set" });
+      return json({ tmdbKey: tmdbKey ? "set" : "not set", bridgeUrl: bridgeUrl || "not set", browserBinding: env.MYBROWSER ? "set" : "not set", kvBinding: env.STREAM_CACHE ? "set" : "not set" });
     }
 
-    // Test the full proxy chain for a savefiles stream
-    if (path === "/debug-proxy") {
-      const code = url.searchParams.get("code") || "hxhufbkiftyf";
-      const results: Record<string, unknown> = {};
-      try {
-        // Step 1: get m3u8 URL
-        const embedUrl = `https://savefiles.com/${code}`;
-        const streamUrl = await extractSavefiles(embedUrl);
-        results.streamUrl = streamUrl;
-        if (!streamUrl) return json({ error: "extractSavefiles returned null", results });
-
-        // Step 2: fetch master m3u8 directly
-        const masterR = await fetch(streamUrl, {
-          headers: {
-            "Referer": "https://streamhls.to/",
-            "Origin": "https://streamhls.to",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-          }
-        });
-        results.masterStatus = masterR.status;
-        const masterText = await masterR.text();
-        results.masterLen = masterText.length;
-        results.masterSnippet = masterText.slice(0, 1000);
-
-        // Step 3: find first variant playlist URL
-        const lines = masterText.split("\n").filter(l => l.trim() && !l.startsWith("#"));
-        const firstVariant = lines[0]?.trim();
-        results.firstVariant = firstVariant;
-        if (!firstVariant) return json({ error: "no variant found in master", results });
-
-        const variantUrl = firstVariant.startsWith("http")
-          ? firstVariant
-          : streamUrl.substring(0, streamUrl.lastIndexOf("/") + 1) + firstVariant;
-        results.variantUrl = variantUrl;
-
-        // Step 4: fetch variant playlist
-        const varR = await fetch(variantUrl, {
-          headers: {
-            "Referer": "https://streamhls.to/",
-            "Origin": "https://streamhls.to",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-          }
-        });
-        results.variantStatus = varR.status;
-        const varText = await varR.text();
-        results.variantSnippet = varText.slice(0, 500);
-
-        // Step 5: find first segment and test it
-        const segLines = varText.split("\n").filter(l => l.trim() && !l.startsWith("#"));
-        const firstSeg = segLines[0]?.trim();
-        if (firstSeg) {
-          const segUrl2 = firstSeg.startsWith("http")
-            ? firstSeg
-            : variantUrl.substring(0, variantUrl.lastIndexOf("/") + 1) + firstSeg;
-          results.firstSegUrl = segUrl2;
-          const segR = await fetch(segUrl2, {
-            headers: {
-              "Referer": "https://streamhls.to/",
-              "User-Agent": "Mozilla/5.0",
-            }
-          });
-          results.segStatus = segR.status;
-          results.segContentType = segR.headers.get("content-type");
-        }
-      } catch(e: any) { results.error = String(e); }
-      return json(results);
+    if (path === "/debug-browser") {
+      const testUrl = url.searchParams.get("url");
+      if (!testUrl) return json({ error: "Missing ?url=" });
+      const t0 = Date.now();
+      const result = await extractWithBrowser(testUrl, env);
+      return json({ streamUrl: result, ms: Date.now() - t0 });
     }
 
-    // Dump raw streamhls /dl POST response for diagnosis
-    if (path === "/debug-streamhls") {
-      const code = url.searchParams.get("code") || "hxhufbkiftyf";
-      const embedPageUrl = `https://streamhls.to/e/${code}`;
+    if (path === "/debug-host") {
+      const embedUrl = url.searchParams.get("url");
+      if (!embedUrl) return new Response("Missing url", { status: 400 });
+      const hdrs = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36", "Referer": "https://latanime.org/", "Origin": "https://latanime.org", "Accept": "text/html,application/xhtml+xml,*/*;q=0.8", "Accept-Language": "es-ES,es;q=0.9" };
       try {
-        const r = await fetch(`https://streamhls.to/dl`, {
-          method: "POST",
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-            "Referer": embedPageUrl,
-            "Origin": "https://streamhls.to",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-          },
-          body: new URLSearchParams({ op: "embed", file_code: code, auto: "1", referer: "https://savefiles.com/" }).toString(),
-          redirect: "follow",
-        });
+        const r = await fetch(embedUrl, { headers: hdrs });
         const html = await r.text();
-        const urls = [...html.matchAll(/["'`](https?:\/\/[^"'`\s]{10,})["'`]/g)].map(m => m[1]);
-        return json({ status: r.status, finalUrl: r.url, htmlLen: html.length, urls, htmlSnippet: html.slice(0, 5000) });
-      } catch(e: any) { return json({ error: String(e) }); }
+        const urls = [...html.matchAll(/["'`](https?:\/\/[^"'`\s]{15,}\.(?:mp4|mkv|m3u8|ts)[^"'`\s]*)/gi)].map((m) => m[1]);
+        return Response.json({ status: r.status, contentType: r.headers.get("content-type"), htmlLen: html.length, foundUrls: urls, htmlSnippet: html.slice(0, 5000) }, { headers: CORS });
+      } catch (e) { return Response.json({ error: String(e) }, { headers: CORS }); }
     }
 
-    // Quick savefiles/streamhls test
     if (path === "/debug-savefiles") {
       const code = url.searchParams.get("code") || "hxhufbkiftyf";
       const t0 = Date.now();
-      let apiRaw: unknown = null;
-      try {
-        const r = await fetch(`https://savefiles.com/api/file/encodings?key=4505yqombojzeakvb&file_code=${code}`, {
-          headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
-        });
-        apiRaw = { status: r.status, body: await r.text() };
-      } catch(e: any) { apiRaw = { error: String(e) }; }
       const streamUrl = await extractSavefiles(`https://savefiles.com/${code}`);
       const workerBase = new URL(request.url).origin;
-      const proxyUrl = streamUrl
-        ? `${workerBase}/proxy/m3u8?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://streamhls.to/")}`
-        : null;
-      return json({ code, streamUrl, proxyUrl, apiRaw, ms: Date.now() - t0 });
+      const proxyUrl = streamUrl ? `${workerBase}/proxy/m3u8?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://streamhls.to/")}` : null;
+      return json({ code, streamUrl, proxyUrl, ms: Date.now() - t0 });
     }
 
     if (path === "/debug-bridge") {
@@ -754,14 +511,19 @@ export default {
       if (!bridgeUrl) return json({ error: "BRIDGE_URL not set" });
       const t0 = Date.now();
       try {
-        const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(testUrl)}`, {
-          signal: AbortSignal.timeout(50000),
-        });
+        const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(testUrl)}`, { signal: AbortSignal.timeout(50000) });
         const body = await r.text();
         return json({ status: r.status, body, testUrl, bridgeUrl, ms: Date.now() - t0 });
-      } catch(e: any) {
-        return json({ error: String(e), testUrl, bridgeUrl, ms: Date.now() - t0 });
+      } catch (e) { return json({ error: String(e), testUrl, bridgeUrl, ms: Date.now() - t0 }); }
+    }
+
+    if (path === "/cache-clear") {
+      const key = url.searchParams.get("key");
+      if (key && env.STREAM_CACHE) {
+        await env.STREAM_CACHE.delete(`br:${key}`);
+        return json({ cleared: key });
       }
+      return json({ error: "Missing ?key= or no KV binding" });
     }
 
     const catM = path.match(/^\/catalog\/([^/]+)\/([^/]+?)(?:\/([^/]+))?\.json$/);
@@ -793,58 +555,11 @@ export default {
       if (cached) return json(cached);
       try {
         const result = await getStreams(id, env, request);
-        if ((result.streams as unknown[]).length > 0) cacheSet(`stream:${id}`, result, TTL.stream);
+        if (result.streams.length > 0) cacheSet(`stream:${id}`, result, TTL.stream);
         return json(result);
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
 
-    // Debug: fetch any embed URL from Worker's CF IP and return HTML + found URLs
-    if (path === "/debug-host") {
-      const embedUrl = url.searchParams.get("url");
-      if (!embedUrl) return new Response("Missing url", { status: 400 });
-      const hdrs = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        "Referer": "https://latanime.org/",
-        "Origin": "https://latanime.org",
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9",
-      };
-      try {
-        const r = await fetch(embedUrl, { headers: hdrs });
-        const html = await r.text();
-        const urls = [...html.matchAll(/["'`](https?:\/\/[^"'`\s]{15,}\.(?:mp4|mkv|m3u8|ts)[^"'`\s]*)/gi)]
-          .map(m => m[1]);
-
-        // Extra: fetch /myjs.js for hexload
-        let extra: Record<string, string> = {};
-        if (embedUrl.includes("hexload.com")) {
-          const jsR = await fetch("https://hexload.com/myjs.js?9", {
-            headers: { ...hdrs, "Referer": embedUrl }
-          });
-          extra.myjs = (await jsR.text()).slice(0, 3000);
-        }
-
-        // Test filemoon unpacker inline
-        if (embedUrl.includes("filemoon")) {
-          const m = html.match(/eval\(function\(p,a,c,k,e,(?:d|r)\)\{.+?\}\('([\s\S]+?)',(\d+),(\d+),'([\s\S]+?)'\.split\('\|'\)\)\)/);
-          extra.packedFound = m ? "YES" : "NO";
-          extra.packedSnippet = html.includes("eval(function") ? html.substring(html.indexOf("eval(function"), html.indexOf("eval(function") + 200) : "eval(function NOT FOUND";
-        }
-
-        return Response.json({
-          status: r.status,
-          contentType: r.headers.get("content-type"),
-          htmlLen: html.length,
-          foundUrls: urls,
-          htmlSnippet: html.slice(0, 5000),
-          extra,
-        }, { headers: CORS });
-      } catch(e) {
-        return Response.json({ error: String(e) }, { headers: CORS });
-      }
-    }
-
-    // Full transparent proxy — Worker fetches everything, pipes to Stremio
     if (path === "/proxy/m3u8") {
       const m3u8Url = url.searchParams.get("url");
       const referer = url.searchParams.get("ref") || "https://latanime.org/";
@@ -853,64 +568,31 @@ export default {
         const decoded = decodeURIComponent(m3u8Url);
         const base = decoded.substring(0, decoded.lastIndexOf("/") + 1);
         const workerBase = new URL(request.url).origin;
-        const r = await fetch(decoded, {
-          headers: {
-            "Referer": referer,
-            "Origin": new URL(referer).origin,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-          }
-        });
+        const r = await fetch(decoded, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36" } });
         if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
         const m3u8Text = await r.text();
         const isMaster = m3u8Text.includes("#EXT-X-STREAM-INF");
-        // Rewrite ALL segment/playlist URLs through our proxy
-        const rewritten = m3u8Text.split("\n").map(line => {
+        const rewritten = m3u8Text.split("\n").map((line) => {
           const trimmed = line.trim();
           if (trimmed.startsWith("#") || trimmed === "") return line;
           const absUrl = trimmed.startsWith("http") ? trimmed : base + trimmed;
-          // Variant playlists go through /proxy/m3u8, segments through /proxy/seg
-          if (isMaster || absUrl.includes(".m3u8")) {
-            return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
-          }
+          if (isMaster || absUrl.includes(".m3u8")) return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
           return `${workerBase}/proxy/seg?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
         }).join("\n");
-        return new Response(rewritten, {
-          headers: {
-            "Content-Type": "application/vnd.apple.mpegurl",
-            "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "no-cache",
-          }
-        });
-      } catch(e) {
-        return new Response(String(e), { status: 500 });
-      }
+        return new Response(rewritten, { headers: { "Content-Type": "application/vnd.apple.mpegurl", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache" } });
+      } catch (e) { return new Response(String(e), { status: 500 }); }
     }
 
-    // Segment proxy — pipes TS segments from CDN to Stremio
     if (path === "/proxy/seg") {
       const segUrl = url.searchParams.get("url");
       const referer = url.searchParams.get("ref") || "https://latanime.org/";
       if (!segUrl) return new Response("Missing url", { status: 400 });
       try {
         const decoded = decodeURIComponent(segUrl);
-        const r = await fetch(decoded, {
-          headers: {
-            "Referer": referer,
-            "Origin": new URL(referer).origin,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-          }
-        });
+        const r = await fetch(decoded, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36" } });
         if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
-        return new Response(r.body, {
-          headers: {
-            "Content-Type": r.headers.get("Content-Type") || "video/MP2T",
-            "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "public, max-age=3600",
-          }
-        });
-      } catch(e) {
-        return new Response(String(e), { status: 500 });
-      }
+        return new Response(r.body, { headers: { "Content-Type": r.headers.get("Content-Type") || "video/MP2T", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600" } });
+      } catch (e) { return new Response(String(e), { status: 500 }); }
     }
 
     return new Response("Not found", { status: 404, headers: CORS });

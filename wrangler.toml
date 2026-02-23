@@ -1,4 +1,4 @@
-name = "latanime-stremio"
+name = "latanime"
 main = "src/index.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat_v2"]
@@ -6,3 +6,12 @@ compatibility_flags = ["nodejs_compat_v2"]
 [vars]
 TMDB_KEY   = ""
 BRIDGE_URL = "https://latanime-bridge.onrender.com"
+MFP_URL    = ""
+MFP_PASSWORD = "latanime"
+
+[[browser]]
+binding = "MYBROWSER"
+
+[[kv_namespaces]]
+binding = "STREAM_CACHE"
+id = "19b6cbbb876343ffa950e8a72959b7f3"
