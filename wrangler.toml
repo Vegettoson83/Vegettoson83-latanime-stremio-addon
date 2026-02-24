@@ -8,6 +8,7 @@ TMDB_KEY     = ""
 BRIDGE_URL   = "https://latanime-bridge.onrender.com"
 MFP_URL      = ""
 MFP_PASSWORD = "latanime"
+SAVEFILES_KEY = "10714bycsy7sdam6brjzf"
 
 [browser]
 binding = "MYBROWSER"

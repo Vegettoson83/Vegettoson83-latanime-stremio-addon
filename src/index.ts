@@ -18,6 +18,7 @@ interface Env {
   BRIDGE_URL: string;
   MFP_URL: string;
   MFP_PASSWORD: string;
+  SAVEFILES_KEY: string;
 }
 
 function json(data: unknown, status = 200) {
@@ -469,11 +470,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
 
   const results = await Promise.allSettled(
     embedUrls.map(async (embed) => {
-      if (embed.url.includes("pixeldrain.com")) {
-        const url = extractPixeldrain(embed.url);
-        return url ? { url, name: embed.name, isHls: false } : null;
-      }
-      // Pixeldrain — transform URL directly, Stremio fetches from user's residential IP
+      // Pixeldrain — direct stream, Stremio fetches from user's residential IP
       if (embed.url.includes("pixeldrain.com")) {
         const idM = embed.url.match(/pixeldrain\.com\/(?:u\/|l\/)([a-zA-Z0-9]+)/);
         if (idM) return { url: `https://pixeldrain.com/api/file/${idM[1]}`, name: embed.name, isHls: false };
@@ -525,6 +522,38 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   for (const embed of embedUrls) {
     if (!extractedNames.has(embed.name)) {
       streams.push({ url: embed.url, title: `🌐 ${embed.name} — Latino`, behaviorHints: { notWebReady: true } });
+    }
+  }
+
+  // Scrape download mirrors from episode page — pixeldrain works directly from user IP
+  const seenMirrorUrls = new Set(streams.map(s => s.url));
+  for (const m of html.matchAll(/href=["'](https?:\/\/pixeldrain\.com\/u\/([a-zA-Z0-9]+))["']/gi)) {
+    const pdUrl = `https://pixeldrain.com/api/file/${m[2]}`;
+    if (!seenMirrorUrls.has(pdUrl)) {
+      streams.unshift({ url: pdUrl, title: "▶ Pixeldrain — Latino", behaviorHints: { notWebReady: false } });
+      seenMirrorUrls.add(pdUrl);
+    }
+  }
+
+  // savefiles API multi-quality streams (if API key configured)
+  const savKey = (env.SAVEFILES_KEY || "").trim();
+  if (savKey) {
+    for (const m of html.matchAll(/href=["'](https?:\/\/savefiles\.com\/([a-z0-9]+))["']/gi)) {
+      const fileCode = m[2];
+      try {
+        const r = await fetch(`https://savefiles.com/api/file/encodings?key=${savKey}&file_code=${fileCode}`);
+        const data: any = await r.json();
+        const encodings: any[] = data?.result || [];
+        for (const enc of encodings.filter((e: any) => e.status === "DONE")) {
+          const q = enc.quality === "h" ? "1080p" : "480p";
+          const m3u8Url = enc.url || `https://streamhls.to/e/${fileCode}`;
+          const proxied = hlsProxyUrl(m3u8Url, "https://streamhls.to/");
+          if (!seenMirrorUrls.has(proxied)) {
+            streams.unshift({ url: proxied, title: `▶ savefiles ${q} — Latino`, behaviorHints: { notWebReady: true } });
+            seenMirrorUrls.add(proxied);
+          }
+        }
+      } catch {}
     }
   }
 
