@@ -1,13 +1,30 @@
 {
   "name": "latanime-stremio",
-  "version": "1.0.0",
+  "version": "4.0.0",
   "private": true,
+  "main": "server.js",
   "scripts": {
+    "start": "pm2-runtime start ecosystem.config.js",
+    "start:addon": "node server.js",
+    "start:bridge": "node bridge-server.js",
+    "build": "tsc",
     "deploy": "npx wrangler@4 deploy"
   },
-  "devDependencies": {
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
     "@cloudflare/puppeteer": "^1.0.6",
     "@cloudflare/workers-types": "^4.0.0",
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "node-cache": "^5.1.2",
+    "playwright": "1.45.0",
+    "pm2": "^6.0.14",
+    "scrapingbee": "^1.7.6",
+    "stremio-addon-sdk": "^1.6.10",
     "typescript": "^5.0.0",
     "wrangler": "^4.67.1"
   }
