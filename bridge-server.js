@@ -2,6 +2,7 @@ const express = require('express');
 const playwright = require('playwright');
 const NodeCache = require('node-cache');
 const cheerio = require('cheerio');
+const axios = require('axios');
 const { fetchWithScrapingBee } = require('./lib/scraping');
 
 const app = express();
@@ -14,7 +15,6 @@ async function extractGofile(folderUrl) {
     try {
         const folderId = folderUrl.split("/d/").pop()?.split(/[/?]/)[0];
         if (!folderId) return null;
-        const axios = require('axios');
         const accR = await axios.post("https://api.gofile.io/accounts", {}, { headers: { "User-Agent": "Mozilla/5.0" } });
         const token = accR.data.data?.token;
         if (!token) return null;
@@ -376,7 +376,6 @@ app.get('/proxy/file', async (req, res) => {
     try {
         const parsedUrl = new URL(fileUrl);
         if (!parsedUrl.hostname.endsWith(".gofile.io")) return res.status(403).send("Forbidden domain");
-        const axios = require('axios');
         const range = req.headers.range;
         const hdrs = { "Cookie": `accountToken=${token}`, "User-Agent": "Mozilla/5.0", "Referer": "https://gofile.io/" };
         if (range) hdrs["Range"] = range;
