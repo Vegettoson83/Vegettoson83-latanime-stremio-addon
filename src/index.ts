@@ -62,7 +62,7 @@ const MANIFEST = {
 async function fetchHtml(url: string): Promise<string> {
   const r = await fetch(url, {
     headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+      "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
       "Referer": BASE_URL,
@@ -203,13 +203,13 @@ async function extractHexload(embedUrl: string) {
     const fileId = embedUrl.split("embed-").pop()?.split(/[/?]/)[0];
     if (!fileId) return null;
     const embedR = await fetch(embedUrl, {
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36", "Referer": "https://latanime.org/" },
+      headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", "Referer": "https://latanime.org/" },
     });
     const cookies = embedR.headers.get("set-cookie") || "";
     const r = await fetch("https://hexload.com/download", {
       method: "POST",
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
         "Referer": embedUrl, "Origin": "https://hexload.com",
         "Content-Type": "application/x-www-form-urlencoded",
         "X-Requested-With": "XMLHttpRequest", "Cookie": cookies,
@@ -234,20 +234,22 @@ async function extractSavefiles(embedUrl: string) {
     const dlR = await fetch(`https://streamhls.to/dl`, {
       method: "POST",
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
         "Referer": embedPageUrl, "Origin": "https://streamhls.to",
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
       },
-      body: new URLSearchParams({ op: "embed", file_code: fileCode, auto: "1", referer: "https://savefiles.com/" }).toString(),
+      body: `op=embed&file_code=${fileCode}&auto=1&referer=https://savefiles.com/${fileCode}`,
       redirect: "follow",
     });
     const html = await dlR.text();
-    const m =
-      html.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/) ||
-      html.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
-      html.match(/["'`](https?:\/\/[^"'`\s]+\.mp4[^"'`\s]*)["'`]/);
-    return m ? m[1] : null;
+    // Primary: Clappr sources array (verified pattern from friend)
+    const srcMatch = html.match(/sources:\s*\["([^"]+\.m3u8[^"]*)"\]/);
+    if (srcMatch) return srcMatch[1];
+    // Fallback: any m3u8 URL
+    const m3u8Match = html.match(/https:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*/);
+    if (m3u8Match) return m3u8Match[0];
+    return null;
   } catch { return null; }
 }
 
@@ -441,7 +443,17 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     embedUrls.push({ url: embedUrl, name });
   }
 
-  if (embedUrls.length === 0) return { streams: [] };
+  // Scrape download mirror links directly from episode page
+  const mirrors: { savefiles?: string; pixeldrain?: string; mega?: string; gofile?: string } = {};
+  for (const m of html.matchAll(/href=["']([^"']+)["']/gi)) {
+    const href = m[1].trim();
+    if (href.includes("savefiles.com") && !href.includes("/d/") && !mirrors.savefiles) mirrors.savefiles = href;
+    else if (href.includes("pixeldrain.com") && !mirrors.pixeldrain) mirrors.pixeldrain = href;
+    else if (href.includes("mega.nz") && !mirrors.mega) mirrors.mega = href;
+    else if (href.includes("gofile.io") && !mirrors.gofile) mirrors.gofile = href;
+  }
+
+  if (embedUrls.length === 0 && Object.keys(mirrors).length === 0) return { streams: [] };
 
   const bridgeUrl = (env.BRIDGE_URL || "").trim();
   const mfpBase = (env.MFP_URL || "").trim().replace(/\/$/, "");
@@ -525,32 +537,33 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     }
   }
 
-  // Scrape download mirrors from episode page — pixeldrain works directly from user IP
-  const seenMirrorUrls = new Set(streams.map(s => s.url));
-  for (const m of html.matchAll(/href=["'](https?:\/\/pixeldrain\.com\/u\/([a-zA-Z0-9]+))["']/gi)) {
-    const pdUrl = `https://pixeldrain.com/api/file/${m[2]}`;
-    if (!seenMirrorUrls.has(pdUrl)) {
-      streams.unshift({ url: pdUrl, title: "▶ Pixeldrain — Latino", behaviorHints: { notWebReady: false } });
-      seenMirrorUrls.add(pdUrl);
+  // Resolve download mirrors
+  const savKey = (env.SAVEFILES_KEY || "").trim();
+
+  // Pixeldrain — direct MP4, plays from user's residential IP
+  if (mirrors.pixeldrain) {
+    const idM = mirrors.pixeldrain.match(/pixeldrain\.com\/u\/([a-zA-Z0-9]+)/);
+    if (idM) {
+      streams.unshift({ url: `https://pixeldrain.com/api/file/${idM[1]}`, title: "▶ Pixeldrain — Latino", behaviorHints: { notWebReady: false } });
     }
   }
 
-  // savefiles API multi-quality streams (if API key configured)
-  const savKey = (env.SAVEFILES_KEY || "").trim();
-  if (savKey) {
-    for (const m of html.matchAll(/href=["'](https?:\/\/savefiles\.com\/([a-z0-9]+))["']/gi)) {
-      const fileCode = m[2];
+  // savefiles mirror → POST /dl → signed m3u8 (same chain as embed)
+  if (mirrors.savefiles) {
+    const sfCode = mirrors.savefiles.split("savefiles.com/").pop()?.split(/[/?]/)[0]?.trim();
+    if (sfCode && sfCode.length > 3) {
       try {
-        const r = await fetch(`https://savefiles.com/api/file/encodings?key=${savKey}&file_code=${fileCode}`);
-        const data: any = await r.json();
-        const encodings: any[] = data?.result || [];
-        for (const enc of encodings.filter((e: any) => e.status === "DONE")) {
-          const q = enc.quality === "h" ? "1080p" : "480p";
-          const m3u8Url = enc.url || `https://streamhls.to/e/${fileCode}`;
-          const proxied = hlsProxyUrl(m3u8Url, "https://streamhls.to/");
-          if (!seenMirrorUrls.has(proxied)) {
-            streams.unshift({ url: proxied, title: `▶ savefiles ${q} — Latino`, behaviorHints: { notWebReady: true } });
-            seenMirrorUrls.add(proxied);
+        const m3u8 = await extractSavefiles(`https://savefiles.com/${sfCode}`);
+        if (m3u8) {
+          const proxied = hlsProxyUrl(m3u8, "https://streamhls.to/");
+          // Only add if not already in streams
+          if (!streams.some(s => s.url === proxied)) {
+            streams.unshift({ url: proxied, title: "▶ savefiles [mirror] — Latino", behaviorHints: { notWebReady: true } });
+          }
+          // 480p variant
+          const m3u8_480 = m3u8.replace(",_n,", ",_l,").replace("_n,", "_l,");
+          if (m3u8_480 !== m3u8) {
+            streams.push({ url: hlsProxyUrl(m3u8_480, "https://streamhls.to/"), title: "▶ savefiles 480p — Latino", behaviorHints: { notWebReady: true } });
           }
         }
       } catch {}
@@ -585,7 +598,7 @@ export default {
     if (path === "/debug-host") {
       const embedUrl = url.searchParams.get("url");
       if (!embedUrl) return new Response("Missing url", { status: 400 });
-      const hdrs = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36", "Referer": "https://latanime.org/", "Origin": "https://latanime.org", "Accept": "text/html,application/xhtml+xml,*/*;q=0.8", "Accept-Language": "es-ES,es;q=0.9" };
+      const hdrs = { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", "Referer": "https://latanime.org/", "Origin": "https://latanime.org", "Accept": "text/html,application/xhtml+xml,*/*;q=0.8", "Accept-Language": "es-ES,es;q=0.9" };
       try {
         const r = await fetch(embedUrl, { headers: hdrs });
         const html = await r.text();
@@ -665,7 +678,7 @@ export default {
         const decoded = decodeURIComponent(m3u8Url);
         const base = decoded.substring(0, decoded.lastIndexOf("/") + 1);
         const workerBase = new URL(request.url).origin;
-        const r = await fetch(decoded, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36" } });
+        const r = await fetch(decoded, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" } });
         if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
         const m3u8Text = await r.text();
         const isMaster = m3u8Text.includes("#EXT-X-STREAM-INF");
@@ -686,7 +699,7 @@ export default {
       if (!segUrl) return new Response("Missing url", { status: 400 });
       try {
         const decoded = decodeURIComponent(segUrl);
-        const r = await fetch(decoded, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36" } });
+        const r = await fetch(decoded, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" } });
         if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
         return new Response(r.body, { headers: { "Content-Type": r.headers.get("Content-Type") || "video/MP2T", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600" } });
       } catch (e) { return new Response(String(e), { status: 500 }); }
