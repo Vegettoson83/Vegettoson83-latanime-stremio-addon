@@ -527,7 +527,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       }
       return null;
     })
-  )]);
+  ]);
 
   for (const r of results) {
     if (r.status === "fulfilled" && r.value) {
