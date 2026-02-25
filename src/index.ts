@@ -480,8 +480,23 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   const streams: any[] = [];
   const extractedNames = new Set<string>();
 
-  const results = await Promise.allSettled(
-    embedUrls.map(async (embed) => {
+  // Build task list — embeds + savefiles mirror (all run in parallel)
+  const mirrorTasks: Promise<{ url: string; name: string; isHls: boolean } | null>[] = [];
+
+  if (mirrors.savefiles) {
+    const sfCode = mirrors.savefiles.split("savefiles.com/").pop()?.split(/[/?]/)[0]?.trim();
+    if (sfCode && sfCode.length > 3) {
+      mirrorTasks.push((async () => {
+        const m3u8 = await extractSavefiles(`https://savefiles.com/${sfCode}`);
+        if (!m3u8) return null;
+        return { url: m3u8, name: "savefiles 1080p", isHls: true };
+      })());
+    }
+  }
+
+  const results = await Promise.allSettled([
+    ...mirrorTasks,
+    ...embedUrls.map(async (embed) => {
       // Pixeldrain — direct stream, Stremio fetches from user's residential IP
       if (embed.url.includes("pixeldrain.com")) {
         const idM = embed.url.match(/pixeldrain\.com\/(?:u\/|l\/)([a-zA-Z0-9]+)/);
@@ -512,7 +527,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       }
       return null;
     })
-  );
+  )]);
 
   for (const r of results) {
     if (r.status === "fulfilled" && r.value) {
@@ -526,8 +541,20 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       } else {
         finalUrl = streamUrl;
       }
-      streams.push({ url: finalUrl, title: `▶ ${name} — Latino`, behaviorHints: { notWebReady: isHls } });
+      if (!streams.some(s => s.url === finalUrl)) {
+        streams.push({ url: finalUrl, title: `▶ ${name} — Latino`, behaviorHints: { notWebReady: isHls } });
+      }
       extractedNames.add(name);
+      // 480p variant for savefiles streams
+      if (isHls && isSavefiles) {
+        const m3u8_480 = streamUrl.replace(",_n,", ",_l,").replace("_n,", "_l,");
+        if (m3u8_480 !== streamUrl) {
+          const url480 = hlsProxyUrl(m3u8_480, "https://streamhls.to/");
+          if (!streams.some(s => s.url === url480)) {
+            streams.push({ url: url480, title: `▶ ${name} 480p — Latino`, behaviorHints: { notWebReady: true } });
+          }
+        }
+      }
     }
   }
 
@@ -537,36 +564,15 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     }
   }
 
-  // Resolve download mirrors
-  const savKey = (env.SAVEFILES_KEY || "").trim();
-
-  // Pixeldrain — direct MP4, plays from user's residential IP
+  // Resolve download mirrors in parallel with embed extraction (already done above)
+  // Pixeldrain — instant, no async needed
   if (mirrors.pixeldrain) {
     const idM = mirrors.pixeldrain.match(/pixeldrain\.com\/u\/([a-zA-Z0-9]+)/);
     if (idM) {
-      streams.unshift({ url: `https://pixeldrain.com/api/file/${idM[1]}`, title: "▶ Pixeldrain — Latino", behaviorHints: { notWebReady: false } });
-    }
-  }
-
-  // savefiles mirror → POST /dl → signed m3u8 (same chain as embed)
-  if (mirrors.savefiles) {
-    const sfCode = mirrors.savefiles.split("savefiles.com/").pop()?.split(/[/?]/)[0]?.trim();
-    if (sfCode && sfCode.length > 3) {
-      try {
-        const m3u8 = await extractSavefiles(`https://savefiles.com/${sfCode}`);
-        if (m3u8) {
-          const proxied = hlsProxyUrl(m3u8, "https://streamhls.to/");
-          // Only add if not already in streams
-          if (!streams.some(s => s.url === proxied)) {
-            streams.unshift({ url: proxied, title: "▶ savefiles [mirror] — Latino", behaviorHints: { notWebReady: true } });
-          }
-          // 480p variant
-          const m3u8_480 = m3u8.replace(",_n,", ",_l,").replace("_n,", "_l,");
-          if (m3u8_480 !== m3u8) {
-            streams.push({ url: hlsProxyUrl(m3u8_480, "https://streamhls.to/"), title: "▶ savefiles 480p — Latino", behaviorHints: { notWebReady: true } });
-          }
-        }
-      } catch {}
+      const pdUrl = `https://pixeldrain.com/api/file/${idM[1]}`;
+      if (!streams.some(s => s.url === pdUrl)) {
+        streams.unshift({ url: pdUrl, title: "▶ Pixeldrain — Latino", behaviorHints: { notWebReady: false } });
+      }
     }
   }
 
