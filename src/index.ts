@@ -500,7 +500,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       // Pixeldrain — direct stream, Stremio fetches from user's residential IP
       if (embed.url.includes("pixeldrain.com")) {
         const idM = embed.url.match(/pixeldrain\.com\/(?:u\/|l\/)([a-zA-Z0-9]+)/);
-        if (idM) return { url: `https://pixeldrain.com/api/file/${idM[1]}`, name: embed.name, isHls: false, proxyable: true };
+        if (idM) return { url: `https://pixeldrain.com/api/file/${idM[1]}`, name: embed.name, isHls: false };
         return null;
       }
 
@@ -531,21 +531,18 @@ async function getStreams(rawId: string, env: Env, request: Request) {
 
   for (const r of results) {
     if (r.status === "fulfilled" && r.value) {
-      const { url: streamUrl, name, isHls, proxyable } = r.value as any;
+      const { url: streamUrl, name, isHls } = r.value;
       const isSavefiles = streamUrl.includes("savefiles.com") || streamUrl.includes("s3.savefiles") || streamUrl.includes("s2.savefiles") || streamUrl.includes("streamhls.to");
       let finalUrl: string;
       if (isHls && isSavefiles) {
         finalUrl = hlsProxyUrl(streamUrl, "https://streamhls.to/");
       } else if (isHls) {
         finalUrl = hlsProxyUrl(streamUrl, "https://latanime.org/");
-      } else if (proxyable) {
-        // Proxy through worker so web player can access residential-IP-restricted hosts
-        finalUrl = `${workerBase}/proxy/seg?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://pixeldrain.com/")}`;
       } else {
         finalUrl = streamUrl;
       }
       if (!streams.some(s => s.url === finalUrl)) {
-        streams.push({ url: finalUrl, title: `▶ ${name} — Latino`, behaviorHints: { notWebReady: false } });
+        streams.push({ url: finalUrl, title: `▶ ${name} — Latino`, behaviorHints: { notWebReady: isHls } });
       }
       extractedNames.add(name);
       // 480p variant for savefiles streams
@@ -574,8 +571,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     if (idM) {
       const pdUrl = `https://pixeldrain.com/api/file/${idM[1]}`;
       if (!streams.some(s => s.url === pdUrl)) {
-        const pdProxied = `${workerBase}/proxy/seg?url=${encodeURIComponent(pdUrl)}&ref=${encodeURIComponent("https://pixeldrain.com/")}`;
-        streams.unshift({ url: pdProxied, title: "▶ Pixeldrain — Latino", behaviorHints: { notWebReady: false } });
+        streams.unshift({ url: pdUrl, title: "▶ Pixeldrain — Latino", behaviorHints: { notWebReady: true } });
       }
     }
   }
