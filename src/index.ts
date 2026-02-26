@@ -571,7 +571,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     if (idM) {
       const pdUrl = `https://pixeldrain.com/api/file/${idM[1]}`;
       if (!streams.some(s => s.url === pdUrl)) {
-        streams.unshift({ url: pdUrl, title: "▶ Pixeldrain — Latino", behaviorHints: { notWebReady: false } });
+        streams.unshift({ url: pdUrl, title: "▶ Pixeldrain — Latino", behaviorHints: { notWebReady: true } });
       }
     }
   }
