@@ -260,6 +260,23 @@ function extractPixeldrain(embedUrl: string): string | null {
   return `https://pixeldrain.com/api/file/${m[1]}/download`;
 }
 
+async function extractMediafire(mfUrl: string): Promise<string | null> {
+  try {
+    const res = await fetch(mfUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+        "Referer": "https://www.mediafire.com/",
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+      }
+    });
+    const html = await res.text();
+    const m = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s]+/);
+    if (m) return m[0];
+    const btn = html.match(/href="(https:\/\/download\d+\.mediafire\.com[^"]+)"/);
+    return btn ? btn[1] : null;
+  } catch { return null; }
+}
+
 async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
   try {
     const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(embedUrl)}`, { signal: AbortSignal.timeout(50000) });
