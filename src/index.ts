@@ -45,7 +45,7 @@ const TTL = {
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.0.0",
+  version: "4.1.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/public/img/logito.png",
@@ -422,6 +422,30 @@ async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | 
   }
 }
 
+// ─── MEDIAFIRE RESOLVER ────────────────────────────────────────────────────
+// Verified Feb 27 2026: GET mediafire.com/file/{key}/{name}/file
+// → HTML contains CDN URL: download{n}.mediafire.com/.../{key}/{filename}
+// → 206 Partial Content, video/mp4, Accept-Ranges: bytes ✓
+async function resolveMediafire(mfUrl: string): Promise<string | null> {
+  try {
+    const r = await fetch(mfUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+        "Referer": "https://www.mediafire.com/",
+        "Accept-Language": "es-MX,es;q=0.9",
+      },
+    });
+    if (!r.ok) return null;
+    const html = await r.text();
+    const match = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s]+/);
+    if (match) return match[0];
+    // Fallback: download button href
+    const btnMatch = html.match(/aria-label="Download file"[^>]+href="([^"]+)"|href="([^"]+)"[^>]*id="downloadButton"|href="([^"]+)"[^>]*class="[^"]*popsok/);
+    if (btnMatch) return btnMatch[1] || btnMatch[2] || btnMatch[3];
+    return null;
+  } catch { return null; }
+}
+
 async function getStreams(rawId: string, env: Env, request: Request) {
   const parts = rawId.replace("latanime:", "").split(":");
   if (parts.length < 2) return { streams: [] };
@@ -444,10 +468,11 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   }
 
   // Scrape download mirror links directly from episode page
-  const mirrors: { savefiles?: string; pixeldrain?: string; mega?: string; gofile?: string } = {};
+  const mirrors: { mediafire?: string; savefiles?: string; pixeldrain?: string; mega?: string; gofile?: string } = {};
   for (const m of html.matchAll(/href=["']([^"']+)["']/gi)) {
     const href = m[1].trim();
-    if (href.includes("savefiles.com") && !href.includes("/d/") && !mirrors.savefiles) mirrors.savefiles = href;
+    if (href.includes("mediafire.com") && href.includes("/file/") && !mirrors.mediafire) mirrors.mediafire = href;
+    else if (href.includes("savefiles.com") && !href.includes("/d/") && !mirrors.savefiles) mirrors.savefiles = href;
     else if (href.includes("pixeldrain.com") && !mirrors.pixeldrain) mirrors.pixeldrain = href;
     else if (href.includes("mega.nz") && !mirrors.mega) mirrors.mega = href;
     else if (href.includes("gofile.io") && !mirrors.gofile) mirrors.gofile = href;
@@ -482,6 +507,15 @@ async function getStreams(rawId: string, env: Env, request: Request) {
 
   // Build task list — embeds + savefiles mirror (all run in parallel)
   const mirrorTasks: Promise<{ url: string; name: string; isHls: boolean } | null>[] = [];
+
+  // Priority 1: MediaFire — direct MP4, seekable, no expiry, ~185MB/ep
+  if (mirrors.mediafire) {
+    mirrorTasks.push((async () => {
+      const cdnUrl = await resolveMediafire(mirrors.mediafire!);
+      if (!cdnUrl) return null;
+      return { url: cdnUrl, name: "🔥 MediaFire MP4", isHls: false };
+    })());
+  }
 
   if (mirrors.savefiles) {
     const sfCode = mirrors.savefiles.split("savefiles.com/").pop()?.split(/[/?]/)[0]?.trim();
@@ -542,7 +576,9 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         finalUrl = streamUrl;
       }
       if (!streams.some(s => s.url === finalUrl)) {
-        streams.push({ url: finalUrl, title: `▶ ${name} — Latino`, behaviorHints: { notWebReady: isHls } });
+        const isMediafire = name.includes("MediaFire");
+        const entry = { url: finalUrl, title: `▶ ${name} — Latino`, behaviorHints: { notWebReady: isHls } };
+        if (isMediafire) streams.unshift(entry); else streams.push(entry);
       }
       extractedNames.add(name);
       // 480p variant for savefiles streams
