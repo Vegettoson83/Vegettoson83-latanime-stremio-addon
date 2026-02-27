@@ -1,11 +1,9 @@
-name: One-time Deploy
+name: Deploy to Cloudflare Workers
 
 on:
-  workflow_dispatch:
   push:
     branches: [main]
-    paths:
-      - 'src/**'
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -19,4 +17,4 @@ jobs:
       - name: Deploy to Cloudflare
         run: npx wrangler deploy
         env:
-          CLOUDFLARE_API_TOKEN: "f0acfc007bdfd3283e0cba2f17835f4e1e158"
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
