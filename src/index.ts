@@ -1,4 +1,4 @@
-import puppeteer from "@cloudflare/puppeteer";
+import type { BrowserWorker } from "@cloudflare/puppeteer";
 
 const ADDON_ID = "com.latanime.stremio";
 const BASE_URL = "https://latanime.org";
@@ -253,6 +253,26 @@ async function extractSavefiles(embedUrl: string) {
   } catch { return null; }
 }
 
+async function extractGofile(folderUrl: string): Promise<{ url: string; token: string } | null> {
+  try {
+    const folderId = folderUrl.split("/d/").pop()?.split(/[/?]/)[0];
+    if (!folderId) return null;
+    const accR = await fetch("https://api.gofile.io/accounts", { method: "POST", headers: { "User-Agent": "Mozilla/5.0" } });
+    const accData: any = await accR.json();
+    const token = accData.data?.token;
+    if (!token) return null;
+    const contentR = await fetch(`https://api.gofile.io/contents/${folderId}?cache=true`, {
+      headers: { "Authorization": `Bearer ${token}`, "X-Website-Token": "4fd6sg89d7s6", "User-Agent": "Mozilla/5.0" }
+    });
+    const contentData: any = await contentR.json();
+    if (contentData.status !== "ok") return null;
+    const children = contentData.data?.children;
+    if (!children) return null;
+    const fileId = Object.keys(children).find(id => children[id].mimetype?.startsWith("video/"));
+    if (!fileId) return null;
+    return { url: children[fileId].link, token };
+  } catch { return null; }
+}
 
 function extractPixeldrain(embedUrl: string): string | null {
   const m = embedUrl.match(/pixeldrain\.com\/u\/([a-zA-Z0-9]+)/);
@@ -288,6 +308,8 @@ async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
 
 async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | null> {
   if (!env.MYBROWSER) return null;
+  const puppeteerMod: any = await import("@cloudflare/puppeteer");
+  const puppeteer = puppeteerMod.default;
 
   const cacheKey = `br:${embedUrl}`;
   if (env.STREAM_CACHE) {
@@ -330,7 +352,7 @@ async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | 
     const BLOCK_TYPES = new Set(["image", "font", "media"]);
     const BLOCK_HOSTS = ["google-analytics", "googletagmanager", "doubleclick", "facebook", "twitter", "adsbygoogle", "turnstile.cf"];
 
-    page.on("request", (req) => {
+    page.on("request", (req: any) => {
       const type = req.resourceType();
       const url = req.url();
       if (BLOCK_TYPES.has(type) || BLOCK_HOSTS.some((h) => url.includes(h))) {
@@ -341,7 +363,7 @@ async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | 
     });
 
     let streamUrl: string | null = null;
-    page.on("response", async (res) => {
+    page.on("response", async (res: any) => {
       if (streamUrl) return;
       const url = res.url();
       // Intercept m3u8 playlist requests
@@ -544,6 +566,14 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       })());
     }
   }
+  if (mirrors.gofile) {
+    mirrorTasks.push((async () => {
+      const res = await extractGofile(mirrors.gofile!);
+      if (!res) return null;
+      const proxyUrl = `${workerBase}/proxy/file?url=${encodeURIComponent(res.url)}&token=${encodeURIComponent(res.token)}`;
+      return { url: proxyUrl, name: "Gofile", isHls: false };
+    })());
+  }
 
   const results = await Promise.allSettled([
     ...mirrorTasks,
@@ -727,6 +757,26 @@ export default {
         if (result.streams.length > 0) cacheSet(`stream:${id}`, result, TTL.stream);
         return json(result);
       } catch (e) { return json({ streams: [], error: String(e) }); }
+    }
+
+    if (path === "/proxy/file") {
+      const fileUrl = url.searchParams.get("url");
+      const token = url.searchParams.get("token");
+      if (!fileUrl) return new Response("Missing url", { status: 400 });
+      try {
+        const parsedUrl = new URL(fileUrl);
+        if (!parsedUrl.hostname.endsWith(".gofile.io")) return new Response("Forbidden domain", { status: 403 });
+      } catch { return new Response("Invalid URL", { status: 400 }); }
+      try {
+        const range = request.headers.get("Range");
+        const hdrs: any = { "Cookie": `accountToken=${token}`, "User-Agent": "Mozilla/5.0", "Referer": "https://gofile.io/" };
+        if (range) hdrs["Range"] = range;
+        const r = await fetch(fileUrl, { headers: hdrs });
+        const resHeaders = new Headers(r.headers);
+        resHeaders.set("Access-Control-Allow-Origin", "*");
+        resHeaders.set("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges");
+        return new Response(r.body, { status: r.status, statusText: r.statusText, headers: resHeaders });
+      } catch (e) { return new Response(String(e), { status: 500 }); }
     }
 
     if (path === "/proxy/m3u8") {
