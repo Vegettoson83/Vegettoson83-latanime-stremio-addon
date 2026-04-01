@@ -45,7 +45,7 @@ const TTL = {
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.2.0",
+  version: "4.3.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/public/img/logito.png",
@@ -377,6 +377,138 @@ async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
   } catch { return null; }
 }
 
+// ─── GOFILE ──────────────────────────────────────────────────────────────────
+// API flow: get guest token → fetch content → extract direct link
+async function extractGofile(gofileUrl: string): Promise<string | null> {
+  try {
+    const codeM = gofileUrl.match(/gofile\.io\/(?:d|download)\/([a-zA-Z0-9]+)/);
+    if (!codeM) return null;
+    const contentId = codeM[1];
+
+    // Step 1: get guest token
+    const tokenR = await fetch("https://api.gofile.io/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!tokenR.ok) return null;
+    const tokenData: any = await tokenR.json();
+    const token = tokenData?.data?.token;
+    if (!token) return null;
+
+    // Step 2: fetch content
+    const contentR = await fetch(
+      `https://api.gofile.io/contents/${contentId}?wt=4fd6sg89d7s6`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(8000),
+      }
+    );
+    if (!contentR.ok) return null;
+    const content: any = await contentR.json();
+    const children = content?.data?.children;
+    if (!children) return null;
+
+    // Find first video file
+    for (const child of Object.values(children) as any[]) {
+      if (child.type === "file" && child.mimetype?.startsWith("video/")) {
+        return child.link || null;
+      }
+    }
+    return null;
+  } catch { return null; }
+}
+
+// ─── STREAMTAPE ───────────────────────────────────────────────────────────────
+// Page contains obfuscated JS: the token is split across two strings that need concat
+async function extractStreamtape(embedUrl: string): Promise<string | null> {
+  try {
+    const r = await fetch(embedUrl, {
+      headers: {
+        "User-Agent": CHROME_UA,
+        "Referer": "https://latanime.org/",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) return null;
+    const html = await r.text();
+
+    // Pattern: robotlink innerHTML set via JS string concat
+    // id="robotlink")</s> ... ('//streamtape.com/get_video?id=X&expires=Y&ip=Z&token=ABC' + 'DEF')
+    const m = html.match(/robotlink[^>]*>[^<]*<\/[^>]+>[\s\S]*?get_video\?[^'"]+['"]([^'"]+)['"]\s*\+\s*['"]([^'"]+)['"]/);
+    if (m) return `https:${m[1]}${m[2]}`;
+
+    // Fallback: direct get_video URL
+    const direct = html.match(/["'](\/\/streamtape\.com\/get_video\?[^"']+)["']/);
+    if (direct) return `https:${direct[1]}`;
+
+    return null;
+  } catch { return null; }
+}
+
+// ─── STREAMWISH / FILELIONS / WISHEMBED ───────────────────────────────────────
+// These share the same player engine — POST to /api/source/{id} to get m3u8
+async function extractStreamwish(embedUrl: string): Promise<string | null> {
+  try {
+    const idM = embedUrl.match(/\/(?:e\/|f\/)?([a-zA-Z0-9]{8,})\/?(?:\?|$)/);
+    if (!idM) return null;
+    const fileId = idM[1];
+
+    // Get base domain from embed URL
+    const base = new URL(embedUrl).origin;
+
+    const r = await fetch(`${base}/api/source/${fileId}`, {
+      method: "POST",
+      headers: {
+        "User-Agent": CHROME_UA,
+        "Referer": embedUrl,
+        "Origin": base,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: `r=&d=${encodeURIComponent(base)}`,
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) return null;
+    const data: any = await r.json();
+
+    // Returns { success: true, data: [{ file, label, type }] }
+    const sources: any[] = data?.data || [];
+    const hls = sources.find((s: any) => s.type === "hls" || s.file?.includes(".m3u8"));
+    if (hls?.file) return hls.file;
+    const mp4 = sources.find((s: any) => s.file?.includes(".mp4"));
+    if (mp4?.file) return mp4.file;
+    return null;
+  } catch { return null; }
+}
+
+// ─── VIDGUARD ─────────────────────────────────────────────────────────────────
+// Heavily obfuscated — needs page fetch + eval-style decoding
+// Pattern: encoded string in `_0x...` vars, but the m3u8 URL leaks in source
+async function extractVidguard(embedUrl: string): Promise<string | null> {
+  try {
+    const r = await fetch(embedUrl, {
+      headers: {
+        "User-Agent": CHROME_UA,
+        "Referer": "https://latanime.org/",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) return null;
+    const html = await r.text();
+
+    // Look for stream URL in source (sometimes leaks unobfuscated)
+    const m3u8 = html.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/);
+    if (m3u8) return m3u8[1];
+
+    // vgfplay/vidguard API pattern
+    const srcM = html.match(/source\s*:\s*["']([^"']+\.m3u8[^"']*)["']/);
+    if (srcM) return srcM[1];
+
+    return null;
+  } catch { return null; }
+}
+
 async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | null> {
   if (!env.MYBROWSER) return null;
 
@@ -576,7 +708,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   }
 
   // Scrape download mirror links directly from episode page
-  const mirrors: { mediafire?: string; savefiles?: string; pixeldrain?: string; mega?: string; gofile?: string } = {};
+  const mirrors: { mediafire?: string; savefiles?: string; pixeldrain?: string; mega?: string; gofile?: string; streamtape?: string } = {};
   for (const m of html.matchAll(/href=["']([^"']+)["']/gi)) {
     const href = m[1].trim();
     if (href.includes("mediafire.com") && href.includes("/file/") && !mirrors.mediafire) mirrors.mediafire = href;
@@ -584,6 +716,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     else if (href.includes("pixeldrain.com") && !mirrors.pixeldrain) mirrors.pixeldrain = href;
     else if (href.includes("mega.nz") && !mirrors.mega) mirrors.mega = href;
     else if (href.includes("gofile.io") && !mirrors.gofile) mirrors.gofile = href;
+    else if (href.includes("streamtape.com") && !mirrors.streamtape) mirrors.streamtape = href;
   }
 
   if (embedUrls.length === 0 && Object.keys(mirrors).length === 0) return { streams: [] };
@@ -607,7 +740,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(m3u8Url)}&ref=${encodeURIComponent(referer)}`;
   }
 
-  const BROWSER_PLAYERS = ["filemoon", "voe.sx", "lancewhosedifficult", "voeunblocked", "mxdrop", "dsvplay", "doodstream"];
+  const BROWSER_PLAYERS = ["filemoon", "voe.sx", "lancewhosedifficult", "voeunblocked", "mxdrop", "dsvplay", "doodstream", "uqload", "upstream"];
   const needsBrowser = (url: string) => BROWSER_PLAYERS.some((p) => url.includes(p));
 
   const streams: any[] = [];
@@ -636,6 +769,24 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     }
   }
 
+  // GoFile — free direct download, no account needed
+  if (mirrors.gofile) {
+    mirrorTasks.push((async () => {
+      const url = await extractGofile(mirrors.gofile!);
+      if (!url) return null;
+      return { url, name: "📂 GoFile MP4", isHls: false };
+    })());
+  }
+
+  // StreamTape mirror link
+  if (mirrors.streamtape) {
+    mirrorTasks.push((async () => {
+      const url = await extractStreamtape(mirrors.streamtape!);
+      if (!url) return null;
+      return { url, name: "📼 StreamTape MP4", isHls: false };
+    })());
+  }
+
   const results = await Promise.allSettled([
     ...mirrorTasks,
     ...embedUrls.map(async (embed) => {
@@ -657,6 +808,25 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to")) {
         const url = await extractSavefiles(embed.url);
         return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
+      }
+      if (embed.url.includes("streamtape.com") || embed.url.includes("streamtape.net")) {
+        const url = await extractStreamtape(embed.url);
+        return url ? { url, name: embed.name, isHls: false } : null;
+      }
+      if (
+        embed.url.includes("streamwish.") || embed.url.includes("wishembed.") ||
+        embed.url.includes("filelions.") || embed.url.includes("streamwish.to") ||
+        embed.url.includes("ajmidyad.sbs") || embed.url.includes("kibagames.best")
+      ) {
+        const url = await extractStreamwish(embed.url);
+        return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
+      }
+      if (embed.url.includes("vidguard.") || embed.url.includes("vgfplay.")) {
+        const url = await extractVidguard(embed.url);
+        if (url) return { url, name: embed.name, isHls: url.includes(".m3u8") };
+        const bUrl = await extractWithBrowser(embed.url, env);
+        if (bUrl) return { url: bUrl, name: embed.name, isHls: bUrl.includes(".m3u8") };
+        return null;
       }
       if (needsBrowser(embed.url)) {
         let url = await extractWithBrowser(embed.url, env);
