@@ -59,8 +59,8 @@ const MANIFEST = {
   idPrefixes: ["latanime:"],
 };
 
-async function fetchHtml(url: string): Promise<string> {
-  const r = await fetch(url, {
+async function fetchHtmlDirect(url: string): Promise<Response> {
+  return fetch(url, {
     headers: {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -78,6 +78,26 @@ async function fetchHtml(url: string): Promise<string> {
       "Upgrade-Insecure-Requests": "1",
     },
   });
+}
+
+async function fetchHtml(url: string, env?: Env): Promise<string> {
+  const r = await fetchHtmlDirect(url);
+
+  // If blocked and bridge is available, route through it
+  if ((r.status === 403 || r.status === 429 || r.status === 503) && env?.BRIDGE_URL) {
+    console.log(`[fetchHtml] Direct fetch blocked (${r.status}), trying bridge for ${url}`);
+    try {
+      const br = await fetch(
+        `${env.BRIDGE_URL.trim()}/fetch?url=${encodeURIComponent(url)}`,
+        { signal: AbortSignal.timeout(20000) }
+      );
+      if (br.ok) return br.text();
+      console.log(`[fetchHtml] Bridge also failed: ${br.status}`);
+    } catch (e) {
+      console.log(`[fetchHtml] Bridge error: ${e}`);
+    }
+  }
+
   if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
   return r.text();
 }
@@ -134,8 +154,8 @@ function toMetaPreview(c: { id: string; name: string; poster: string }) {
   return { id: c.id, type: "series", name: c.name, poster: c.poster || `${BASE_URL}/public/img/anime.png`, posterShape: "poster" };
 }
 
-async function searchAnimes(query: string) {
-  const homeHtml = await fetchHtml(`${BASE_URL}/`);
+async function searchAnimes(query: string, env?: Env) {
+  const homeHtml = await fetchHtml(`${BASE_URL}/`, env);
   const csrfM = homeHtml.match(/name="csrf-token"[^>]+content="([^"]+)"/i) || homeHtml.match(/content="([^"]+)"[^>]+name="csrf-token"/i);
   const csrf = csrfM ? csrfM[1] : "";
   try {
@@ -150,22 +170,22 @@ async function searchAnimes(query: string) {
       if (results.length > 0) return results;
     }
   } catch { }
-  return parseAnimeCards(await fetchHtml(`${BASE_URL}/buscar?q=${encodeURIComponent(query)}`));
+  return parseAnimeCards(await fetchHtml(`${BASE_URL}/buscar?q=${encodeURIComponent(query)}`, env));
 }
 
-async function getCatalog(catalogId: string, extra: Record<string, string>) {
-  if (extra.search?.trim()) return { metas: (await searchAnimes(extra.search.trim())).map(toMetaPreview) };
-  if (catalogId === "latanime-airing") return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`)).map(toMetaPreview) };
+async function getCatalog(catalogId: string, extra: Record<string, string>, env?: Env) {
+  if (extra.search?.trim()) return { metas: (await searchAnimes(extra.search.trim(), env)).map(toMetaPreview) };
+  if (catalogId === "latanime-airing") return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`, env)).map(toMetaPreview) };
   if (catalogId === "latanime-directory") {
     const page = Math.floor(parseInt(extra.skip || "0", 10) / 30) + 1;
-    return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/animes?page=${page}`)).map(toMetaPreview) };
+    return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/animes?page=${page}`, env)).map(toMetaPreview) };
   }
-  return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/`)).map(toMetaPreview) };
+  return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/`, env)).map(toMetaPreview) };
 }
 
-async function getMeta(id: string, tmdbKey: string) {
+async function getMeta(id: string, tmdbKey: string, env?: Env) {
   const slug = id.replace("latanime:", "");
-  const html = await fetchHtml(`${BASE_URL}/anime/${slug}`);
+  const html = await fetchHtml(`${BASE_URL}/anime/${slug}`, env);
   const titleM = html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i) || html.match(/<title>(.*?)\s*[—\-|].*?<\/title>/i);
   const name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
   const posterM = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i) || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i);
@@ -478,7 +498,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   if (parts.length < 2) return { streams: [] };
   const [slug, epNum] = parts;
 
-  const html = await fetchHtml(`${BASE_URL}/ver/${slug}-episodio-${epNum}`);
+  const html = await fetchHtml(`${BASE_URL}/ver/${slug}-episodio-${epNum}`, env);
   const embedUrls: { url: string; name: string }[] = [];
   const seen = new Set<string>();
 
@@ -714,7 +734,7 @@ export default {
       const cacheKey = `catalog:${catalogId}:${extra.search || extra.skip || ""}`;
       const cached = cacheGet(cacheKey);
       if (cached) return json(cached);
-      try { const result = await getCatalog(catalogId, extra); cacheSet(cacheKey, result, TTL.catalog); return json(result); }
+      try { const result = await getCatalog(catalogId, extra, env); cacheSet(cacheKey, result, TTL.catalog); return json(result); }
       catch (e) { return json({ metas: [], error: String(e) }); }
     }
 
@@ -723,7 +743,7 @@ export default {
       const id = decodeURIComponent(metaM[2]);
       const cached = cacheGet(`meta:${id}`);
       if (cached) return json(cached);
-      try { const result = await getMeta(id, tmdbKey); cacheSet(`meta:${id}`, result, TTL.meta); return json(result); }
+      try { const result = await getMeta(id, tmdbKey, env); cacheSet(`meta:${id}`, result, TTL.meta); return json(result); }
       catch (e) { return json({ meta: null, error: String(e) }); }
     }
 
