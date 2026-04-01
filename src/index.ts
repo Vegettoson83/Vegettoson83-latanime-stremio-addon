@@ -45,7 +45,7 @@ const TTL = {
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.1.0",
+  version: "4.2.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/public/img/logito.png",
@@ -59,47 +59,108 @@ const MANIFEST = {
   idPrefixes: ["latanime:"],
 };
 
-async function fetchHtmlDirect(url: string): Promise<Response> {
-  return fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      "Accept-Language": "es-MX,es;q=0.9,en-US;q=0.8,en;q=0.7",
-      "Accept-Encoding": "gzip, deflate, br",
-      "Referer": "https://www.google.com/",
-      "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-      "Sec-CH-UA-Mobile": "?0",
-      "Sec-CH-UA-Platform": '"Windows"',
-      "Sec-Fetch-Dest": "document",
-      "Sec-Fetch-Mode": "navigate",
-      "Sec-Fetch-Site": "cross-site",
-      "Sec-Fetch-User": "?1",
-      "Cache-Control": "max-age=0",
-      "Upgrade-Insecure-Requests": "1",
+// ─── PROXY LOAD BALANCER ──────────────────────────────────────────────────────
+// Rotates through multiple outbound proxy services to bypass IP blocks.
+// Each proxy uses a different IP pool — if one is blocked or fails, next is tried.
+
+const CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+const CHROME_HEADERS = {
+  "User-Agent": CHROME_UA,
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "es-MX,es;q=0.9,en-US;q=0.8,en;q=0.7",
+  "Accept-Encoding": "gzip, deflate, br",
+  "Referer": "https://www.google.com/",
+  "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+  "Sec-CH-UA-Mobile": "?0",
+  "Sec-CH-UA-Platform": '"Windows"',
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "cross-site",
+  "Cache-Control": "max-age=0",
+  "Upgrade-Insecure-Requests": "1",
+};
+
+// Each entry: { name, build(url) → fetch-ready URL, extract(response) → Promise<string> }
+type ProxyBackend = {
+  name: string;
+  fetch: (url: string) => Promise<Response>;
+};
+
+function buildProxies(url: string, bridgeUrl?: string): ProxyBackend[] {
+  const encoded = encodeURIComponent(url);
+  const proxies: ProxyBackend[] = [
+
+    // 1. Direct — try first, fastest if not blocked
+    {
+      name: "direct",
+      fetch: () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(10000) }),
     },
-  });
+
+    // 2. AllOrigins — free CORS proxy, different IP pool
+    {
+      name: "allorigins",
+      fetch: () => fetch(`https://api.allorigins.win/raw?url=${encoded}`, {
+        headers: { "User-Agent": CHROME_UA },
+        signal: AbortSignal.timeout(15000),
+      }),
+    },
+
+    // 3. CodeTabs proxy — another free proxy service
+    {
+      name: "codetabs",
+      fetch: () => fetch(`https://api.codetabs.com/v1/proxy?quest=${encoded}`, {
+        headers: { "User-Agent": CHROME_UA },
+        signal: AbortSignal.timeout(15000),
+      }),
+    },
+
+    // 4. corsproxy.io — yet another IP pool
+    {
+      name: "corsproxy",
+      fetch: () => fetch(`https://corsproxy.io/?${encoded}`, {
+        headers: { "User-Agent": CHROME_UA },
+        signal: AbortSignal.timeout(15000),
+      }),
+    },
+  ];
+
+  // 5. Bridge (VPS/residential IP) — most reliable, use if set
+  if (bridgeUrl) {
+    proxies.push({
+      name: "bridge",
+      fetch: () => fetch(`${bridgeUrl.trim()}/fetch?url=${encoded}`, {
+        signal: AbortSignal.timeout(20000),
+      }),
+    });
+  }
+
+  return proxies;
 }
 
 async function fetchHtml(url: string, env?: Env): Promise<string> {
-  const r = await fetchHtmlDirect(url);
+  const proxies = buildProxies(url, env?.BRIDGE_URL);
 
-  // If blocked and bridge is available, route through it
-  if ((r.status === 403 || r.status === 429 || r.status === 503) && env?.BRIDGE_URL) {
-    console.log(`[fetchHtml] Direct fetch blocked (${r.status}), trying bridge for ${url}`);
+  for (const proxy of proxies) {
     try {
-      const br = await fetch(
-        `${env.BRIDGE_URL.trim()}/fetch?url=${encodeURIComponent(url)}`,
-        { signal: AbortSignal.timeout(20000) }
-      );
-      if (br.ok) return br.text();
-      console.log(`[fetchHtml] Bridge also failed: ${br.status}`);
+      const r = await proxy.fetch(url);
+      if (r.ok) {
+        const html = await r.text();
+        // Sanity check — proxy returned something real, not an error page
+        if (html.length > 500) {
+          if (proxy.name !== "direct") console.log(`[fetchHtml] Success via ${proxy.name} for ${url}`);
+          return html;
+        }
+        console.log(`[fetchHtml] ${proxy.name} returned suspiciously short response (${html.length} chars), trying next`);
+      } else {
+        console.log(`[fetchHtml] ${proxy.name} returned ${r.status} for ${url}, trying next`);
+      }
     } catch (e) {
-      console.log(`[fetchHtml] Bridge error: ${e}`);
+      console.log(`[fetchHtml] ${proxy.name} error: ${e}, trying next`);
     }
   }
 
-  if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
-  return r.text();
+  throw new Error(`All proxy backends failed for ${url}`);
 }
 
 async function fetchTmdb(animeName: string, tmdbKey: string) {
