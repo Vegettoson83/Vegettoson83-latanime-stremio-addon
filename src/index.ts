@@ -45,7 +45,7 @@ const TTL = {
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.3.0",
+  version: "4.4.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/public/img/logito.png",
@@ -141,26 +141,22 @@ function buildProxies(url: string, bridgeUrl?: string): ProxyBackend[] {
 async function fetchHtml(url: string, env?: Env): Promise<string> {
   const proxies = buildProxies(url, env?.BRIDGE_URL);
 
-  for (const proxy of proxies) {
-    try {
-      const r = await proxy.fetch(url);
-      if (r.ok) {
-        const html = await r.text();
-        // Sanity check — proxy returned something real, not an error page
-        if (html.length > 500) {
-          if (proxy.name !== "direct") console.log(`[fetchHtml] Success via ${proxy.name} for ${url}`);
-          return html;
-        }
-        console.log(`[fetchHtml] ${proxy.name} returned suspiciously short response (${html.length} chars), trying next`);
-      } else {
-        console.log(`[fetchHtml] ${proxy.name} returned ${r.status} for ${url}, trying next`);
-      }
-    } catch (e) {
-      console.log(`[fetchHtml] ${proxy.name} error: ${e}, trying next`);
-    }
-  }
+  // Run all proxies in PARALLEL — take the first one that returns valid HTML.
+  // Sequential was hitting the 30s Worker wall time limit when multiple proxies failed.
+  const tryProxy = async (proxy: ProxyBackend): Promise<string> => {
+    const r = await proxy.fetch(url);
+    if (!r.ok) throw new Error(`${proxy.name}: HTTP ${r.status}`);
+    const html = await r.text();
+    if (html.length < 500) throw new Error(`${proxy.name}: response too short (${html.length} chars)`);
+    if (proxy.name !== "direct") console.log(`[fetchHtml] Success via ${proxy.name} for ${url}`);
+    return html;
+  };
 
-  throw new Error(`All proxy backends failed for ${url}`);
+  try {
+    return await Promise.any(proxies.map(tryProxy));
+  } catch (e) {
+    throw new Error(`All proxy backends failed for ${url}: ${e}`);
+  }
 }
 
 async function fetchTmdb(animeName: string, tmdbKey: string) {
@@ -190,22 +186,37 @@ async function fetchTmdb(animeName: string, tmdbKey: string) {
 function parseAnimeCards(html: string) {
   const results: { id: string; name: string; poster: string }[] = [];
   const seen = new Set<string>();
-  for (const m of html.matchAll(/href=["'](?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9][a-z0-9-]+)["']/gi)) {
-    const slug = m[1];
+
+  // Wider slug regex: allow any alphanumeric start, dashes, min 2 chars
+  for (const m of html.matchAll(/href=["'](?:https?:\/\/latanime\.org)?\/anime\/([a-zA-Z0-9][a-zA-Z0-9-]{1,})["']/gi)) {
+    const slug = m[1].toLowerCase();
     if (seen.has(slug)) continue;
     seen.add(slug);
+
+    // Look in a wider window (1000 chars) to catch lazy-loaded layouts
     const pos = m.index! + m[0].length;
-    const block = html.slice(pos, pos + 600);
-    const titleM = block.match(/<h3[^>]*>([^<]{3,})<\/h3>/i) || block.match(/alt="([^"]{3,})"/) || block.match(/title="([^"]{3,})"/);
+    const block = html.slice(Math.max(0, m.index! - 200), pos + 1000);
+
+    const titleM =
+      block.match(/<h3[^>]*>([^<]{2,})<\/h3>/i) ||
+      block.match(/<h2[^>]*>([^<]{2,})<\/h2>/i) ||
+      block.match(/alt="([^"]{2,})"/) ||
+      block.match(/title="([^"]{2,})"/) ||
+      block.match(/<span[^>]*class="[^"]*title[^"]*"[^>]*>([^<]{2,})<\/span>/i);
+
     const name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
     if (!name || name.length < 2) continue;
+
     const posterM =
       block.match(/data-src="(https?:\/\/latanime\.org\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
       block.match(/data-src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
-      block.match(/src="(https?:\/\/latanime\.org\/(?:thumbs|assets)\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/);
+      block.match(/data-lazy-src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
+      block.match(/src="(https?:\/\/latanime\.org\/(?:thumbs|assets|uploads)\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/);
+
     const poster = posterM
       ? posterM[1].startsWith("http") ? posterM[1] : `${BASE_URL}${posterM[1]}`
       : "";
+
     results.push({ id: `latanime:${slug}`, name, poster });
   }
   return results.slice(0, 100);
@@ -216,21 +227,37 @@ function toMetaPreview(c: { id: string; name: string; poster: string }) {
 }
 
 async function searchAnimes(query: string, env?: Env) {
-  const homeHtml = await fetchHtml(`${BASE_URL}/`, env);
-  const csrfM = homeHtml.match(/name="csrf-token"[^>]+content="([^"]+)"/i) || homeHtml.match(/content="([^"]+)"[^>]+name="csrf-token"/i);
-  const csrf = csrfM ? csrfM[1] : "";
+  // Try AJAX search first — needs CSRF token from homepage
   try {
-    const r = await fetch(`${BASE_URL}/buscar_ajax`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "Referer": `${BASE_URL}/`, "Origin": BASE_URL, "User-Agent": "Mozilla/5.0" },
-      body: JSON.stringify({ q: query }),
-    });
-    if (r.ok) {
-      const html = await r.text();
-      const results = parseAnimeCards(html);
-      if (results.length > 0) return results;
+    const homeHtml = await fetchHtml(`${BASE_URL}/`, env);
+    const csrfM = homeHtml.match(/name="csrf-token"[^>]+content="([^"]+)"/i) || homeHtml.match(/content="([^"]+)"[^>]+name="csrf-token"/i);
+    const csrf = csrfM ? csrfM[1] : "";
+    if (csrf) {
+      // POST also needs to go through a proxy since Worker IPs are blocked
+      // Use allorigins as relay: it will POST on our behalf if supported,
+      // otherwise fall through to search page
+      const r = await fetch(`${BASE_URL}/buscar_ajax`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-TOKEN": csrf,
+          "X-Requested-With": "XMLHttpRequest",
+          "Referer": `${BASE_URL}/`,
+          "Origin": BASE_URL,
+          "User-Agent": CHROME_UA,
+        },
+        body: JSON.stringify({ q: query }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (r.ok) {
+        const html = await r.text();
+        const results = parseAnimeCards(html);
+        if (results.length > 0) return results;
+      }
     }
   } catch { }
+
+  // Fallback: search results page (goes through proxy load balancer)
   return parseAnimeCards(await fetchHtml(`${BASE_URL}/buscar?q=${encodeURIComponent(query)}`, env));
 }
 
@@ -934,6 +961,25 @@ export default {
       const workerBase = new URL(request.url).origin;
       const proxyUrl = streamUrl ? `${workerBase}/proxy/m3u8?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://streamhls.to/")}` : null;
       return json({ code, streamUrl, proxyUrl, ms: Date.now() - t0 });
+    }
+
+    if (path === "/debug-search") {
+      const q = url.searchParams.get("q");
+      if (!q) return json({ error: "Missing ?q=" });
+      const t0 = Date.now();
+      try {
+        const results = await searchAnimes(q, env);
+        return json({ query: q, count: results.length, results, ms: Date.now() - t0 });
+      } catch (e) { return json({ error: String(e), ms: Date.now() - t0 }); }
+    }
+
+    if (path === "/debug-proxy") {
+      const testUrl = url.searchParams.get("url") || BASE_URL;
+      const t0 = Date.now();
+      try {
+        const html = await fetchHtml(testUrl, env);
+        return json({ url: testUrl, htmlLen: html.length, snippet: html.slice(0, 1000), ms: Date.now() - t0 });
+      } catch (e) { return json({ error: String(e), ms: Date.now() - t0 }); }
     }
 
     if (path === "/debug-bridge") {
