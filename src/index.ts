@@ -14,7 +14,6 @@ const CORS = {
 interface Env {
   MYBROWSER: Fetcher;
   STREAM_CACHE: KVNamespace;
-  CATALOG_DB: D1Database;
   TMDB_KEY: string;
   BRIDGE_URL: string;
   MFP_URL: string;
@@ -46,7 +45,7 @@ const TTL = {
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.7.0",
+  version: "4.2.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/public/img/logito.png",
@@ -61,9 +60,8 @@ const MANIFEST = {
 };
 
 // ─── PROXY LOAD BALANCER ──────────────────────────────────────────────────────
-// Phase 1: race direct fetch vs bridge (VPS/residential).
-// Phase 2: sequential fallback through free CORS proxies.
-// Keeps subrequest count low (Worker limit: 50 concurrent).
+// Rotates through multiple outbound proxy services to bypass IP blocks.
+// Each proxy uses a different IP pool — if one is blocked or fails, next is tried.
 
 const CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
@@ -83,65 +81,86 @@ const CHROME_HEADERS = {
   "Upgrade-Insecure-Requests": "1",
 };
 
-async function fetchHtml(url: string, env?: Env): Promise<string> {
+// Each entry: { name, build(url) → fetch-ready URL, extract(response) → Promise<string> }
+type ProxyBackend = {
+  name: string;
+  fetch: (url: string) => Promise<Response>;
+};
+
+function buildProxies(url: string, bridgeUrl?: string): ProxyBackend[] {
   const encoded = encodeURIComponent(url);
-  const bridgeUrl = env?.BRIDGE_URL?.trim();
+  const proxies: ProxyBackend[] = [
 
-  // Hard 25s budget for the entire function — Workers die at 30s wall time.
-  // Individual proxy timeouts are kept short so we can try more within budget.
-  const controller = new AbortController();
-  const globalTimer = setTimeout(() => controller.abort(), 25000);
+    // 1. Direct — try first, fastest if not blocked
+    {
+      name: "direct",
+      fetch: () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(10000) }),
+    },
 
-  const tryFetch = async (name: string, fetcher: () => Promise<Response>): Promise<string> => {
-    if (controller.signal.aborted) throw new Error(`${name}: global timeout`);
-    const r = await fetcher();
-    if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
-    const html = await r.text();
-    if (html.length < 500) throw new Error(`${name}: too short (${html.length}b)`);
-    if (name !== "direct") console.log(`[fetchHtml] ${name} succeeded for ${url}`);
-    return html;
-  };
+    // 2. AllOrigins — free CORS proxy, different IP pool
+    {
+      name: "allorigins",
+      fetch: () => fetch(`https://api.allorigins.win/raw?url=${encoded}`, {
+        headers: { "User-Agent": CHROME_UA },
+        signal: AbortSignal.timeout(15000),
+      }),
+    },
 
-  try {
-    // Phase 1: direct + bridge race — 8s each (bridge may be cold-starting on Render)
-    const phase1: Promise<string>[] = [
-      tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
-    ];
-    if (bridgeUrl) {
-      // Bridge gets 12s — Render cold starts take 10-15s, skip if still cold
-      phase1.push(tryFetch("bridge", () => fetch(`${bridgeUrl}/fetch?url=${encoded}`, { signal: AbortSignal.timeout(12000) })));
-    }
+    // 3. CodeTabs proxy — another free proxy service
+    {
+      name: "codetabs",
+      fetch: () => fetch(`https://api.codetabs.com/v1/proxy?quest=${encoded}`, {
+        headers: { "User-Agent": CHROME_UA },
+        signal: AbortSignal.timeout(15000),
+      }),
+    },
 
-    try {
-      const result = await Promise.any(phase1);
-      clearTimeout(globalTimer);
-      return result;
-    } catch { }
+    // 4. corsproxy.io — yet another IP pool
+    {
+      name: "corsproxy",
+      fetch: () => fetch(`https://corsproxy.io/?${encoded}`, {
+        headers: { "User-Agent": CHROME_UA },
+        signal: AbortSignal.timeout(15000),
+      }),
+    },
+  ];
 
-    // Phase 2: free proxies — sequential, 8s each, stop if global budget hit
-    const freeProxies = [
-      { name: "allorigins", url: `https://api.allorigins.win/raw?url=${encoded}` },
-      { name: "codetabs",   url: `https://api.codetabs.com/v1/proxy?quest=${encoded}` },
-      { name: "corsproxy",  url: `https://corsproxy.io/?${encoded}` },
-    ];
-
-    for (const proxy of freeProxies) {
-      if (controller.signal.aborted) break;
-      try {
-        const html = await tryFetch(proxy.name, () =>
-          fetch(proxy.url, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(8000) })
-        );
-        clearTimeout(globalTimer);
-        return html;
-      } catch (e) {
-        console.log(`[fetchHtml] ${proxy.name} failed: ${e}`);
-      }
-    }
-
-    throw new Error(`All proxy backends failed for ${url}`);
-  } finally {
-    clearTimeout(globalTimer);
+  // 5. Bridge (VPS/residential IP) — most reliable, use if set
+  if (bridgeUrl) {
+    proxies.push({
+      name: "bridge",
+      fetch: () => fetch(`${bridgeUrl.trim()}/fetch?url=${encoded}`, {
+        signal: AbortSignal.timeout(20000),
+      }),
+    });
   }
+
+  return proxies;
+}
+
+async function fetchHtml(url: string, env?: Env): Promise<string> {
+  const proxies = buildProxies(url, env?.BRIDGE_URL);
+
+  for (const proxy of proxies) {
+    try {
+      const r = await proxy.fetch(url);
+      if (r.ok) {
+        const html = await r.text();
+        // Sanity check — proxy returned something real, not an error page
+        if (html.length > 500) {
+          if (proxy.name !== "direct") console.log(`[fetchHtml] Success via ${proxy.name} for ${url}`);
+          return html;
+        }
+        console.log(`[fetchHtml] ${proxy.name} returned suspiciously short response (${html.length} chars), trying next`);
+      } else {
+        console.log(`[fetchHtml] ${proxy.name} returned ${r.status} for ${url}, trying next`);
+      }
+    } catch (e) {
+      console.log(`[fetchHtml] ${proxy.name} error: ${e}, trying next`);
+    }
+  }
+
+  throw new Error(`All proxy backends failed for ${url}`);
 }
 
 async function fetchTmdb(animeName: string, tmdbKey: string) {
@@ -171,187 +190,58 @@ async function fetchTmdb(animeName: string, tmdbKey: string) {
 function parseAnimeCards(html: string) {
   const results: { id: string; name: string; poster: string }[] = [];
   const seen = new Set<string>();
-
-  // Wider slug regex: allow any alphanumeric start, dashes, min 2 chars
-  for (const m of html.matchAll(/href=["'](?:https?:\/\/latanime\.org)?\/anime\/([a-zA-Z0-9][a-zA-Z0-9-]{1,})["']/gi)) {
-    const slug = m[1].toLowerCase();
+  for (const m of html.matchAll(/href=["'](?:https?:\/\/latanime\.org)?\/anime\/([a-z0-9][a-z0-9-]+)["']/gi)) {
+    const slug = m[1];
     if (seen.has(slug)) continue;
     seen.add(slug);
-
-    // Look in a wider window (1000 chars) to catch lazy-loaded layouts
     const pos = m.index! + m[0].length;
-    const block = html.slice(Math.max(0, m.index! - 200), pos + 1000);
-
-    const titleM =
-      block.match(/<h3[^>]*>([^<]{2,})<\/h3>/i) ||
-      block.match(/<h2[^>]*>([^<]{2,})<\/h2>/i) ||
-      block.match(/alt="([^"]{2,})"/) ||
-      block.match(/title="([^"]{2,})"/) ||
-      block.match(/<span[^>]*class="[^"]*title[^"]*"[^>]*>([^<]{2,})<\/span>/i);
-
+    const block = html.slice(pos, pos + 600);
+    const titleM = block.match(/<h3[^>]*>([^<]{3,})<\/h3>/i) || block.match(/alt="([^"]{3,})"/) || block.match(/title="([^"]{3,})"/);
     const name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
     if (!name || name.length < 2) continue;
-
     const posterM =
       block.match(/data-src="(https?:\/\/latanime\.org\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
       block.match(/data-src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
-      block.match(/data-lazy-src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
-      block.match(/src="(https?:\/\/latanime\.org\/(?:thumbs|assets|uploads)\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/);
-
+      block.match(/src="(https?:\/\/latanime\.org\/(?:thumbs|assets)\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/);
     const poster = posterM
       ? posterM[1].startsWith("http") ? posterM[1] : `${BASE_URL}${posterM[1]}`
       : "";
-
     results.push({ id: `latanime:${slug}`, name, poster });
   }
-  return results;
+  return results.slice(0, 100);
 }
 
 function toMetaPreview(c: { id: string; name: string; poster: string }) {
   return { id: c.id, type: "series", name: c.name, poster: c.poster || `${BASE_URL}/public/img/anime.png`, posterShape: "poster" };
 }
 
-// ─── D1 CATALOG ──────────────────────────────────────────────────────────────
-
-async function dbCount(db: D1Database): Promise<number> {
-  const r = await db.prepare("SELECT COUNT(*) as n FROM anime").first<{ n: number }>();
-  return r?.n ?? 0;
-}
-
 async function searchAnimes(query: string, env?: Env) {
-  // Use D1 if populated, otherwise fall back to live scrape
-  if (env?.CATALOG_DB) {
-    const count = await dbCount(env.CATALOG_DB);
-    if (count > 0) {
-      const like = `%${query.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
-      const rows = await env.CATALOG_DB
-        .prepare("SELECT id, name, poster FROM anime WHERE name LIKE ?1 ESCAPE '\\' ORDER BY name LIMIT 50")
-        .bind(like)
-        .all<{ id: string; name: string; poster: string }>();
-      return rows.results.map(r => ({ id: r.id, name: r.name, poster: r.poster }));
-    }
-  }
-
-  // Fallback: live scrape
+  const homeHtml = await fetchHtml(`${BASE_URL}/`, env);
+  const csrfM = homeHtml.match(/name="csrf-token"[^>]+content="([^"]+)"/i) || homeHtml.match(/content="([^"]+)"[^>]+name="csrf-token"/i);
+  const csrf = csrfM ? csrfM[1] : "";
   try {
-    const homeHtml = await fetchHtml(`${BASE_URL}/`, env);
-    const csrfM = homeHtml.match(/name="csrf-token"[^>]+content="([^"]+)"/i) || homeHtml.match(/content="([^"]+)"[^>]+name="csrf-token"/i);
-    const csrf = csrfM ? csrfM[1] : "";
-    if (csrf) {
-      const r = await fetch(`${BASE_URL}/buscar_ajax`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "Referer": `${BASE_URL}/`, "Origin": BASE_URL, "User-Agent": CHROME_UA },
-        body: JSON.stringify({ q: query }),
-        signal: AbortSignal.timeout(8000),
-      });
-      if (r.ok) {
-        const html = await r.text();
-        const results = parseAnimeCards(html);
-        if (results.length > 0) return results;
-      }
+    const r = await fetch(`${BASE_URL}/buscar_ajax`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "Referer": `${BASE_URL}/`, "Origin": BASE_URL, "User-Agent": "Mozilla/5.0" },
+      body: JSON.stringify({ q: query }),
+    });
+    if (r.ok) {
+      const html = await r.text();
+      const results = parseAnimeCards(html);
+      if (results.length > 0) return results;
     }
   } catch { }
   return parseAnimeCards(await fetchHtml(`${BASE_URL}/buscar?q=${encodeURIComponent(query)}`, env));
 }
 
 async function getCatalog(catalogId: string, extra: Record<string, string>, env?: Env) {
-  if (extra.search?.trim()) {
-    return { metas: (await searchAnimes(extra.search.trim(), env)).map(toMetaPreview) };
-  }
-
-  if (catalogId === "latanime-airing") {
-    return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`, env)).map(toMetaPreview) };
-  }
-
+  if (extra.search?.trim()) return { metas: (await searchAnimes(extra.search.trim(), env)).map(toMetaPreview) };
+  if (catalogId === "latanime-airing") return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`, env)).map(toMetaPreview) };
   if (catalogId === "latanime-directory") {
-    const skip = parseInt(extra.skip || "0", 10);
-    const limit = 50;
-
-    // Serve from D1 if populated
-    if (env?.CATALOG_DB) {
-      const count = await dbCount(env.CATALOG_DB);
-      if (count > 0) {
-        const rows = await env.CATALOG_DB
-          .prepare("SELECT id, name, poster FROM anime ORDER BY name LIMIT ?1 OFFSET ?2")
-          .bind(limit, skip)
-          .all<{ id: string; name: string; poster: string }>();
-        return { metas: rows.results.map(r => toMetaPreview({ id: r.id, name: r.name, poster: r.poster })) };
-      }
-    }
-
-    // Fallback: live scrape two pages
-    const pageA = Math.floor(skip / 35) + 1;
-    const [htmlA, htmlB] = await Promise.allSettled([
-      fetchHtml(`${BASE_URL}/animes?page=${pageA}`, env),
-      fetchHtml(`${BASE_URL}/animes?page=${pageA + 1}`, env),
-    ]);
-    const results: ReturnType<typeof parseAnimeCards> = [];
-    const seen = new Set<string>();
-    for (const settled of [htmlA, htmlB]) {
-      if (settled.status === "fulfilled") {
-        for (const item of parseAnimeCards(settled.value)) {
-          if (!seen.has(item.id)) { seen.add(item.id); results.push(item); }
-        }
-      }
-    }
-    return { metas: results.map(toMetaPreview) };
+    const page = Math.floor(parseInt(extra.skip || "0", 10) / 30) + 1;
+    return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/animes?page=${page}`, env)).map(toMetaPreview) };
   }
-
-  // Latest (homepage)
   return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/`, env)).map(toMetaPreview) };
-}
-
-// ─── CATALOG SYNC (runs via cron trigger) ────────────────────────────────────
-// Crawls all ~112 pages of latanime.org/animes and upserts into D1.
-// Runs at 4:00 AM UTC daily. Safe to call manually via /admin-sync.
-
-async function syncCatalog(env: Env): Promise<{ inserted: number; pages: number; errors: number }> {
-  let inserted = 0;
-  let errors = 0;
-  let page = 1;
-  const TOTAL_PAGES = 120; // slightly over 112 so we don't miss new ones
-  const BATCH = 5;         // fetch 5 pages at a time to stay under subrequest limit
-
-  while (page <= TOTAL_PAGES) {
-    const pageNums = Array.from({ length: BATCH }, (_, i) => page + i).filter(p => p <= TOTAL_PAGES);
-    page += BATCH;
-
-    const fetches = await Promise.allSettled(
-      pageNums.map(p => fetchHtml(`${BASE_URL}/animes?page=${p}`, env))
-    );
-
-    const batch: { id: string; slug: string; name: string; poster: string }[] = [];
-    for (const settled of fetches) {
-      if (settled.status === "fulfilled") {
-        for (const item of parseAnimeCards(settled.value)) {
-          batch.push({ id: item.id, slug: item.id.replace("latanime:", ""), name: item.name, poster: item.poster });
-        }
-      } else {
-        errors++;
-      }
-    }
-
-    if (batch.length === 0) continue;
-
-    // D1 has a 100-statement batch limit — chunk inserts
-    const now = Date.now();
-    const stmts = batch.map(item =>
-      env.CATALOG_DB.prepare(
-        "INSERT INTO anime (id, slug, name, poster, synced_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO UPDATE SET name=excluded.name, poster=excluded.poster, synced_at=excluded.synced_at"
-      ).bind(item.id, item.slug, item.name, item.poster, now)
-    );
-
-    // Execute in chunks of 50 (well under D1's batch limit)
-    for (let i = 0; i < stmts.length; i += 50) {
-      await env.CATALOG_DB.batch(stmts.slice(i, i + 50));
-    }
-    inserted += batch.length;
-
-    // Small delay between page batches to avoid hammering proxies
-    await new Promise(r => setTimeout(r, 300));
-  }
-
-  return { inserted, pages: Math.ceil(TOTAL_PAGES / BATCH) * BATCH, errors };
 }
 
 async function getMeta(id: string, tmdbKey: string, env?: Env) {
@@ -484,138 +374,6 @@ async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
     if (!r.ok) return null;
     const data: any = await r.json();
     return data.url || null;
-  } catch { return null; }
-}
-
-// ─── GOFILE ──────────────────────────────────────────────────────────────────
-// API flow: get guest token → fetch content → extract direct link
-async function extractGofile(gofileUrl: string): Promise<string | null> {
-  try {
-    const codeM = gofileUrl.match(/gofile\.io\/(?:d|download)\/([a-zA-Z0-9]+)/);
-    if (!codeM) return null;
-    const contentId = codeM[1];
-
-    // Step 1: get guest token
-    const tokenR = await fetch("https://api.gofile.io/accounts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!tokenR.ok) return null;
-    const tokenData: any = await tokenR.json();
-    const token = tokenData?.data?.token;
-    if (!token) return null;
-
-    // Step 2: fetch content
-    const contentR = await fetch(
-      `https://api.gofile.io/contents/${contentId}?wt=4fd6sg89d7s6`,
-      {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(8000),
-      }
-    );
-    if (!contentR.ok) return null;
-    const content: any = await contentR.json();
-    const children = content?.data?.children;
-    if (!children) return null;
-
-    // Find first video file
-    for (const child of Object.values(children) as any[]) {
-      if (child.type === "file" && child.mimetype?.startsWith("video/")) {
-        return child.link || null;
-      }
-    }
-    return null;
-  } catch { return null; }
-}
-
-// ─── STREAMTAPE ───────────────────────────────────────────────────────────────
-// Page contains obfuscated JS: the token is split across two strings that need concat
-async function extractStreamtape(embedUrl: string): Promise<string | null> {
-  try {
-    const r = await fetch(embedUrl, {
-      headers: {
-        "User-Agent": CHROME_UA,
-        "Referer": "https://latanime.org/",
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!r.ok) return null;
-    const html = await r.text();
-
-    // Pattern: robotlink innerHTML set via JS string concat
-    // id="robotlink")</s> ... ('//streamtape.com/get_video?id=X&expires=Y&ip=Z&token=ABC' + 'DEF')
-    const m = html.match(/robotlink[^>]*>[^<]*<\/[^>]+>[\s\S]*?get_video\?[^'"]+['"]([^'"]+)['"]\s*\+\s*['"]([^'"]+)['"]/);
-    if (m) return `https:${m[1]}${m[2]}`;
-
-    // Fallback: direct get_video URL
-    const direct = html.match(/["'](\/\/streamtape\.com\/get_video\?[^"']+)["']/);
-    if (direct) return `https:${direct[1]}`;
-
-    return null;
-  } catch { return null; }
-}
-
-// ─── STREAMWISH / FILELIONS / WISHEMBED ───────────────────────────────────────
-// These share the same player engine — POST to /api/source/{id} to get m3u8
-async function extractStreamwish(embedUrl: string): Promise<string | null> {
-  try {
-    const idM = embedUrl.match(/\/(?:e\/|f\/)?([a-zA-Z0-9]{8,})\/?(?:\?|$)/);
-    if (!idM) return null;
-    const fileId = idM[1];
-
-    // Get base domain from embed URL
-    const base = new URL(embedUrl).origin;
-
-    const r = await fetch(`${base}/api/source/${fileId}`, {
-      method: "POST",
-      headers: {
-        "User-Agent": CHROME_UA,
-        "Referer": embedUrl,
-        "Origin": base,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "X-Requested-With": "XMLHttpRequest",
-      },
-      body: `r=&d=${encodeURIComponent(base)}`,
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!r.ok) return null;
-    const data: any = await r.json();
-
-    // Returns { success: true, data: [{ file, label, type }] }
-    const sources: any[] = data?.data || [];
-    const hls = sources.find((s: any) => s.type === "hls" || s.file?.includes(".m3u8"));
-    if (hls?.file) return hls.file;
-    const mp4 = sources.find((s: any) => s.file?.includes(".mp4"));
-    if (mp4?.file) return mp4.file;
-    return null;
-  } catch { return null; }
-}
-
-// ─── VIDGUARD ─────────────────────────────────────────────────────────────────
-// Heavily obfuscated — needs page fetch + eval-style decoding
-// Pattern: encoded string in `_0x...` vars, but the m3u8 URL leaks in source
-async function extractVidguard(embedUrl: string): Promise<string | null> {
-  try {
-    const r = await fetch(embedUrl, {
-      headers: {
-        "User-Agent": CHROME_UA,
-        "Referer": "https://latanime.org/",
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!r.ok) return null;
-    const html = await r.text();
-
-    // Look for stream URL in source (sometimes leaks unobfuscated)
-    const m3u8 = html.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/);
-    if (m3u8) return m3u8[1];
-
-    // vgfplay/vidguard API pattern
-    const srcM = html.match(/source\s*:\s*["']([^"']+\.m3u8[^"']*)["']/);
-    if (srcM) return srcM[1];
-
-    return null;
   } catch { return null; }
 }
 
@@ -818,7 +576,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   }
 
   // Scrape download mirror links directly from episode page
-  const mirrors: { mediafire?: string; savefiles?: string; pixeldrain?: string; mega?: string; gofile?: string; streamtape?: string } = {};
+  const mirrors: { mediafire?: string; savefiles?: string; pixeldrain?: string; mega?: string; gofile?: string } = {};
   for (const m of html.matchAll(/href=["']([^"']+)["']/gi)) {
     const href = m[1].trim();
     if (href.includes("mediafire.com") && href.includes("/file/") && !mirrors.mediafire) mirrors.mediafire = href;
@@ -826,7 +584,6 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     else if (href.includes("pixeldrain.com") && !mirrors.pixeldrain) mirrors.pixeldrain = href;
     else if (href.includes("mega.nz") && !mirrors.mega) mirrors.mega = href;
     else if (href.includes("gofile.io") && !mirrors.gofile) mirrors.gofile = href;
-    else if (href.includes("streamtape.com") && !mirrors.streamtape) mirrors.streamtape = href;
   }
 
   if (embedUrls.length === 0 && Object.keys(mirrors).length === 0) return { streams: [] };
@@ -850,7 +607,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(m3u8Url)}&ref=${encodeURIComponent(referer)}`;
   }
 
-  const BROWSER_PLAYERS = ["filemoon", "voe.sx", "lancewhosedifficult", "voeunblocked", "mxdrop", "dsvplay", "doodstream", "uqload", "upstream"];
+  const BROWSER_PLAYERS = ["filemoon", "voe.sx", "lancewhosedifficult", "voeunblocked", "mxdrop", "dsvplay", "doodstream"];
   const needsBrowser = (url: string) => BROWSER_PLAYERS.some((p) => url.includes(p));
 
   const streams: any[] = [];
@@ -879,24 +636,6 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     }
   }
 
-  // GoFile — free direct download, no account needed
-  if (mirrors.gofile) {
-    mirrorTasks.push((async () => {
-      const url = await extractGofile(mirrors.gofile!);
-      if (!url) return null;
-      return { url, name: "📂 GoFile MP4", isHls: false };
-    })());
-  }
-
-  // StreamTape mirror link
-  if (mirrors.streamtape) {
-    mirrorTasks.push((async () => {
-      const url = await extractStreamtape(mirrors.streamtape!);
-      if (!url) return null;
-      return { url, name: "📼 StreamTape MP4", isHls: false };
-    })());
-  }
-
   const results = await Promise.allSettled([
     ...mirrorTasks,
     ...embedUrls.map(async (embed) => {
@@ -918,25 +657,6 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to")) {
         const url = await extractSavefiles(embed.url);
         return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
-      }
-      if (embed.url.includes("streamtape.com") || embed.url.includes("streamtape.net")) {
-        const url = await extractStreamtape(embed.url);
-        return url ? { url, name: embed.name, isHls: false } : null;
-      }
-      if (
-        embed.url.includes("streamwish.") || embed.url.includes("wishembed.") ||
-        embed.url.includes("filelions.") || embed.url.includes("streamwish.to") ||
-        embed.url.includes("ajmidyad.sbs") || embed.url.includes("kibagames.best")
-      ) {
-        const url = await extractStreamwish(embed.url);
-        return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
-      }
-      if (embed.url.includes("vidguard.") || embed.url.includes("vgfplay.")) {
-        const url = await extractVidguard(embed.url);
-        if (url) return { url, name: embed.name, isHls: url.includes(".m3u8") };
-        const bUrl = await extractWithBrowser(embed.url, env);
-        if (bUrl) return { url: bUrl, name: embed.name, isHls: bUrl.includes(".m3u8") };
-        return null;
       }
       if (needsBrowser(embed.url)) {
         let url = await extractWithBrowser(embed.url, env);
@@ -1046,25 +766,6 @@ export default {
       return json({ code, streamUrl, proxyUrl, ms: Date.now() - t0 });
     }
 
-    if (path === "/debug-search") {
-      const q = url.searchParams.get("q");
-      if (!q) return json({ error: "Missing ?q=" });
-      const t0 = Date.now();
-      try {
-        const results = await searchAnimes(q, env);
-        return json({ query: q, count: results.length, results, ms: Date.now() - t0 });
-      } catch (e) { return json({ error: String(e), ms: Date.now() - t0 }); }
-    }
-
-    if (path === "/debug-proxy") {
-      const testUrl = url.searchParams.get("url") || BASE_URL;
-      const t0 = Date.now();
-      try {
-        const html = await fetchHtml(testUrl, env);
-        return json({ url: testUrl, htmlLen: html.length, snippet: html.slice(0, 1000), ms: Date.now() - t0 });
-      } catch (e) { return json({ error: String(e), ms: Date.now() - t0 }); }
-    }
-
     if (path === "/debug-bridge") {
       const testUrl = url.searchParams.get("url") || "https://luluvid.com/e/t66o00zj95a9";
       if (!bridgeUrl) return json({ error: "BRIDGE_URL not set" });
@@ -1154,31 +855,6 @@ export default {
       } catch (e) { return new Response(String(e), { status: 500 }); }
     }
 
-    // Manually trigger a catalog sync (kicks off the same job as cron)
-    if (path === "/admin-sync") {
-      const t0 = Date.now();
-      try {
-        const result = await syncCatalog(env);
-        return json({ ...result, ms: Date.now() - t0 });
-      } catch (e) { return json({ error: String(e), ms: Date.now() - t0 }); }
-    }
-
-    // D1 catalog status
-    if (path === "/admin-db") {
-      const count = env.CATALOG_DB ? await dbCount(env.CATALOG_DB) : -1;
-      const sample = env.CATALOG_DB
-        ? (await env.CATALOG_DB.prepare("SELECT id, name FROM anime ORDER BY synced_at DESC LIMIT 5").all()).results
-        : [];
-      return json({ count, sample });
-    }
-
     return new Response("Not found", { status: 404, headers: CORS });
-  },
-
-  // Cron trigger — runs at 4:00 AM UTC daily
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(
-      syncCatalog(env).then(r => console.log(`[cron] Sync complete:`, JSON.stringify(r)))
-    );
   },
 };

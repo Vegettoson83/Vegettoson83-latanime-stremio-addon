@@ -3,9 +3,6 @@ main = "src/index.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat_v2"]
 
-[triggers]
-crons = ["0 4 * * *"]   # daily sync at 4:00 AM UTC
-
 [vars]
 TMDB_KEY     = ""
 BRIDGE_URL   = "https://latanime-bridge.onrender.com"
@@ -19,7 +16,3 @@ binding = "MYBROWSER"
 [[kv_namespaces]]
 binding     = "STREAM_CACHE"
 id          = "19b6cbbb876343ffa950e8a72959b7f3"
-
-[[d1_databases]]
-binding     = "CATALOG_DB"
-database_id = "e3bd3541-35c4-4fc7-9bbe-cf914bdff113"
