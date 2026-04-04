@@ -45,7 +45,7 @@ const TTL = {
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.5.0",
+  version: "4.6.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/public/img/logito.png",
@@ -86,12 +86,13 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
   const encoded = encodeURIComponent(url);
   const bridgeUrl = env?.BRIDGE_URL?.trim();
 
-  // STRATEGY:
-  // Phase 1 — race direct vs bridge (fastest, no rate-limit risk)
-  // Phase 2 — if both fail, try free proxies sequentially (they rate-limit under parallel load)
-  // This avoids hitting the 50 subrequest Worker limit and keeps response time low.
+  // Hard 25s budget for the entire function — Workers die at 30s wall time.
+  // Individual proxy timeouts are kept short so we can try more within budget.
+  const controller = new AbortController();
+  const globalTimer = setTimeout(() => controller.abort(), 25000);
 
   const tryFetch = async (name: string, fetcher: () => Promise<Response>): Promise<string> => {
+    if (controller.signal.aborted) throw new Error(`${name}: global timeout`);
     const r = await fetcher();
     if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
     const html = await r.text();
@@ -100,37 +101,46 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
     return html;
   };
 
-  // Phase 1: direct + bridge in parallel
-  const phase1: Promise<string>[] = [
-    tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(10000) })),
-  ];
-  if (bridgeUrl) {
-    phase1.push(tryFetch("bridge", () => fetch(`${bridgeUrl}/fetch?url=${encoded}`, { signal: AbortSignal.timeout(15000) })));
-  }
-
   try {
-    return await Promise.any(phase1);
-  } catch { }
-
-  // Phase 2: free proxies — sequential to avoid subrequest burst
-  const freeProxies: Array<{ name: string; url: string }> = [
-    { name: "allorigins", url: `https://api.allorigins.win/raw?url=${encoded}` },
-    { name: "codetabs",   url: `https://api.codetabs.com/v1/proxy?quest=${encoded}` },
-    { name: "corsproxy",  url: `https://corsproxy.io/?${encoded}` },
-  ];
-
-  for (const proxy of freeProxies) {
-    try {
-      const html = await tryFetch(proxy.name, () =>
-        fetch(proxy.url, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(15000) })
-      );
-      return html;
-    } catch (e) {
-      console.log(`[fetchHtml] ${proxy.name} failed: ${e}`);
+    // Phase 1: direct + bridge race — 8s each (bridge may be cold-starting on Render)
+    const phase1: Promise<string>[] = [
+      tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
+    ];
+    if (bridgeUrl) {
+      // Bridge gets 12s — Render cold starts take 10-15s, skip if still cold
+      phase1.push(tryFetch("bridge", () => fetch(`${bridgeUrl}/fetch?url=${encoded}`, { signal: AbortSignal.timeout(12000) })));
     }
-  }
 
-  throw new Error(`All proxy backends failed for ${url}`);
+    try {
+      const result = await Promise.any(phase1);
+      clearTimeout(globalTimer);
+      return result;
+    } catch { }
+
+    // Phase 2: free proxies — sequential, 8s each, stop if global budget hit
+    const freeProxies = [
+      { name: "allorigins", url: `https://api.allorigins.win/raw?url=${encoded}` },
+      { name: "codetabs",   url: `https://api.codetabs.com/v1/proxy?quest=${encoded}` },
+      { name: "corsproxy",  url: `https://corsproxy.io/?${encoded}` },
+    ];
+
+    for (const proxy of freeProxies) {
+      if (controller.signal.aborted) break;
+      try {
+        const html = await tryFetch(proxy.name, () =>
+          fetch(proxy.url, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(8000) })
+        );
+        clearTimeout(globalTimer);
+        return html;
+      } catch (e) {
+        console.log(`[fetchHtml] ${proxy.name} failed: ${e}`);
+      }
+    }
+
+    throw new Error(`All proxy backends failed for ${url}`);
+  } finally {
+    clearTimeout(globalTimer);
+  }
 }
 
 async function fetchTmdb(animeName: string, tmdbKey: string) {
@@ -193,7 +203,7 @@ function parseAnimeCards(html: string) {
 
     results.push({ id: `latanime:${slug}`, name, poster });
   }
-  return results.slice(0, 100);
+  return results;
 }
 
 function toMetaPreview(c: { id: string; name: string; poster: string }) {
@@ -236,12 +246,43 @@ async function searchAnimes(query: string, env?: Env) {
 }
 
 async function getCatalog(catalogId: string, extra: Record<string, string>, env?: Env) {
-  if (extra.search?.trim()) return { metas: (await searchAnimes(extra.search.trim(), env)).map(toMetaPreview) };
-  if (catalogId === "latanime-airing") return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`, env)).map(toMetaPreview) };
-  if (catalogId === "latanime-directory") {
-    const page = Math.floor(parseInt(extra.skip || "0", 10) / 30) + 1;
-    return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/animes?page=${page}`, env)).map(toMetaPreview) };
+  if (extra.search?.trim()) {
+    return { metas: (await searchAnimes(extra.search.trim(), env)).map(toMetaPreview) };
   }
+
+  if (catalogId === "latanime-airing") {
+    return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`, env)).map(toMetaPreview) };
+  }
+
+  if (catalogId === "latanime-directory") {
+    // latanime /animes pages have ~30 items each.
+    // Stremio sends skip=0,30,60... — we map skip→page and fetch 2 pages
+    // at once so Stremio always gets a full 30+ item batch regardless of
+    // how many items latanime actually puts per page.
+    const skip = parseInt(extra.skip || "0", 10);
+    const pageA = Math.floor(skip / 30) + 1;
+    const pageB = pageA + 1;
+
+    const [htmlA, htmlB] = await Promise.allSettled([
+      fetchHtml(`${BASE_URL}/animes?page=${pageA}`, env),
+      fetchHtml(`${BASE_URL}/animes?page=${pageB}`, env),
+    ]);
+
+    const results: ReturnType<typeof parseAnimeCards> = [];
+    const seen = new Set<string>();
+
+    for (const settled of [htmlA, htmlB]) {
+      if (settled.status === "fulfilled") {
+        for (const item of parseAnimeCards(settled.value)) {
+          if (!seen.has(item.id)) { seen.add(item.id); results.push(item); }
+        }
+      }
+    }
+
+    return { metas: results.map(toMetaPreview) };
+  }
+
+  // Latest (homepage)
   return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/`, env)).map(toMetaPreview) };
 }
 
