@@ -14,6 +14,7 @@ const CORS = {
 interface Env {
   MYBROWSER: Fetcher;
   STREAM_CACHE: KVNamespace;
+  CATALOG_DB: D1Database;
   TMDB_KEY: string;
   BRIDGE_URL: string;
   MFP_URL: string;
@@ -45,7 +46,7 @@ const TTL = {
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.6.0",
+  version: "4.7.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/public/img/logito.png",
@@ -210,26 +211,36 @@ function toMetaPreview(c: { id: string; name: string; poster: string }) {
   return { id: c.id, type: "series", name: c.name, poster: c.poster || `${BASE_URL}/public/img/anime.png`, posterShape: "poster" };
 }
 
+// ─── D1 CATALOG ──────────────────────────────────────────────────────────────
+
+async function dbCount(db: D1Database): Promise<number> {
+  const r = await db.prepare("SELECT COUNT(*) as n FROM anime").first<{ n: number }>();
+  return r?.n ?? 0;
+}
+
 async function searchAnimes(query: string, env?: Env) {
-  // Try AJAX search first — needs CSRF token from homepage
+  // Use D1 if populated, otherwise fall back to live scrape
+  if (env?.CATALOG_DB) {
+    const count = await dbCount(env.CATALOG_DB);
+    if (count > 0) {
+      const like = `%${query.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
+      const rows = await env.CATALOG_DB
+        .prepare("SELECT id, name, poster FROM anime WHERE name LIKE ?1 ESCAPE '\\' ORDER BY name LIMIT 50")
+        .bind(like)
+        .all<{ id: string; name: string; poster: string }>();
+      return rows.results.map(r => ({ id: r.id, name: r.name, poster: r.poster }));
+    }
+  }
+
+  // Fallback: live scrape
   try {
     const homeHtml = await fetchHtml(`${BASE_URL}/`, env);
     const csrfM = homeHtml.match(/name="csrf-token"[^>]+content="([^"]+)"/i) || homeHtml.match(/content="([^"]+)"[^>]+name="csrf-token"/i);
     const csrf = csrfM ? csrfM[1] : "";
     if (csrf) {
-      // POST also needs to go through a proxy since Worker IPs are blocked
-      // Use allorigins as relay: it will POST on our behalf if supported,
-      // otherwise fall through to search page
       const r = await fetch(`${BASE_URL}/buscar_ajax`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-TOKEN": csrf,
-          "X-Requested-With": "XMLHttpRequest",
-          "Referer": `${BASE_URL}/`,
-          "Origin": BASE_URL,
-          "User-Agent": CHROME_UA,
-        },
+        headers: { "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "Referer": `${BASE_URL}/`, "Origin": BASE_URL, "User-Agent": CHROME_UA },
         body: JSON.stringify({ q: query }),
         signal: AbortSignal.timeout(8000),
       });
@@ -240,8 +251,6 @@ async function searchAnimes(query: string, env?: Env) {
       }
     }
   } catch { }
-
-  // Fallback: search results page (goes through proxy load balancer)
   return parseAnimeCards(await fetchHtml(`${BASE_URL}/buscar?q=${encodeURIComponent(query)}`, env));
 }
 
@@ -255,22 +264,29 @@ async function getCatalog(catalogId: string, extra: Record<string, string>, env?
   }
 
   if (catalogId === "latanime-directory") {
-    // latanime /animes pages have ~30 items each.
-    // Stremio sends skip=0,30,60... — we map skip→page and fetch 2 pages
-    // at once so Stremio always gets a full 30+ item batch regardless of
-    // how many items latanime actually puts per page.
     const skip = parseInt(extra.skip || "0", 10);
-    const pageA = Math.floor(skip / 30) + 1;
-    const pageB = pageA + 1;
+    const limit = 50;
 
+    // Serve from D1 if populated
+    if (env?.CATALOG_DB) {
+      const count = await dbCount(env.CATALOG_DB);
+      if (count > 0) {
+        const rows = await env.CATALOG_DB
+          .prepare("SELECT id, name, poster FROM anime ORDER BY name LIMIT ?1 OFFSET ?2")
+          .bind(limit, skip)
+          .all<{ id: string; name: string; poster: string }>();
+        return { metas: rows.results.map(r => toMetaPreview({ id: r.id, name: r.name, poster: r.poster })) };
+      }
+    }
+
+    // Fallback: live scrape two pages
+    const pageA = Math.floor(skip / 35) + 1;
     const [htmlA, htmlB] = await Promise.allSettled([
       fetchHtml(`${BASE_URL}/animes?page=${pageA}`, env),
-      fetchHtml(`${BASE_URL}/animes?page=${pageB}`, env),
+      fetchHtml(`${BASE_URL}/animes?page=${pageA + 1}`, env),
     ]);
-
     const results: ReturnType<typeof parseAnimeCards> = [];
     const seen = new Set<string>();
-
     for (const settled of [htmlA, htmlB]) {
       if (settled.status === "fulfilled") {
         for (const item of parseAnimeCards(settled.value)) {
@@ -278,12 +294,64 @@ async function getCatalog(catalogId: string, extra: Record<string, string>, env?
         }
       }
     }
-
     return { metas: results.map(toMetaPreview) };
   }
 
   // Latest (homepage)
   return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/`, env)).map(toMetaPreview) };
+}
+
+// ─── CATALOG SYNC (runs via cron trigger) ────────────────────────────────────
+// Crawls all ~112 pages of latanime.org/animes and upserts into D1.
+// Runs at 4:00 AM UTC daily. Safe to call manually via /admin-sync.
+
+async function syncCatalog(env: Env): Promise<{ inserted: number; pages: number; errors: number }> {
+  let inserted = 0;
+  let errors = 0;
+  let page = 1;
+  const TOTAL_PAGES = 120; // slightly over 112 so we don't miss new ones
+  const BATCH = 5;         // fetch 5 pages at a time to stay under subrequest limit
+
+  while (page <= TOTAL_PAGES) {
+    const pageNums = Array.from({ length: BATCH }, (_, i) => page + i).filter(p => p <= TOTAL_PAGES);
+    page += BATCH;
+
+    const fetches = await Promise.allSettled(
+      pageNums.map(p => fetchHtml(`${BASE_URL}/animes?page=${p}`, env))
+    );
+
+    const batch: { id: string; slug: string; name: string; poster: string }[] = [];
+    for (const settled of fetches) {
+      if (settled.status === "fulfilled") {
+        for (const item of parseAnimeCards(settled.value)) {
+          batch.push({ id: item.id, slug: item.id.replace("latanime:", ""), name: item.name, poster: item.poster });
+        }
+      } else {
+        errors++;
+      }
+    }
+
+    if (batch.length === 0) continue;
+
+    // D1 has a 100-statement batch limit — chunk inserts
+    const now = Date.now();
+    const stmts = batch.map(item =>
+      env.CATALOG_DB.prepare(
+        "INSERT INTO anime (id, slug, name, poster, synced_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO UPDATE SET name=excluded.name, poster=excluded.poster, synced_at=excluded.synced_at"
+      ).bind(item.id, item.slug, item.name, item.poster, now)
+    );
+
+    // Execute in chunks of 50 (well under D1's batch limit)
+    for (let i = 0; i < stmts.length; i += 50) {
+      await env.CATALOG_DB.batch(stmts.slice(i, i + 50));
+    }
+    inserted += batch.length;
+
+    // Small delay between page batches to avoid hammering proxies
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  return { inserted, pages: Math.ceil(TOTAL_PAGES / BATCH) * BATCH, errors };
 }
 
 async function getMeta(id: string, tmdbKey: string, env?: Env) {
@@ -1086,6 +1154,31 @@ export default {
       } catch (e) { return new Response(String(e), { status: 500 }); }
     }
 
+    // Manually trigger a catalog sync (kicks off the same job as cron)
+    if (path === "/admin-sync") {
+      const t0 = Date.now();
+      try {
+        const result = await syncCatalog(env);
+        return json({ ...result, ms: Date.now() - t0 });
+      } catch (e) { return json({ error: String(e), ms: Date.now() - t0 }); }
+    }
+
+    // D1 catalog status
+    if (path === "/admin-db") {
+      const count = env.CATALOG_DB ? await dbCount(env.CATALOG_DB) : -1;
+      const sample = env.CATALOG_DB
+        ? (await env.CATALOG_DB.prepare("SELECT id, name FROM anime ORDER BY synced_at DESC LIMIT 5").all()).results
+        : [];
+      return json({ count, sample });
+    }
+
     return new Response("Not found", { status: 404, headers: CORS });
+  },
+
+  // Cron trigger — runs at 4:00 AM UTC daily
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(
+      syncCatalog(env).then(r => console.log(`[cron] Sync complete:`, JSON.stringify(r)))
+    );
   },
 };
