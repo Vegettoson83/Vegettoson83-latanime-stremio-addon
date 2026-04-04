@@ -45,7 +45,7 @@ const TTL = {
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.4.0",
+  version: "4.5.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/public/img/logito.png",
@@ -60,8 +60,9 @@ const MANIFEST = {
 };
 
 // ─── PROXY LOAD BALANCER ──────────────────────────────────────────────────────
-// Rotates through multiple outbound proxy services to bypass IP blocks.
-// Each proxy uses a different IP pool — if one is blocked or fails, next is tried.
+// Phase 1: race direct fetch vs bridge (VPS/residential).
+// Phase 2: sequential fallback through free CORS proxies.
+// Keeps subrequest count low (Worker limit: 50 concurrent).
 
 const CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
@@ -81,82 +82,55 @@ const CHROME_HEADERS = {
   "Upgrade-Insecure-Requests": "1",
 };
 
-// Each entry: { name, build(url) → fetch-ready URL, extract(response) → Promise<string> }
-type ProxyBackend = {
-  name: string;
-  fetch: (url: string) => Promise<Response>;
-};
-
-function buildProxies(url: string, bridgeUrl?: string): ProxyBackend[] {
-  const encoded = encodeURIComponent(url);
-  const proxies: ProxyBackend[] = [
-
-    // 1. Direct — try first, fastest if not blocked
-    {
-      name: "direct",
-      fetch: () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(10000) }),
-    },
-
-    // 2. AllOrigins — free CORS proxy, different IP pool
-    {
-      name: "allorigins",
-      fetch: () => fetch(`https://api.allorigins.win/raw?url=${encoded}`, {
-        headers: { "User-Agent": CHROME_UA },
-        signal: AbortSignal.timeout(15000),
-      }),
-    },
-
-    // 3. CodeTabs proxy — another free proxy service
-    {
-      name: "codetabs",
-      fetch: () => fetch(`https://api.codetabs.com/v1/proxy?quest=${encoded}`, {
-        headers: { "User-Agent": CHROME_UA },
-        signal: AbortSignal.timeout(15000),
-      }),
-    },
-
-    // 4. corsproxy.io — yet another IP pool
-    {
-      name: "corsproxy",
-      fetch: () => fetch(`https://corsproxy.io/?${encoded}`, {
-        headers: { "User-Agent": CHROME_UA },
-        signal: AbortSignal.timeout(15000),
-      }),
-    },
-  ];
-
-  // 5. Bridge (VPS/residential IP) — most reliable, use if set
-  if (bridgeUrl) {
-    proxies.push({
-      name: "bridge",
-      fetch: () => fetch(`${bridgeUrl.trim()}/fetch?url=${encoded}`, {
-        signal: AbortSignal.timeout(20000),
-      }),
-    });
-  }
-
-  return proxies;
-}
-
 async function fetchHtml(url: string, env?: Env): Promise<string> {
-  const proxies = buildProxies(url, env?.BRIDGE_URL);
+  const encoded = encodeURIComponent(url);
+  const bridgeUrl = env?.BRIDGE_URL?.trim();
 
-  // Run all proxies in PARALLEL — take the first one that returns valid HTML.
-  // Sequential was hitting the 30s Worker wall time limit when multiple proxies failed.
-  const tryProxy = async (proxy: ProxyBackend): Promise<string> => {
-    const r = await proxy.fetch(url);
-    if (!r.ok) throw new Error(`${proxy.name}: HTTP ${r.status}`);
+  // STRATEGY:
+  // Phase 1 — race direct vs bridge (fastest, no rate-limit risk)
+  // Phase 2 — if both fail, try free proxies sequentially (they rate-limit under parallel load)
+  // This avoids hitting the 50 subrequest Worker limit and keeps response time low.
+
+  const tryFetch = async (name: string, fetcher: () => Promise<Response>): Promise<string> => {
+    const r = await fetcher();
+    if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
     const html = await r.text();
-    if (html.length < 500) throw new Error(`${proxy.name}: response too short (${html.length} chars)`);
-    if (proxy.name !== "direct") console.log(`[fetchHtml] Success via ${proxy.name} for ${url}`);
+    if (html.length < 500) throw new Error(`${name}: too short (${html.length}b)`);
+    if (name !== "direct") console.log(`[fetchHtml] ${name} succeeded for ${url}`);
     return html;
   };
 
-  try {
-    return await Promise.any(proxies.map(tryProxy));
-  } catch (e) {
-    throw new Error(`All proxy backends failed for ${url}: ${e}`);
+  // Phase 1: direct + bridge in parallel
+  const phase1: Promise<string>[] = [
+    tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(10000) })),
+  ];
+  if (bridgeUrl) {
+    phase1.push(tryFetch("bridge", () => fetch(`${bridgeUrl}/fetch?url=${encoded}`, { signal: AbortSignal.timeout(15000) })));
   }
+
+  try {
+    return await Promise.any(phase1);
+  } catch { }
+
+  // Phase 2: free proxies — sequential to avoid subrequest burst
+  const freeProxies: Array<{ name: string; url: string }> = [
+    { name: "allorigins", url: `https://api.allorigins.win/raw?url=${encoded}` },
+    { name: "codetabs",   url: `https://api.codetabs.com/v1/proxy?quest=${encoded}` },
+    { name: "corsproxy",  url: `https://corsproxy.io/?${encoded}` },
+  ];
+
+  for (const proxy of freeProxies) {
+    try {
+      const html = await tryFetch(proxy.name, () =>
+        fetch(proxy.url, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(15000) })
+      );
+      return html;
+    } catch (e) {
+      console.log(`[fetchHtml] ${proxy.name} failed: ${e}`);
+    }
+  }
+
+  throw new Error(`All proxy backends failed for ${url}`);
 }
 
 async function fetchTmdb(animeName: string, tmdbKey: string) {
