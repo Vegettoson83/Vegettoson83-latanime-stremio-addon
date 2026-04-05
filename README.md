@@ -41,10 +41,19 @@ https://latanime-stremio.<your-subdomain>.workers.dev
 
 In Stremio → **Addons** → **Community Addons** → paste the URL → Install 🎉
 
-## Manual Deploy
+## Manual Deploy (Cloudflare)
 
 ```bash
 npm install
 npx wrangler login
 npx wrangler deploy
 ```
+
+## Render Deployment
+
+This repository is also configured for deployment on Render. It uses a hybrid architecture with an addon server and a scraping bridge.
+
+- **Build Command**: `npm install && npm run build`
+- **Start Command**: `npm start`
+- **Environment Variables**:
+  - `SB_API_KEY`: Your ScrapingBee API key (required for bridge).
