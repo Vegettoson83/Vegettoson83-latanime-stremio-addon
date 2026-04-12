@@ -3,12 +3,15 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "deploy": "npx wrangler@4 deploy"
+    "deploy": "npx wrangler@4 deploy",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "typescript": "^5.0.0"
   },
   "devDependencies": {
     "@cloudflare/puppeteer": "^1.0.6",
-    "@cloudflare/workers-types": "^4.0.0",
-    "typescript": "^5.0.0",
     "wrangler": "^4.67.1"
   }
 }
