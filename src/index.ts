@@ -1,5 +1,3 @@
-import puppeteer from "@cloudflare/puppeteer";
-
 const ADDON_ID = "com.latanime.stremio";
 const BASE_URL = "https://latanime.org";
 const TMDB_BASE = "https://api.themoviedb.org/3";
@@ -351,6 +349,38 @@ function extractPixeldrain(embedUrl: string): string | null {
   return `https://pixeldrain.com/api/file/${m[1]}/download`;
 }
 
+async function extractGofile(gofileUrl: string): Promise<{ directLink: string; token: string } | null> {
+  try {
+    const contentId = gofileUrl.split("/d/").pop()?.split(/[/?]/)[0];
+    if (!contentId) return null;
+
+    const accR = await fetch("https://api.gofile.io/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "User-Agent": CHROME_UA }
+    });
+    const accData: any = await accR.json();
+    const token = accData?.data?.token;
+    if (!token) return null;
+
+    const r = await fetch(`https://api.gofile.io/contents/${contentId}`, {
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "X-Website-Token": "4fd6sg89d7s6",
+        "User-Agent": CHROME_UA
+      }
+    });
+    const data: any = await r.json();
+    if (data.status !== "ok") return null;
+
+    const children = data.data.children;
+    const file = Object.values(children).find((c: any) => c.type === "file" && (c.mimetype?.includes("video") || c.name?.endsWith(".mp4") || c.name?.endsWith(".mkv")));
+    if (file && (file as any).directLink) {
+      return { directLink: (file as any).directLink, token };
+    }
+    return null;
+  } catch { return null; }
+}
+
 async function extractMediafire(mfUrl: string): Promise<string | null> {
   try {
     const res = await fetch(mfUrl, {
@@ -379,6 +409,13 @@ async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
 
 async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | null> {
   if (!env.MYBROWSER) return null;
+  let puppeteer: any;
+  try {
+    puppeteer = (await import("@cloudflare/puppeteer")).default;
+  } catch {
+    console.log("[browser] @cloudflare/puppeteer not available in this environment");
+    return null;
+  }
 
   const cacheKey = `br:${embedUrl}`;
   if (env.STREAM_CACHE) {
@@ -421,7 +458,7 @@ async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | 
     const BLOCK_TYPES = new Set(["image", "font", "media"]);
     const BLOCK_HOSTS = ["google-analytics", "googletagmanager", "doubleclick", "facebook", "twitter", "adsbygoogle", "turnstile.cf"];
 
-    page.on("request", (req) => {
+    page.on("request", (req: any) => {
       const type = req.resourceType();
       const url = req.url();
       if (BLOCK_TYPES.has(type) || BLOCK_HOSTS.some((h) => url.includes(h))) {
@@ -432,7 +469,7 @@ async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | 
     });
 
     let streamUrl: string | null = null;
-    page.on("response", async (res) => {
+    page.on("response", async (res: any) => {
       if (streamUrl) return;
       const url = res.url();
       // Intercept m3u8 playlist requests
@@ -636,6 +673,22 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     }
   }
 
+  if (mirrors.gofile) {
+    mirrorTasks.push((async () => {
+      const data = await extractGofile(mirrors.gofile!);
+      if (!data) return null;
+      const proxyUrl = `${workerBase}/proxy/file?url=${encodeURIComponent(data.directLink)}&token=${data.token}`;
+      return { url: proxyUrl, name: "🚀 Gofile MP4", isHls: false };
+    })());
+  }
+
+  if (mirrors.mega) {
+    mirrorTasks.push((async () => {
+      const embedUrl = mirrors.mega!.replace("/file/", "/embed/");
+      return { url: embedUrl, name: "☁ Mega.nz", isHls: false };
+    })());
+  }
+
   const results = await Promise.allSettled([
     ...mirrorTasks,
     ...embedUrls.map(async (embed) => {
@@ -684,9 +737,9 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         finalUrl = streamUrl;
       }
       if (!streams.some(s => s.url === finalUrl)) {
-        const isMediafire = name.includes("MediaFire");
+        const isHighPriority = name.includes("MediaFire") || name.includes("Gofile");
         const entry = { url: finalUrl, title: `▶ ${name} — Latino`, behaviorHints: { notWebReady: isHls } };
-        if (isMediafire) streams.unshift(entry); else streams.push(entry);
+        if (isHighPriority) streams.unshift(entry); else streams.push(entry);
       }
       extractedNames.add(name);
       // 480p variant for savefiles streams
@@ -840,6 +893,41 @@ export default {
           return `${workerBase}/proxy/seg?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
         }).join("\n");
         return new Response(rewritten, { headers: { "Content-Type": "application/vnd.apple.mpegurl", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache" } });
+      } catch (e) { return new Response(String(e), { status: 500 }); }
+    }
+
+    if (path === "/proxy/file") {
+      const fileUrl = url.searchParams.get("url");
+      const token = url.searchParams.get("token");
+      if (!fileUrl) return new Response("Missing url", { status: 400 });
+
+      const decodedUrl = decodeURIComponent(fileUrl);
+      try {
+        const u = new URL(decodedUrl);
+        if (!u.hostname.endsWith(".gofile.io")) {
+          return new Response("Invalid host", { status: 403 });
+        }
+      } catch { return new Response("Invalid url", { status: 400 }); }
+
+      const headers: Record<string, string> = {
+        "User-Agent": CHROME_UA,
+        "Referer": "https://gofile.io/",
+      };
+      const range = request.headers.get("Range");
+      if (range) headers["Range"] = range;
+      if (token) headers["Cookie"] = `accountToken=${token}`;
+
+      try {
+        const r = await fetch(decodedUrl, { headers });
+        const respHeaders = new Headers(r.headers);
+        respHeaders.set("Access-Control-Allow-Origin", "*");
+        respHeaders.set("Access-Control-Expose-Headers", "*");
+
+        return new Response(r.body, {
+          status: r.status,
+          statusText: r.statusText,
+          headers: respHeaders,
+        });
       } catch (e) { return new Response(String(e), { status: 500 }); }
     }
 

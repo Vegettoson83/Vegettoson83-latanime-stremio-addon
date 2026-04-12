@@ -8,10 +8,12 @@
       "DOM"
     ],
     "types": [
-      "@cloudflare/workers-types"
+      "@cloudflare/workers-types",
+      "node"
     ],
     "strict": true,
-    "noEmit": true,
+    "noEmit": false,
+    "outDir": "dist",
     "skipLibCheck": true
   },
   "include": [

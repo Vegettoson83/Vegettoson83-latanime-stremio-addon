@@ -2,13 +2,19 @@
   "name": "latanime-stremio",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "deploy": "npx wrangler@4 deploy"
+    "deploy": "npx wrangler@4 deploy",
+    "build": "tsc",
+    "start": "node dist/server.js"
   },
-  "devDependencies": {
+  "dependencies": {
     "@cloudflare/puppeteer": "^1.0.6",
     "@cloudflare/workers-types": "^4.0.0",
-    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "devDependencies": {
     "wrangler": "^4.67.1"
   }
 }
