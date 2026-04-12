@@ -1,5 +1,3 @@
-import puppeteer from "@cloudflare/puppeteer";
-
 const ADDON_ID = "com.latanime.stremio";
 const BASE_URL = "https://latanime.org";
 const TMDB_BASE = "https://api.themoviedb.org/3";
@@ -411,6 +409,13 @@ async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
 
 async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | null> {
   if (!env.MYBROWSER) return null;
+  let puppeteer: any;
+  try {
+    puppeteer = (await import("@cloudflare/puppeteer")).default;
+  } catch {
+    console.log("[browser] @cloudflare/puppeteer not available in this environment");
+    return null;
+  }
 
   const cacheKey = `br:${embedUrl}`;
   if (env.STREAM_CACHE) {
@@ -453,7 +458,7 @@ async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | 
     const BLOCK_TYPES = new Set(["image", "font", "media"]);
     const BLOCK_HOSTS = ["google-analytics", "googletagmanager", "doubleclick", "facebook", "twitter", "adsbygoogle", "turnstile.cf"];
 
-    page.on("request", (req) => {
+    page.on("request", (req: any) => {
       const type = req.resourceType();
       const url = req.url();
       if (BLOCK_TYPES.has(type) || BLOCK_HOSTS.some((h) => url.includes(h))) {
@@ -464,7 +469,7 @@ async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | 
     });
 
     let streamUrl: string | null = null;
-    page.on("response", async (res) => {
+    page.on("response", async (res: any) => {
       if (streamUrl) return;
       const url = res.url();
       // Intercept m3u8 playlist requests

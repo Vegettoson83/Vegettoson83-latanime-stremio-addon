@@ -9,13 +9,12 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
+    "@cloudflare/puppeteer": "^1.0.6",
     "@cloudflare/workers-types": "^4.0.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.0.0"
   },
   "devDependencies": {
-    "@cloudflare/puppeteer": "^1.0.6",
-    "@types/node": "^25.6.0",
     "wrangler": "^4.67.1"
   }
 }
