@@ -1,4 +1,3 @@
-import puppeteer from "@cloudflare/puppeteer";
 
 const ADDON_ID = "com.latanime.stremio";
 const BASE_URL = "https://latanime.org";
@@ -12,7 +11,6 @@ const CORS = {
 };
 
 interface Env {
-  MYBROWSER: Fetcher;
   STREAM_CACHE: KVNamespace;
   TMDB_KEY: string;
   BRIDGE_URL: string;
@@ -377,158 +375,6 @@ async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
   } catch { return null; }
 }
 
-async function extractWithBrowser(embedUrl: string, env: Env): Promise<string | null> {
-  if (!env.MYBROWSER) return null;
-
-  const cacheKey = `br:${embedUrl}`;
-  if (env.STREAM_CACHE) {
-    const cached = await env.STREAM_CACHE.get(cacheKey);
-    if (cached) {
-      console.log(`[browser] KV cache hit for ${embedUrl}`);
-      return cached;
-    }
-  }
-
-  let browser = null;
-  try {
-    let sessionId: string | undefined;
-    try {
-      const sessions = await (puppeteer as any).sessions(env.MYBROWSER);
-      const free = sessions.filter((s: any) => !s.connectionId);
-      if (free.length > 0) {
-        sessionId = free[Math.floor(Math.random() * free.length)].sessionId;
-        console.log(`[browser] Reusing session ${sessionId}`);
-      }
-    } catch { }
-
-    browser = sessionId
-      ? await puppeteer.connect(env.MYBROWSER, sessionId)
-      : await puppeteer.launch(env.MYBROWSER);
-
-    const page = await browser.newPage();
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36");
-
-    // Spoof user activation so autoplay works without real click
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, "userActivation", {
-        get: () => ({ isActive: true, hasBeenActive: true }),
-        configurable: true,
-      });
-    });
-
-    await page.setRequestInterception(true);
-
-    const BLOCK_TYPES = new Set(["image", "font", "media"]);
-    const BLOCK_HOSTS = ["google-analytics", "googletagmanager", "doubleclick", "facebook", "twitter", "adsbygoogle", "turnstile.cf"];
-
-    page.on("request", (req) => {
-      const type = req.resourceType();
-      const url = req.url();
-      if (BLOCK_TYPES.has(type) || BLOCK_HOSTS.some((h) => url.includes(h))) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
-
-    let streamUrl: string | null = null;
-    page.on("response", async (res) => {
-      if (streamUrl) return;
-      const url = res.url();
-      // Intercept m3u8 playlist requests
-      if (
-        (url.includes(".m3u8") || url.includes("/playlist") || url.includes("/master")) &&
-        !url.includes("latanime.org")
-      ) {
-        streamUrl = url;
-        console.log(`[browser] Intercepted m3u8: ${url}`);
-        return;
-      }
-      // Intercept JSON API responses that contain m3u8 URLs
-      const ct = res.headers()["content-type"] || "";
-      if (ct.includes("json") && !url.includes("latanime.org")) {
-        try {
-          const text = await res.text();
-          const m = text.match(/["'](https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/);
-          if (m) {
-            streamUrl = m[1];
-            console.log(`[browser] Found m3u8 in JSON response: ${streamUrl}`);
-          }
-        } catch {}
-      }
-    });
-
-    await Promise.race([
-      page.goto(embedUrl, { waitUntil: "domcontentloaded", timeout: 30000 }),
-      new Promise<void>((resolve) => {
-        const interval = setInterval(() => {
-          if (streamUrl) { clearInterval(interval); resolve(); }
-        }, 300);
-        setTimeout(() => clearInterval(interval), 30000);
-      }),
-    ]);
-
-    // Click play button if no stream found yet (handles click-to-play shells like streamhls)
-    if (!streamUrl) {
-      try {
-        const playSelectors = [
-          "#vid_play", ".play-button", "[id*='play']", "[class*='play']",
-          "button", ".jw-icon-display", ".vjs-big-play-button", "video"
-        ];
-        for (const sel of playSelectors) {
-          const el = await page.$(sel);
-          if (el) {
-            await el.click();
-            console.log(`[browser] Clicked: ${sel}`);
-            break;
-          }
-        }
-        // Wait up to 25s for stream after click (SPA players need time to boot + API call)
-        const deadline = Date.now() + 25000;
-        while (!streamUrl && Date.now() < deadline) {
-          await new Promise(r => setTimeout(r, 300));
-        }
-      } catch(e) { console.log("[browser] Click failed:", e); }
-    }
-
-    if (!streamUrl) {
-      streamUrl = await (page.evaluate as any)(() => {
-        const video = (document as any).querySelector("video");
-        if (video?.src && !video.src.startsWith("blob:")) return video.src;
-        const source = (document as any).querySelector("video source");
-        return source?.getAttribute("src") || null;
-      });
-    }
-
-    if (!streamUrl) {
-      streamUrl = await (page.evaluate as any)(() => {
-        const scripts = Array.from((document as any).querySelectorAll("script:not([src])")).map((s: any) => (s as any).textContent || "");
-        const combined = scripts.join("\n");
-        const m =
-          combined.match(/["'`](https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)["'`]/) ||
-          combined.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
-          combined.match(/source\s*[:=]\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/);
-        return m ? m[1] : null;
-      });
-    }
-
-    await page.close();
-
-    if (streamUrl && env.STREAM_CACHE) {
-      await env.STREAM_CACHE.put(cacheKey, streamUrl, { expirationTtl: TTL.browserStream / 1000 });
-      console.log(`[browser] Cached to KV: ${streamUrl}`);
-    }
-
-    return streamUrl;
-  } catch (e) {
-    console.error("[browser] Error:", e);
-    return null;
-  } finally {
-    if (browser) {
-      try { browser.disconnect(); } catch { }
-    }
-  }
-}
 
 // ─── MEDIAFIRE RESOLVER ────────────────────────────────────────────────────
 // Verified Feb 27 2026: GET mediafire.com/file/{key}/{name}/file
@@ -689,8 +535,8 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
       }
       if (needsBrowser(embed.url)) {
-        let url = await extractWithBrowser(embed.url, env);
-        if (!url && bridgeUrl) url = await extractViaBridge(embed.url, bridgeUrl);
+        if (!bridgeUrl) return null;
+        const url = await extractViaBridge(embed.url, bridgeUrl);
         return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
       }
       if (bridgeUrl) {
@@ -764,14 +610,15 @@ export default {
     if (path === "/" || path === "/manifest.json") return json(MANIFEST);
 
     if (path === "/debug") {
-      return json({ tmdbKey: tmdbKey ? "set" : "not set", bridgeUrl: bridgeUrl || "not set", browserBinding: env.MYBROWSER ? "set" : "not set", kvBinding: env.STREAM_CACHE ? "set" : "not set" });
+      return json({ tmdbKey: tmdbKey ? "set" : "not set", bridgeUrl: bridgeUrl || "not set", kvBinding: env.STREAM_CACHE ? "set" : "not set" });
     }
 
     if (path === "/debug-browser") {
       const testUrl = url.searchParams.get("url");
       if (!testUrl) return json({ error: "Missing ?url=" });
+      if (!bridgeUrl) return json({ error: "BRIDGE_URL not set" });
       const t0 = Date.now();
-      const result = await extractWithBrowser(testUrl, env);
+      const result = await extractViaBridge(testUrl, bridgeUrl);
       return json({ streamUrl: result, ms: Date.now() - t0 });
     }
 

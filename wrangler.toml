@@ -13,9 +13,6 @@ MFP_URL      = ""
 MFP_PASSWORD = "latanime"
 SAVEFILES_KEY = "10714bycsy7sdam6brjzf"
 
-[browser]
-binding = "MYBROWSER"
-
 [[kv_namespaces]]
 binding     = "STREAM_CACHE"
 id          = "19b6cbbb876343ffa950e8a72959b7f3"
