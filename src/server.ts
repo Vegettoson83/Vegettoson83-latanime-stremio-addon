@@ -44,12 +44,17 @@ app.all('*', async (req: ExpressRequest, res: ExpressResponse) => {
     if (response.body) {
       const reader = response.body.getReader();
       const stream = async () => {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          res.write(value);
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(value);
+          }
+        } catch (err) {
+          console.error('Stream error:', err);
+        } finally {
+          res.end();
         }
-        res.end();
       };
       stream();
     } else {
