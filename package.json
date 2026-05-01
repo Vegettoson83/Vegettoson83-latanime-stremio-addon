@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
-    "deploy": "npx wrangler@4 deploy"
+    "deploy": "wrangler deploy"
   },
   "dependencies": {
     "express": "^4.19.2",
@@ -18,10 +18,10 @@
     "@types/express": "^4.17.21",
     "@types/cors": "^2.8.17",
     "@types/node": "^20.12.7",
-    "@cloudflare/workers-types": "^4.0.0"
+    "@cloudflare/workers-types": "^4.20240512.0"
   },
   "devDependencies": {
     "@cloudflare/puppeteer": "^1.0.6",
-    "wrangler": "^4.67.1"
+    "wrangler": "^3.57.1"
   }
 }
