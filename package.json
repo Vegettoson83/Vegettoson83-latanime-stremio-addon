@@ -2,13 +2,26 @@
   "name": "latanime-stremio",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
     "deploy": "npx wrangler@4 deploy"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5"
   },
   "devDependencies": {
     "@cloudflare/puppeteer": "^1.0.6",
-    "@cloudflare/workers-types": "^4.0.0",
-    "typescript": "^5.0.0",
-    "wrangler": "^4.67.1"
+    "wrangler": "^4.67.1",
+    "typescript": "^5.4.5",
+    "@types/express": "^4.17.21",
+    "@types/cors": "^2.8.17",
+    "@types/node": "^20.12.7",
+    "@cloudflare/workers-types": "^4.0.0"
   }
 }

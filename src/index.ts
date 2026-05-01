@@ -24,14 +24,26 @@ function json(data: unknown, status = 200) {
 }
 
 const CACHE = new Map<string, { data: unknown; expires: number }>();
-function cacheGet(key: string) {
+async function cacheGet(key: string, env?: Env) {
   const e = CACHE.get(key);
-  if (!e) return null;
-  if (Date.now() > e.expires) { CACHE.delete(key); return null; }
-  return e.data;
+  if (e && Date.now() < e.expires) return e.data;
+  if (e) CACHE.delete(key);
+
+  if (env?.STREAM_CACHE) {
+    try {
+      const val = await env.STREAM_CACHE.get(key);
+      if (val) return JSON.parse(val);
+    } catch { }
+  }
+  return null;
 }
-function cacheSet(key: string, data: unknown, ttlMs: number) {
+async function cacheSet(key: string, data: unknown, ttlMs: number, env?: Env) {
   CACHE.set(key, { data, expires: Date.now() + ttlMs });
+  if (env?.STREAM_CACHE) {
+    try {
+      await env.STREAM_CACHE.put(key, JSON.stringify(data), { expirationTtl: Math.max(60, Math.floor(ttlMs / 1000)) });
+    } catch { }
+  }
 }
 
 const TTL = {
@@ -141,6 +153,7 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
 
   for (const proxy of proxies) {
     try {
+      console.log(`[fetchHtml] Trying ${proxy.name} for ${url}`);
       const r = await proxy.fetch(url);
       if (r.ok) {
         const html = await r.text();
@@ -150,6 +163,8 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
           return html;
         }
         console.log(`[fetchHtml] ${proxy.name} returned suspiciously short response (${html.length} chars), trying next`);
+      } else if (r.status === 403 || r.status === 404) {
+        console.log(`[fetchHtml] ${proxy.name} returned ${r.status} (likely blocked/invalid), trying next`);
       } else {
         console.log(`[fetchHtml] ${proxy.name} returned ${r.status} for ${url}, trying next`);
       }
@@ -194,16 +209,15 @@ function parseAnimeCards(html: string) {
     seen.add(slug);
     const pos = m.index! + m[0].length;
     const block = html.slice(pos, pos + 600);
-    const titleM = block.match(/<h3[^>]*>([^<]{3,})<\/h3>/i) || block.match(/alt="([^"]{3,})"/) || block.match(/title="([^"]{3,})"/);
-    const name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
+    const titleM = block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i) || block.match(/alt="([^"]{3,})"/) || block.match(/title="([^"]{3,})"/);
+    const name = titleM ? titleM[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() : slug;
     if (!name || name.length < 2) continue;
     const posterM =
       block.match(/data-src="(https?:\/\/latanime\.org\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
-      block.match(/data-src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
+      block.match(/data-src="([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)"/) ||
       block.match(/src="(https?:\/\/latanime\.org\/(?:thumbs|assets)\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/);
-    const poster = posterM
-      ? posterM[1].startsWith("http") ? posterM[1] : `${BASE_URL}${posterM[1]}`
-      : "";
+    let poster = posterM ? posterM[1] : "";
+    if (poster && !poster.startsWith("http")) poster = `${BASE_URL}${poster.startsWith("/") ? "" : "/"}${poster}`;
     results.push({ id: `latanime:${slug}`, name, poster });
   }
   return results.slice(0, 100);
@@ -600,7 +614,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     const tmdbKey = (env.TMDB_KEY || "").trim();
@@ -670,29 +684,29 @@ export default {
       if (extraStr) extraStr.split("&").forEach((p) => { const [k, v] = p.split("="); if (k && v) extra[k] = decodeURIComponent(v); });
       if (url.searchParams.get("search")) extra.search = url.searchParams.get("search")!;
       const cacheKey = `catalog:${catalogId}:${extra.search || extra.skip || ""}`;
-      const cached = cacheGet(cacheKey);
+      const cached = await cacheGet(cacheKey, env);
       if (cached) return json(cached);
-      try { const result = await getCatalog(catalogId, extra, env); cacheSet(cacheKey, result, TTL.catalog); return json(result); }
+      try { const result = await getCatalog(catalogId, extra, env); await cacheSet(cacheKey, result, TTL.catalog, env); return json(result); }
       catch (e) { return json({ metas: [], error: String(e) }); }
     }
 
     const metaM = path.match(/^\/meta\/([^/]+)\/(.+)\.json$/);
     if (metaM) {
       const id = decodeURIComponent(metaM[2]);
-      const cached = cacheGet(`meta:${id}`);
+      const cached = await cacheGet(`meta:${id}`, env);
       if (cached) return json(cached);
-      try { const result = await getMeta(id, tmdbKey, env); cacheSet(`meta:${id}`, result, TTL.meta); return json(result); }
+      try { const result = await getMeta(id, tmdbKey, env); await cacheSet(`meta:${id}`, result, TTL.meta, env); return json(result); }
       catch (e) { return json({ meta: null, error: String(e) }); }
     }
 
     const streamM = path.match(/^\/stream\/([^/]+)\/(.+)\.json$/);
     if (streamM) {
       const id = decodeURIComponent(streamM[2]);
-      const cached = cacheGet(`stream:${id}`);
+      const cached = await cacheGet(`stream:${id}`, env);
       if (cached) return json(cached);
       try {
         const result = await getStreams(id, env, request);
-        if (result.streams.length > 0) cacheSet(`stream:${id}`, result, TTL.stream);
+        if (result.streams.length > 0) await cacheSet(`stream:${id}`, result, TTL.stream, env);
         return json(result);
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
