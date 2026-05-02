@@ -7,6 +7,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: 20.x
       - key: TMDB_KEY
         sync: false
       - key: BRIDGE_URL
