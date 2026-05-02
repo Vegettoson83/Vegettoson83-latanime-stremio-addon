@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: latanime-stremio
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TMDB_KEY
+        sync: false
+      - key: BRIDGE_URL
+        value: https://latanime-bridge.onrender.com
+      - key: MFP_URL
+        sync: false
+      - key: MFP_PASSWORD
+        value: latanime
+      - key: SAVEFILES_KEY
+        value: 10714bycsy7sdam6brjzf
