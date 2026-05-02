@@ -6,7 +6,11 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.all('*', async (req, res) => {
-  const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const host = req.headers['host'];
+  const url = `${protocol}://${host}${req.originalUrl}`;
+
+  console.log(`[Server] ${req.method} ${req.originalUrl}`);
 
   // Construct a standard Fetch Request object from Express Request
   const request = new Request(url, {
