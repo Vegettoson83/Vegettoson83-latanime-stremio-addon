@@ -23,27 +23,38 @@ function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: CORS });
 }
 
-const CACHE = new Map<string, { data: unknown; expires: number }>();
-function cacheGet(key: string) {
-  const e = CACHE.get(key);
-  if (!e) return null;
-  if (Date.now() > e.expires) { CACHE.delete(key); return null; }
-  return e.data;
-}
-function cacheSet(key: string, data: unknown, ttlMs: number) {
-  CACHE.set(key, { data, expires: Date.now() + ttlMs });
-}
+// ─── CACHE — KV only, no in-memory Map ───────────────────────────────────────
+// The in-memory Map was the memory leak causing 1101 crashes.
+// Worker isolates share nothing between requests — the Map grew unbounded
+// until the isolate hit 128MB and Cloudflare killed it mid-request.
+// KV has no size limit and survives isolate restarts.
 
 const TTL = {
-  catalog: 10 * 60 * 1000,
-  meta: 2 * 60 * 60 * 1000,
-  stream: 30 * 60 * 1000,
-  browserStream: 2 * 60 * 60 * 1000,
+  catalog:  10 * 60,        // 10 min (seconds for KV)
+  meta:      2 * 60 * 60,   // 2 hr
+  stream:   30 * 60,        // 30 min
 };
+
+async function cacheGet(key: string, kv: KVNamespace | undefined): Promise<unknown> {
+  if (!kv) return null;
+  try {
+    const val = await kv.get(key);
+    return val ? JSON.parse(val) : null;
+  } catch { return null; }
+}
+
+async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamespace | undefined) {
+  if (!kv) return;
+  try {
+    await kv.put(key, JSON.stringify(data), { expirationTtl: ttlSec });
+  } catch (e) {
+    console.log(`[cache] KV write failed for ${key}: ${e}`);
+  }
+}
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.3.0",
+  version: "4.4.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/public/img/logito.png",
@@ -58,8 +69,6 @@ const MANIFEST = {
 };
 
 // ─── PROXY LOAD BALANCER ──────────────────────────────────────────────────────
-// Rotates through multiple outbound proxy services to bypass IP blocks.
-// Each proxy uses a different IP pool — if one is blocked or fails, next is tried.
 
 const CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
@@ -79,86 +88,62 @@ const CHROME_HEADERS = {
   "Upgrade-Insecure-Requests": "1",
 };
 
-// Each entry: { name, build(url) → fetch-ready URL, extract(response) → Promise<string> }
-type ProxyBackend = {
-  name: string;
-  fetch: (url: string) => Promise<Response>;
-};
-
-function buildProxies(url: string, bridgeUrl?: string): ProxyBackend[] {
-  const encoded = encodeURIComponent(url);
-  const proxies: ProxyBackend[] = [
-
-    // 1. Direct — try first, fastest if not blocked
-    {
-      name: "direct",
-      fetch: () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(10000) }),
-    },
-
-    // 2. AllOrigins — free CORS proxy, different IP pool
-    {
-      name: "allorigins",
-      fetch: () => fetch(`https://api.allorigins.win/raw?url=${encoded}`, {
-        headers: { "User-Agent": CHROME_UA },
-        signal: AbortSignal.timeout(15000),
-      }),
-    },
-
-    // 3. CodeTabs proxy — another free proxy service
-    {
-      name: "codetabs",
-      fetch: () => fetch(`https://api.codetabs.com/v1/proxy?quest=${encoded}`, {
-        headers: { "User-Agent": CHROME_UA },
-        signal: AbortSignal.timeout(15000),
-      }),
-    },
-
-    // 4. corsproxy.io — yet another IP pool
-    {
-      name: "corsproxy",
-      fetch: () => fetch(`https://corsproxy.io/?${encoded}`, {
-        headers: { "User-Agent": CHROME_UA },
-        signal: AbortSignal.timeout(15000),
-      }),
-    },
-  ];
-
-  // 5. Bridge (VPS/residential IP) — most reliable, use if set
-  if (bridgeUrl) {
-    proxies.push({
-      name: "bridge",
-      fetch: () => fetch(`${bridgeUrl.trim()}/fetch?url=${encoded}`, {
-        signal: AbortSignal.timeout(20000),
-      }),
-    });
-  }
-
-  return proxies;
-}
-
 async function fetchHtml(url: string, env?: Env): Promise<string> {
-  const proxies = buildProxies(url, env?.BRIDGE_URL);
+  const encoded = encodeURIComponent(url);
+  const bridgeUrl = env?.BRIDGE_URL?.trim();
 
-  for (const proxy of proxies) {
-    try {
-      const r = await proxy.fetch(url);
-      if (r.ok) {
-        const html = await r.text();
-        // Sanity check — proxy returned something real, not an error page
-        if (html.length > 500) {
-          if (proxy.name !== "direct") console.log(`[fetchHtml] Success via ${proxy.name} for ${url}`);
-          return html;
-        }
-        console.log(`[fetchHtml] ${proxy.name} returned suspiciously short response (${html.length} chars), trying next`);
-      } else {
-        console.log(`[fetchHtml] ${proxy.name} returned ${r.status} for ${url}, trying next`);
-      }
-    } catch (e) {
-      console.log(`[fetchHtml] ${proxy.name} error: ${e}, trying next`);
+  // Hard 25s budget — Worker wall time limit is 30s
+  const controller = new AbortController();
+  const globalTimer = setTimeout(() => controller.abort(), 25000);
+
+  const tryFetch = async (name: string, fetcher: () => Promise<Response>): Promise<string> => {
+    if (controller.signal.aborted) throw new Error(`${name}: global timeout`);
+    const r = await fetcher();
+    if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
+    const html = await r.text();
+    if (html.length < 500) throw new Error(`${name}: too short (${html.length}b)`);
+    if (name !== "direct") console.log(`[fetchHtml] ${name} for ${url}`);
+    return html;
+  };
+
+  try {
+    // Phase 1: direct + bridge race (2 subrequests max)
+    const phase1: Promise<string>[] = [
+      tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
+    ];
+    if (bridgeUrl) {
+      phase1.push(tryFetch("bridge", () =>
+        fetch(`${bridgeUrl}/fetch?url=${encoded}`, { signal: AbortSignal.timeout(12000) })
+      ));
     }
-  }
+    try {
+      const result = await Promise.any(phase1);
+      clearTimeout(globalTimer);
+      return result;
+    } catch { }
 
-  throw new Error(`All proxy backends failed for ${url}`);
+    // Phase 2: free proxies sequentially
+    for (const [name, proxyUrl] of [
+      ["allorigins", `https://api.allorigins.win/raw?url=${encoded}`],
+      ["codetabs",   `https://api.codetabs.com/v1/proxy?quest=${encoded}`],
+      ["corsproxy",  `https://corsproxy.io/?${encoded}`],
+    ] as [string, string][]) {
+      if (controller.signal.aborted) break;
+      try {
+        const html = await tryFetch(name, () =>
+          fetch(proxyUrl, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(8000) })
+        );
+        clearTimeout(globalTimer);
+        return html;
+      } catch (e) {
+        console.log(`[fetchHtml] ${name} failed: ${e}`);
+      }
+    }
+
+    throw new Error(`All proxies failed for ${url}`);
+  } finally {
+    clearTimeout(globalTimer);
+  }
 }
 
 async function fetchTmdb(animeName: string, tmdbKey: string) {
@@ -663,6 +648,10 @@ export default {
       return json({ error: "Missing ?key= or no KV binding" });
     }
 
+    if (path === "/_health") {
+      return json({ status: "alive", version: MANIFEST.version, kv: env.STREAM_CACHE ? "bound" : "missing" });
+    }
+
     const catM = path.match(/^\/catalog\/([^/]+)\/([^/]+?)(?:\/([^/]+))?\.json$/);
     if (catM) {
       const [, , catalogId, extraStr] = catM;
@@ -670,29 +659,29 @@ export default {
       if (extraStr) extraStr.split("&").forEach((p) => { const [k, v] = p.split("="); if (k && v) extra[k] = decodeURIComponent(v); });
       if (url.searchParams.get("search")) extra.search = url.searchParams.get("search")!;
       const cacheKey = `catalog:${catalogId}:${extra.search || extra.skip || ""}`;
-      const cached = cacheGet(cacheKey);
+      const cached = await cacheGet(cacheKey, env.STREAM_CACHE);
       if (cached) return json(cached);
-      try { const result = await getCatalog(catalogId, extra, env); cacheSet(cacheKey, result, TTL.catalog); return json(result); }
+      try { const result = await getCatalog(catalogId, extra, env); await cacheSet(cacheKey, result, TTL.catalog, env.STREAM_CACHE); return json(result); }
       catch (e) { return json({ metas: [], error: String(e) }); }
     }
 
     const metaM = path.match(/^\/meta\/([^/]+)\/(.+)\.json$/);
     if (metaM) {
       const id = decodeURIComponent(metaM[2]);
-      const cached = cacheGet(`meta:${id}`);
+      const cached = await cacheGet(`meta:${id}`, env.STREAM_CACHE);
       if (cached) return json(cached);
-      try { const result = await getMeta(id, tmdbKey, env); cacheSet(`meta:${id}`, result, TTL.meta); return json(result); }
+      try { const result = await getMeta(id, tmdbKey, env); await cacheSet(`meta:${id}`, result, TTL.meta, env.STREAM_CACHE); return json(result); }
       catch (e) { return json({ meta: null, error: String(e) }); }
     }
 
     const streamM = path.match(/^\/stream\/([^/]+)\/(.+)\.json$/);
     if (streamM) {
       const id = decodeURIComponent(streamM[2]);
-      const cached = cacheGet(`stream:${id}`);
+      const cached = await cacheGet(`stream:${id}`, env.STREAM_CACHE);
       if (cached) return json(cached);
       try {
         const result = await getStreams(id, env, request);
-        if (result.streams.length > 0) cacheSet(`stream:${id}`, result, TTL.stream);
+        if (result.streams.length > 0) await cacheSet(`stream:${id}`, result, TTL.stream, env.STREAM_CACHE);
         return json(result);
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
