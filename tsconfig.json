@@ -1,20 +1,17 @@
 {
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ES2022",
-    "moduleResolution": "bundler",
-    "lib": [
-      "ES2022",
-      "DOM"
-    ],
-    "types": [
-      "@cloudflare/workers-types"
-    ],
+    "target": "ESNext",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ESNext", "WebWorker"],
     "strict": true,
-    "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "noEmit": false,
+    "outDir": "dist",
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "types": ["@cloudflare/workers-types"]
   },
-  "include": [
-    "src/**/*.ts"
-  ]
+  "include": ["src/**/*"]
 }
