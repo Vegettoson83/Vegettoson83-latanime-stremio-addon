@@ -1,15 +1,19 @@
 {
   "name": "latanime-stremio",
-  "version": "4.5.0",
+  "version": "4.5.1",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "pm2-runtime ecosystem.config.cjs",
     "deploy": "npx wrangler deploy"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "express": "^4.19.2",
+    "pm2": "^5.3.1",
     "typescript": "^5.4.5",
     "@types/node": "^20.12.12",
     "@types/express": "^4.17.21",

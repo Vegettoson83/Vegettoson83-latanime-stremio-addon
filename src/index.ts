@@ -318,7 +318,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   const keyM = html.match(/data-key="([A-Za-z0-9+/=]+)"/);
   const baseUrlPrefix = keyM ? (() => { try { return atob(keyM[1]); } catch { return ""; } })() : "";
 
-  for (const m of html.matchAll(/<a[^+]+data-player="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
+  for (const m of html.matchAll(/<a[^>]+data-player="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
     const suffix = m[1].trim();
     const name = m[2].replace(/<[^>]+>/g, "").trim() || "Player";
     if (seen.has(suffix)) continue;
