@@ -1,9 +1,12 @@
 import express from 'express';
 // @ts-ignore
-import worker from './index.js';
+import workerModule from './index.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+// ESM compatibility: handle both default and module object
+const worker: any = (workerModule as any).default || workerModule;
 
 app.all('*', async (req, res) => {
   const protocol = req.headers['x-forwarded-proto'] || req.protocol;
@@ -39,7 +42,7 @@ app.all('*', async (req, res) => {
     const response = await worker.fetch(request, env, ctx);
 
     res.status(response.status);
-    response.headers.forEach((value, key) => {
+    response.headers.forEach((value: string, key: string) => {
       res.setHeader(key, value);
     });
 
