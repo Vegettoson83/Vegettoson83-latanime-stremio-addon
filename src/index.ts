@@ -179,9 +179,22 @@ function parseAnimeCards(html: string) {
     seen.add(slug);
     const pos = m.index! + m[0].length;
     const block = html.slice(pos, pos + 600);
+
     const titleM = block.match(/<h3[^>]*>([^<]{3,})<\/h3>/i) || block.match(/alt="([^"]{3,})"/) || block.match(/title="([^"]{3,})"/);
-    const name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
+    let name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
     if (!name || name.length < 2) continue;
+
+    // Detect language and type
+    const isCastellano = block.toLowerCase().includes("castellano") || name.toLowerCase().includes("castellano");
+    const isLatino = block.toLowerCase().includes("latino") || name.toLowerCase().includes("latino");
+    const isMovie = block.toLowerCase().includes("película") || block.toLowerCase().includes("pelicula") || name.toLowerCase().includes("película");
+
+    // Clean name and add labels
+    name = name.replace(/\s+(Latino|Castellano|Sub Español)$/i, "").trim();
+    if (isMovie) name += " (Película)";
+    if (isCastellano) name += " [Castellano]";
+    else if (isLatino) name += " [Latino]";
+
     const posterM =
       block.match(/data-src="(https?:\/\/latanime\.org\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
       block.match(/data-src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
@@ -189,6 +202,7 @@ function parseAnimeCards(html: string) {
     const poster = posterM
       ? posterM[1].startsWith("http") ? posterM[1] : `${BASE_URL}${posterM[1]}`
       : "";
+
     results.push({ id: `latanime:${slug}`, name, poster });
   }
   return results.slice(0, 100);
@@ -351,6 +365,48 @@ async function extractMediafire(mfUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
+async function extractGofile(folderUrl: string): Promise<{ url: string; token: string } | null> {
+  try {
+    const folderId = folderUrl.split("/d/").pop()?.split(/[/?]/)[0];
+    if (!folderId) return null;
+
+    // 1. Get guest account token
+    const accR = await fetch("https://api.gofile.io/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Origin": "https://gofile.io" }
+    });
+    if (!accR.ok) return null;
+    const accData: any = await accR.json();
+    const token = accData.data?.token;
+    if (!token) return null;
+
+    // 2. Get folder contents
+    const res = await fetch(`https://api.gofile.io/contents/${folderId}?wt=4fd6sg89d7s6`, {
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "X-Website-Token": "4fd6sg89d7s6",
+        "Origin": "https://gofile.io",
+        "Referer": `https://gofile.io/d/${folderId}`
+      }
+    });
+    if (!res.ok) return null;
+    const data: any = await res.json();
+    const children = data.data?.children;
+    if (!children) return null;
+
+    const file = Object.values(children)
+      .find((c: any) => c.type === "file" && (c.name.includes(".mp4") || c.name.includes(".mkv"))) as any;
+
+    if (file?.directLink) return { url: file.directLink, token };
+    return null;
+  } catch { return null; }
+}
+
+function extractMega(url: string): string | null {
+  if (!url.includes("mega.nz")) return null;
+  return url.replace("/file/", "/embed/");
+}
+
 async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
   try {
     const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(embedUrl)}`, { signal: AbortSignal.timeout(50000) });
@@ -486,6 +542,24 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     })());
   }
 
+  // Priority 2: Mega.nz — reliable, good speed
+  if (mirrors.mega) {
+    const megaUrl = extractMega(mirrors.mega);
+    if (megaUrl) {
+      mirrorTasks.push(Promise.resolve({ url: megaUrl, name: "💎 Mega.nz", isHls: false }));
+    }
+  }
+
+  // Priority 3: Gofile — fast direct MP4, needs proxy
+  if (mirrors.gofile) {
+    mirrorTasks.push((async () => {
+      const result = await extractGofile(mirrors.gofile!);
+      if (!result) return null;
+      const proxyUrl = `${workerBase}/proxy/file?url=${encodeURIComponent(result.url)}&token=${result.token}`;
+      return { url: proxyUrl, name: "🚀 Gofile MP4", isHls: false };
+    })());
+  }
+
   if (mirrors.savefiles) {
     const sfCode = mirrors.savefiles.split("savefiles.com/").pop()?.split(/[/?]/)[0]?.trim();
     if (sfCode && sfCode.length > 3) {
@@ -545,9 +619,9 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         finalUrl = streamUrl;
       }
       if (!streams.some(s => s.url === finalUrl)) {
-        const isMediafire = name.includes("MediaFire");
+        const isHighPriority = name.includes("MediaFire") || name.includes("Mega.nz") || name.includes("Gofile");
         const entry = { url: finalUrl, title: `▶ ${name} — Latino`, behaviorHints: { notWebReady: isHls } };
-        if (isMediafire) streams.unshift(entry); else streams.push(entry);
+        if (isHighPriority) streams.unshift(entry); else streams.push(entry);
       }
       extractedNames.add(name);
       // 480p variant for savefiles streams
@@ -585,7 +659,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: any): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     const tmdbKey = (env.TMDB_KEY || "").trim();
@@ -637,6 +711,42 @@ export default {
         const body = await r.text();
         return json({ status: r.status, body, testUrl, bridgeUrl, ms: Date.now() - t0 });
       } catch (e) { return json({ error: String(e), testUrl, bridgeUrl, ms: Date.now() - t0 }); }
+    }
+
+    if (path === "/proxy/file") {
+      const targetUrl = url.searchParams.get("url");
+      const token = url.searchParams.get("token");
+      if (!targetUrl) return new Response("Missing url", { status: 400 });
+
+      // SSRF Protection: only allow gofile.io
+      try {
+        const parsed = new URL(targetUrl);
+        if (!parsed.hostname.endsWith(".gofile.io")) {
+          return new Response("Forbidden host", { status: 403 });
+        }
+      } catch { return new Response("Invalid url", { status: 400 }); }
+
+      const headers: Record<string, string> = {
+        "User-Agent": CHROME_UA,
+        "Referer": "https://gofile.io/",
+      };
+      if (token) headers["Cookie"] = `accountToken=${token}`;
+
+      const range = request.headers.get("Range");
+      if (range) headers["Range"] = range;
+
+      try {
+        const r = await fetch(targetUrl, { headers });
+        const responseHeaders = new Headers(r.headers);
+        responseHeaders.set("Access-Control-Allow-Origin", "*");
+        responseHeaders.set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges");
+
+        return new Response(r.body, {
+          status: r.status,
+          statusText: r.statusText,
+          headers: responseHeaders,
+        });
+      } catch (e) { return new Response(String(e), { status: 500 }); }
     }
 
     if (path === "/cache-clear") {
