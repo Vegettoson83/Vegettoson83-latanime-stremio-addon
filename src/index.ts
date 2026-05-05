@@ -14,6 +14,7 @@ interface Env {
   STREAM_CACHE: KVNamespace;
   TMDB_KEY: string;
   BRIDGE_URL: string;
+  BRIDGE_TOKEN: string;
   MFP_URL: string;
   MFP_PASSWORD: string;
   SAVEFILES_KEY: string;
@@ -368,9 +369,9 @@ async function extractMediafire(mfUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
-async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
+async function extractViaBridge(embedUrl: string, bridgeUrl: string, env: Env) {
   try {
-    const token = "latanime-secret-token"; // Should match BRIDGE_TOKEN env
+    const token = env.BRIDGE_TOKEN || "latanime-secret-token";
     const r = await fetch(`${bridgeUrl}/extract?token=${token}&url=${encodeURIComponent(embedUrl)}`, { signal: AbortSignal.timeout(50000) });
     if (!r.ok) return null;
     const data: any = await r.json();
@@ -582,11 +583,11 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     }
     if (needsBrowser(embed.url)) {
       if (!bridgeUrl) return null;
-      const url = await extractViaBridge(embed.url, bridgeUrl);
+      const url = await extractViaBridge(embed.url, bridgeUrl, env);
       return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
     }
     if (bridgeUrl) {
-      const url = await extractViaBridge(embed.url, bridgeUrl);
+      const url = await extractViaBridge(embed.url, bridgeUrl, env);
       if (url) return { url, name: embed.name, isHls: url.includes(".m3u8") };
     }
     return null;
@@ -672,7 +673,7 @@ export default {
       if (!testUrl) return json({ error: "Missing ?url=" });
       if (!bridgeUrl) return json({ error: "BRIDGE_URL not set" });
       const t0 = Date.now();
-      const result = await extractViaBridge(testUrl, bridgeUrl);
+      const result = await extractViaBridge(testUrl, bridgeUrl, env);
       return json({ streamUrl: result, ms: Date.now() - t0 });
     }
 

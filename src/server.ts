@@ -14,6 +14,7 @@ app.all('*', async (req, res) => {
   const env = {
     TMDB_KEY: process.env.TMDB_KEY || "",
     BRIDGE_URL: process.env.BRIDGE_URL || "http://localhost:3001",
+    BRIDGE_TOKEN: process.env.BRIDGE_TOKEN || "latanime-secret-token",
     MFP_URL: process.env.MFP_URL || "",
     MFP_PASSWORD: process.env.MFP_PASSWORD || "latanime",
     SAVEFILES_KEY: process.env.SAVEFILES_KEY || "",

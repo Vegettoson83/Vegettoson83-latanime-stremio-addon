@@ -7,16 +7,31 @@ const app = express();
 const PORT = 3001;
 const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || "latanime-secret-token";
 
-let browser;
+let browser = null;
 let activePages = 0;
-const MAX_PAGES = 10;
+const MAX_PAGES = 8; // Slightly more conservative for stability
 
-(async () => {
+async function getBrowser() {
+  if (browser && browser.isConnected()) return browser;
+
+  if (browser) await browser.close().catch(() => {});
+
   browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-gpu'
+    ]
   });
-})();
+
+  return browser;
+}
 
 app.get('/extract', async (req, res) => {
   const { url, token } = req.query;
@@ -28,26 +43,41 @@ app.get('/extract', async (req, res) => {
   if (!url) return res.status(400).json({ error: 'Missing url' });
 
   if (activePages >= MAX_PAGES) {
-    return res.status(503).json({ error: 'Server busy, try again later' });
+    return res.status(503).json({ error: 'Server busy' });
   }
 
   activePages++;
-  const context = await browser.newContext();
-  const page = await context.newPage();
+  let context = null;
+  let page = null;
+
   try {
-    const streamUrl = await handleExtraction(page, url);
+    const b = await getBrowser();
+    context = await b.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    });
+    page = await context.newPage();
+
+    // Set a hard timeout for extraction
+    const streamUrl = await Promise.race([
+      handleExtraction(page, url),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Extraction timeout')), 45000))
+    ]);
+
     res.json({ url: streamUrl });
   } catch (e) {
+    console.error(`[Bridge] Extraction failed for ${url}: ${e.message}`);
     res.status(500).json({ error: e.message });
   } finally {
     activePages--;
-    await page.close();
-    await context.close();
+    if (page) await page.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
   }
 });
 
-// Removed /fetch endpoint to prevent open proxy vulnerability
+app.get('/_health', (req, res) => {
+  res.json({ status: 'ok', activePages, browserConnected: browser?.isConnected() || false });
+});
 
-app.listen(PORT, () => {
-  console.log(`Bridge server listening on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Bridge server listening on 0.0.0.0:${PORT}`);
 });

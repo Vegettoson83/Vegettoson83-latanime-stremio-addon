@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "deploy": "npx wrangler deploy",
-    "build": "tsc",
+    "build": "tsc && npx playwright install chromium --with-deps",
     "start": "pm2-runtime start ecosystem.config.cjs"
   },
   "dependencies": {
@@ -14,7 +14,8 @@
     "wrangler": "^3.57.1",
     "pm2": "^5.3.0",
     "express": "^4.19.2",
-    "@types/express": "^4.17.21"
+    "@types/express": "^4.17.21",
+    "playwright": "^1.44.0"
   },
   "engines": {
     "node": ">=20.0.0"
