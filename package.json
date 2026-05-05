@@ -1,14 +1,23 @@
 {
   "name": "latanime-stremio",
-  "version": "1.0.0",
+  "version": "4.5.1",
   "private": true,
+  "type": "module",
   "scripts": {
-    "deploy": "npx wrangler@4 deploy"
+    "deploy": "npx wrangler deploy",
+    "build": "tsc && npx playwright install chromium --with-deps",
+    "start": "pm2-runtime start ecosystem.config.cjs"
   },
-  "devDependencies": {
-    "@cloudflare/puppeteer": "^1.0.6",
-    "@cloudflare/workers-types": "^4.0.0",
+  "dependencies": {
+    "@cloudflare/workers-types": "^4.20240512.0",
     "typescript": "^5.0.0",
-    "wrangler": "^4.67.1"
+    "wrangler": "^3.57.1",
+    "pm2": "^5.3.0",
+    "express": "^4.19.2",
+    "@types/express": "^4.17.21",
+    "playwright-chromium": "^1.44.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }

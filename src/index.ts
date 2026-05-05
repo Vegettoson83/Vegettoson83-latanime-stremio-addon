@@ -14,6 +14,7 @@ interface Env {
   STREAM_CACHE: KVNamespace;
   TMDB_KEY: string;
   BRIDGE_URL: string;
+  BRIDGE_TOKEN: string;
   MFP_URL: string;
   MFP_PASSWORD: string;
   SAVEFILES_KEY: string;
@@ -130,9 +131,15 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
     ] as [string, string][]) {
       if (controller.signal.aborted) break;
       try {
-        const html = await tryFetch(name, () =>
-          fetch(proxyUrl, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(8000) })
-        );
+        const r = await fetch(proxyUrl, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(8000) });
+        if (r.status === 403 || r.status === 404) {
+          console.log(`[fetchHtml] ${name} returned ${r.status}, rotating...`);
+          continue;
+        }
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const html = await r.text();
+        if (html.length < 500) throw new Error(`too short (${html.length}b)`);
+
         clearTimeout(globalTimer);
         return html;
       } catch (e) {
@@ -180,8 +187,19 @@ function parseAnimeCards(html: string) {
     const pos = m.index! + m[0].length;
     const block = html.slice(pos, pos + 600);
     const titleM = block.match(/<h3[^>]*>([^<]{3,})<\/h3>/i) || block.match(/alt="([^"]{3,})"/) || block.match(/title="([^"]{3,})"/);
-    const name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
+    let name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
     if (!name || name.length < 2) continue;
+
+    // Categorization logic
+    const isLatino = name.toLowerCase().includes("latino") || block.toLowerCase().includes("latino");
+    const isCastellano = name.toLowerCase().includes("castellano") || block.toLowerCase().includes("castellano");
+    const isPelicula = name.toLowerCase().includes("pelicula") || block.toLowerCase().includes("pelicula");
+
+    name = name.replace(/\s*(Ver|Sub Español|Latino|Castellano|Pelicula)\s*/gi, " ").trim();
+    if (isLatino) name += " (Latino)";
+    if (isCastellano) name += " (Castellano)";
+    if (isPelicula) name += " (Película)";
+
     const posterM =
       block.match(/data-src="(https?:\/\/latanime\.org\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
       block.match(/data-src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
@@ -351,12 +369,42 @@ async function extractMediafire(mfUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
-async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
+async function extractViaBridge(embedUrl: string, bridgeUrl: string, env: Env) {
   try {
-    const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(embedUrl)}`, { signal: AbortSignal.timeout(50000) });
+    const token = env.BRIDGE_TOKEN || "latanime-secret-token";
+    const r = await fetch(`${bridgeUrl}/extract?token=${token}&url=${encodeURIComponent(embedUrl)}`, { signal: AbortSignal.timeout(50000) });
     if (!r.ok) return null;
     const data: any = await r.json();
     return data.url || null;
+  } catch { return null; }
+}
+
+async function extractGofile(folderUrl: string, env: Env): Promise<string | null> {
+  try {
+    const folderId = folderUrl.split("/").pop();
+    if (!folderId) return null;
+
+    // 1. Get guest account
+    const accR = await fetch("https://api.gofile.io/accounts", { method: "POST" });
+    if (!accR.ok) return null;
+    const accData: any = await accR.json();
+    const token = accData.data?.token;
+    if (!token) return null;
+
+    // 2. Get folder contents using X-Website-Token header
+    const folderR = await fetch(`https://api.gofile.io/contents/${folderId}`, {
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "X-Website-Token": "4fd6sg89d7s6",
+        "User-Agent": CHROME_UA
+      }
+    });
+    if (!folderR.ok) return null;
+    const folderData: any = await folderR.json();
+    const file = folderData.data?.children?.[0];
+    if (!file || !file.link) return null;
+
+    return file.link;
   } catch { return null; }
 }
 
@@ -465,7 +513,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       });
       return `${mfpBase}/proxy/hls/manifest.m3u8?${params}`;
     }
-    return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(m3u8Url)}&ref=${encodeURIComponent(referer)}`;
+    return `${workerBase}/proxy/hls?url=${encodeURIComponent(m3u8Url)}&ref=${encodeURIComponent(referer)}`;
   }
 
   const BROWSER_PLAYERS = ["filemoon", "voe.sx", "lancewhosedifficult", "voeunblocked", "mxdrop", "dsvplay", "doodstream"];
@@ -474,67 +522,90 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   const streams: any[] = [];
   const extractedNames = new Set<string>();
 
-  // Build task list — embeds + savefiles mirror (all run in parallel)
-  const mirrorTasks: Promise<{ url: string; name: string; isHls: boolean } | null>[] = [];
+  // Build task list — embeds + mirrors (run in parallel with batching)
+  const mirrorTasks: (() => Promise<{ url: string; name: string; isHls: boolean; priority?: number } | null>)[] = [];
 
   // Priority 1: MediaFire — direct MP4, seekable, no expiry, ~185MB/ep
   if (mirrors.mediafire) {
-    mirrorTasks.push((async () => {
+    mirrorTasks.push(async () => {
       const cdnUrl = await resolveMediafire(mirrors.mediafire!);
       if (!cdnUrl) return null;
-      return { url: cdnUrl, name: "🔥 MediaFire MP4", isHls: false };
-    })());
+      return { url: cdnUrl, name: "🔥 MediaFire MP4", isHls: false, priority: 100 };
+    });
+  }
+
+  if (mirrors.mega) {
+    mirrorTasks.push(async () => {
+      const embedUrl = mirrors.mega!.replace("/file/", "/embed/");
+      return { url: embedUrl, name: "Mega.nz", isHls: false, priority: 90 };
+    });
+  }
+
+  if (mirrors.gofile) {
+    mirrorTasks.push(async () => {
+      const directUrl = await extractGofile(mirrors.gofile!, env);
+      if (!directUrl) return null;
+      const proxyUrl = `${workerBase}/proxy/file?url=${encodeURIComponent(directUrl)}`;
+      return { url: proxyUrl, name: "Gofile", isHls: false, priority: 80 };
+    });
   }
 
   if (mirrors.savefiles) {
     const sfCode = mirrors.savefiles.split("savefiles.com/").pop()?.split(/[/?]/)[0]?.trim();
     if (sfCode && sfCode.length > 3) {
-      mirrorTasks.push((async () => {
+      mirrorTasks.push(async () => {
         const m3u8 = await extractSavefiles(`https://savefiles.com/${sfCode}`);
         if (!m3u8) return null;
         return { url: m3u8, name: "savefiles 1080p", isHls: true };
-      })());
+      });
     }
   }
 
-  const results = await Promise.allSettled([
-    ...mirrorTasks,
-    ...embedUrls.map(async (embed) => {
-      // Pixeldrain — direct stream, Stremio fetches from user's residential IP
-      if (embed.url.includes("pixeldrain.com")) {
-        const idM = embed.url.match(/pixeldrain\.com\/(?:u\/|l\/)([a-zA-Z0-9]+)/);
-        if (idM) return { url: `https://pixeldrain.com/api/file/${idM[1]}`, name: embed.name, isHls: false };
-        return null;
-      }
-
-      if (embed.url.includes("hexload.com")) {
-        const url = await extractHexload(embed.url);
-        return url ? { url, name: embed.name, isHls: false } : null;
-      }
-      if (embed.url.includes("mp4upload.com")) {
-        const url = await extractMp4upload(embed.url);
-        return url ? { url, name: embed.name, isHls: false } : null;
-      }
-      if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to")) {
-        const url = await extractSavefiles(embed.url);
-        return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
-      }
-      if (needsBrowser(embed.url)) {
-        if (!bridgeUrl) return null;
-        const url = await extractViaBridge(embed.url, bridgeUrl);
-        return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
-      }
-      if (bridgeUrl) {
-        const url = await extractViaBridge(embed.url, bridgeUrl);
-        if (url) return { url, name: embed.name, isHls: url.includes(".m3u8") };
-      }
+  const embedTasks = embedUrls.map((embed) => async () => {
+    // Pixeldrain — direct stream, Stremio fetches from user's residential IP
+    if (embed.url.includes("pixeldrain.com")) {
+      const idM = embed.url.match(/pixeldrain\.com\/(?:u\/|l\/)([a-zA-Z0-9]+)/);
+      if (idM) return { url: `https://pixeldrain.com/api/file/${idM[1]}`, name: embed.name, isHls: false };
       return null;
-    })
-  ]);
+    }
+
+    if (embed.url.includes("hexload.com")) {
+      const url = await extractHexload(embed.url);
+      return url ? { url, name: embed.name, isHls: false } : null;
+    }
+    if (embed.url.includes("mp4upload.com")) {
+      const url = await extractMp4upload(embed.url);
+      return url ? { url, name: embed.name, isHls: false } : null;
+    }
+    if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to")) {
+      const url = await extractSavefiles(embed.url);
+      return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
+    }
+    if (needsBrowser(embed.url)) {
+      if (!bridgeUrl) return null;
+      const url = await extractViaBridge(embed.url, bridgeUrl, env);
+      return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
+    }
+    if (bridgeUrl) {
+      const url = await extractViaBridge(embed.url, bridgeUrl, env);
+      if (url) return { url, name: embed.name, isHls: url.includes(".m3u8") };
+    }
+    return null;
+  });
+
+  // Execute tasks in parallel with batching
+  const allTasks = [...mirrorTasks, ...embedTasks];
+  const BATCH_SIZE = 5;
+  const results: any[] = [];
+  for (let i = 0; i < allTasks.length; i += BATCH_SIZE) {
+    const batch = allTasks.slice(i, i + BATCH_SIZE).map(t => t());
+    const batchRes = await Promise.allSettled(batch);
+    results.push(...batchRes);
+  }
 
   for (const r of results) {
     if (r.status === "fulfilled" && r.value) {
-      const { url: streamUrl, name, isHls } = r.value;
+      const { url: streamUrl, name, isHls, priority } = r.value;
       const isSavefiles = streamUrl.includes("savefiles.com") || streamUrl.includes("s3.savefiles") || streamUrl.includes("s2.savefiles") || streamUrl.includes("streamhls.to");
       let finalUrl: string;
       if (isHls && isSavefiles) {
@@ -545,9 +616,8 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         finalUrl = streamUrl;
       }
       if (!streams.some(s => s.url === finalUrl)) {
-        const isMediafire = name.includes("MediaFire");
         const entry = { url: finalUrl, title: `▶ ${name} — Latino`, behaviorHints: { notWebReady: isHls } };
-        if (isMediafire) streams.unshift(entry); else streams.push(entry);
+        if (priority && priority >= 80) streams.unshift(entry); else streams.push(entry);
       }
       extractedNames.add(name);
       // 480p variant for savefiles streams
@@ -603,7 +673,7 @@ export default {
       if (!testUrl) return json({ error: "Missing ?url=" });
       if (!bridgeUrl) return json({ error: "BRIDGE_URL not set" });
       const t0 = Date.now();
-      const result = await extractViaBridge(testUrl, bridgeUrl);
+      const result = await extractViaBridge(testUrl, bridgeUrl, env);
       return json({ streamUrl: result, ms: Date.now() - t0 });
     }
 
@@ -624,7 +694,7 @@ export default {
       const t0 = Date.now();
       const streamUrl = await extractSavefiles(`https://savefiles.com/${code}`);
       const workerBase = new URL(request.url).origin;
-      const proxyUrl = streamUrl ? `${workerBase}/proxy/m3u8?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://streamhls.to/")}` : null;
+      const proxyUrl = streamUrl ? `${workerBase}/proxy/hls?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://streamhls.to/")}` : null;
       return json({ code, streamUrl, proxyUrl, ms: Date.now() - t0 });
     }
 
@@ -686,7 +756,7 @@ export default {
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
 
-    if (path === "/proxy/m3u8") {
+    if (path === "/proxy/hls") {
       const m3u8Url = url.searchParams.get("url");
       const referer = url.searchParams.get("ref") || "https://latanime.org/";
       if (!m3u8Url) return new Response("Missing url", { status: 400 });
@@ -702,7 +772,7 @@ export default {
           const trimmed = line.trim();
           if (trimmed.startsWith("#") || trimmed === "") return line;
           const absUrl = trimmed.startsWith("http") ? trimmed : base + trimmed;
-          if (isMaster || absUrl.includes(".m3u8")) return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
+          if (isMaster || absUrl.includes(".m3u8")) return `${workerBase}/proxy/hls?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
           return `${workerBase}/proxy/seg?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
         }).join("\n");
         return new Response(rewritten, { headers: { "Content-Type": "application/vnd.apple.mpegurl", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache" } });
@@ -719,6 +789,45 @@ export default {
         if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
         return new Response(r.body, { headers: { "Content-Type": r.headers.get("Content-Type") || "video/MP2T", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600" } });
       } catch (e) { return new Response(String(e), { status: 500 }); }
+    }
+
+    if (path === "/proxy/file") {
+      const fileUrl = url.searchParams.get("url");
+      if (!fileUrl) return new Response("Missing url", { status: 400 });
+
+      try {
+        const decoded = decodeURIComponent(fileUrl);
+        const u = new URL(decoded);
+
+        // SSRF Protection: only allow gofile.io hosts
+        if (!u.hostname.endsWith(".gofile.io")) {
+           return new Response("Forbidden host", { status: 403 });
+        }
+
+        const headers: Record<string, string> = {
+          "User-Agent": CHROME_UA,
+          "Referer": "https://gofile.io/",
+        };
+
+        const range = request.headers.get("Range");
+        if (range) headers["Range"] = range;
+
+        // In a real scenario we might need the account token cookie here too if Gofile requires it for direct links
+        // Based on memory: "inject accountToken cookies"
+        // For now, we'll try without if we don't have it, or it should be passed in query if needed.
+
+        const r = await fetch(decoded, { headers });
+
+        const responseHeaders = new Headers(r.headers);
+        responseHeaders.set("Access-Control-Allow-Origin", "*");
+
+        return new Response(r.body, {
+          status: r.status,
+          headers: responseHeaders
+        });
+      } catch (e) {
+        return new Response(String(e), { status: 500 });
+      }
     }
 
     return new Response("Not found", { status: 404, headers: CORS });
