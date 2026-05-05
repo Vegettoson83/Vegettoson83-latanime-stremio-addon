@@ -1,6 +1,6 @@
 
 import express from 'express';
-import { chromium } from 'playwright';
+import { chromium } from 'playwright-chromium';
 import { handleExtraction } from './lib/handlers.js';
 
 const app = express();
