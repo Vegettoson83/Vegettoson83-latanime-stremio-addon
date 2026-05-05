@@ -513,7 +513,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       });
       return `${mfpBase}/proxy/hls/manifest.m3u8?${params}`;
     }
-    return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(m3u8Url)}&ref=${encodeURIComponent(referer)}`;
+    return `${workerBase}/proxy/hls?url=${encodeURIComponent(m3u8Url)}&ref=${encodeURIComponent(referer)}`;
   }
 
   const BROWSER_PLAYERS = ["filemoon", "voe.sx", "lancewhosedifficult", "voeunblocked", "mxdrop", "dsvplay", "doodstream"];
@@ -694,7 +694,7 @@ export default {
       const t0 = Date.now();
       const streamUrl = await extractSavefiles(`https://savefiles.com/${code}`);
       const workerBase = new URL(request.url).origin;
-      const proxyUrl = streamUrl ? `${workerBase}/proxy/m3u8?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://streamhls.to/")}` : null;
+      const proxyUrl = streamUrl ? `${workerBase}/proxy/hls?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://streamhls.to/")}` : null;
       return json({ code, streamUrl, proxyUrl, ms: Date.now() - t0 });
     }
 
@@ -756,7 +756,7 @@ export default {
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
 
-    if (path === "/proxy/m3u8") {
+    if (path === "/proxy/hls") {
       const m3u8Url = url.searchParams.get("url");
       const referer = url.searchParams.get("ref") || "https://latanime.org/";
       if (!m3u8Url) return new Response("Missing url", { status: 400 });
@@ -772,7 +772,7 @@ export default {
           const trimmed = line.trim();
           if (trimmed.startsWith("#") || trimmed === "") return line;
           const absUrl = trimmed.startsWith("http") ? trimmed : base + trimmed;
-          if (isMaster || absUrl.includes(".m3u8")) return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
+          if (isMaster || absUrl.includes(".m3u8")) return `${workerBase}/proxy/hls?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
           return `${workerBase}/proxy/seg?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
         }).join("\n");
         return new Response(rewritten, { headers: { "Content-Type": "application/vnd.apple.mpegurl", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache" } });

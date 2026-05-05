@@ -9,26 +9,36 @@ const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || "latanime-secret-token";
 
 let browser = null;
 let activePages = 0;
-const MAX_PAGES = 8; // Slightly more conservative for stability
+const MAX_PAGES = 8;
 
 async function getBrowser() {
   if (browser && browser.isConnected()) return browser;
 
-  if (browser) await browser.close().catch(() => {});
+  if (browser) {
+    console.log('[Bridge] Closing disconnected browser...');
+    await browser.close().catch(() => {});
+  }
 
-  browser = await chromium.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process',
-      '--disable-gpu'
-    ]
-  });
+  console.log('[Bridge] Launching browser...');
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-gpu'
+      ]
+    });
+    console.log('[Bridge] Browser launched successfully');
+  } catch (e) {
+    console.error(`[Bridge] Failed to launch browser: ${e.message}`);
+    throw e;
+  }
 
   return browser;
 }
@@ -57,7 +67,6 @@ app.get('/extract', async (req, res) => {
     });
     page = await context.newPage();
 
-    // Set a hard timeout for extraction
     const streamUrl = await Promise.race([
       handleExtraction(page, url),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Extraction timeout')), 45000))

@@ -1,6 +1,7 @@
 
 import express from 'express';
 import * as workerModule from './index.js';
+import { Readable } from 'stream';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,7 +19,7 @@ app.all('*', async (req, res) => {
     MFP_URL: process.env.MFP_URL || "",
     MFP_PASSWORD: process.env.MFP_PASSWORD || "latanime",
     SAVEFILES_KEY: process.env.SAVEFILES_KEY || "",
-    STREAM_CACHE: undefined // No KV in Node.js shim for now, or mock it
+    STREAM_CACHE: undefined
   };
 
   const ctx = {
@@ -42,11 +43,16 @@ app.all('*', async (req, res) => {
       res.set(key, value);
     });
 
-    const buffer = await response.arrayBuffer();
-    res.send(Buffer.from(buffer));
+    if (response.body) {
+      Readable.fromWeb(response.body as any).pipe(res);
+    } else {
+      res.end();
+    }
   } catch (e: any) {
     console.error(e);
-    res.status(500).send(e.message);
+    if (!res.headersSent) {
+      res.status(500).send(e.message);
+    }
   }
 });
 
