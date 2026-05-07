@@ -6,7 +6,8 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: process.env.PORT || 3000,
-        BRIDGE_URL: `http://localhost:3001`
+        BRIDGE_URL: `http://localhost:3001`,
+        BRIDGE_TOKEN: process.env.BRIDGE_TOKEN
       }
     },
     {
@@ -14,7 +15,8 @@ module.exports = {
       script: 'bridge-server.js',
       env: {
         NODE_ENV: 'production',
-        PORT_BRIDGE: 3001
+        PORT_BRIDGE: 3001,
+        BRIDGE_TOKEN: process.env.BRIDGE_TOKEN
       }
     }
   ]

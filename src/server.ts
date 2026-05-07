@@ -29,6 +29,7 @@ app.all('*', async (req, res) => {
       MFP_URL: process.env.MFP_URL || "",
       MFP_PASSWORD: process.env.MFP_PASSWORD || "",
       SAVEFILES_KEY: process.env.SAVEFILES_KEY || "",
+      BRIDGE_TOKEN: process.env.BRIDGE_TOKEN || "",
       STREAM_CACHE: null // KV not available in shim, uses in-memory/direct fetch
     };
 
