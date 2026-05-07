@@ -7,7 +7,7 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "build": "tsc && npx playwright install chromium --with-deps",
+    "build": "tsc && npx playwright install chromium",
     "start": "pm2-runtime start ecosystem.config.cjs",
     "deploy": "wrangler deploy"
   },
