@@ -17,22 +17,17 @@ interface Env {
   MFP_URL: string;
   MFP_PASSWORD: string;
   SAVEFILES_KEY: string;
+  BRIDGE_TOKEN?: string;
 }
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: CORS });
 }
 
-// ─── CACHE — KV only, no in-memory Map ───────────────────────────────────────
-// The in-memory Map was the memory leak causing 1101 crashes.
-// Worker isolates share nothing between requests — the Map grew unbounded
-// until the isolate hit 128MB and Cloudflare killed it mid-request.
-// KV has no size limit and survives isolate restarts.
-
 const TTL = {
-  catalog:  10 * 60,        // 10 min (seconds for KV)
-  meta:      2 * 60 * 60,   // 2 hr
-  stream:   30 * 60,        // 30 min
+  catalog:  10 * 60,
+  meta:      2 * 60 * 60,
+  stream:   30 * 60,
 };
 
 async function cacheGet(key: string, kv: KVNamespace | undefined): Promise<unknown> {
@@ -54,7 +49,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.4.0",
+  version: "4.5.1",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/public/img/logito.png",
@@ -67,8 +62,6 @@ const MANIFEST = {
   ],
   idPrefixes: ["latanime:"],
 };
-
-// ─── PROXY LOAD BALANCER ──────────────────────────────────────────────────────
 
 const CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
@@ -92,7 +85,6 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
   const encoded = encodeURIComponent(url);
   const bridgeUrl = env?.BRIDGE_URL?.trim();
 
-  // Hard 25s budget — Worker wall time limit is 30s
   const controller = new AbortController();
   const globalTimer = setTimeout(() => controller.abort(), 25000);
 
@@ -102,12 +94,10 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
     if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
     const html = await r.text();
     if (html.length < 500) throw new Error(`${name}: too short (${html.length}b)`);
-    if (name !== "direct") console.log(`[fetchHtml] ${name} for ${url}`);
     return html;
   };
 
   try {
-    // Phase 1: direct + bridge race (2 subrequests max)
     const phase1: Promise<string>[] = [
       tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
     ];
@@ -122,7 +112,6 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
       return result;
     } catch { }
 
-    // Phase 2: free proxies sequentially
     for (const [name, proxyUrl] of [
       ["allorigins", `https://api.allorigins.win/raw?url=${encoded}`],
       ["codetabs",   `https://api.codetabs.com/v1/proxy?quest=${encoded}`],
@@ -180,7 +169,17 @@ function parseAnimeCards(html: string) {
     const pos = m.index! + m[0].length;
     const block = html.slice(pos, pos + 600);
     const titleM = block.match(/<h3[^>]*>([^<]{3,})<\/h3>/i) || block.match(/alt="([^"]{3,})"/) || block.match(/title="([^"]{3,})"/);
-    const name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
+    let name = titleM ? titleM[1].replace(/<[^>]+>/g, "").trim() : slug;
+
+    // Clean and Label
+    const labels: string[] = [];
+    if (name.toLowerCase().includes("latino")) labels.push("Latino");
+    if (name.toLowerCase().includes("castellano")) labels.push("Castellano");
+    if (block.toLowerCase().includes("pelicula") || block.toLowerCase().includes("película")) labels.push("Pelicula");
+
+    name = name.replace(/\s+(Ver|Sub Español|Latino|Castellano)$/gi, "").trim();
+    if (labels.length > 0) name += ` [${labels.join("/")}]`;
+
     if (!name || name.length < 2) continue;
     const posterM =
       block.match(/data-src="(https?:\/\/latanime\.org\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
@@ -317,54 +316,44 @@ async function extractSavefiles(embedUrl: string) {
       redirect: "follow",
     });
     const html = await dlR.text();
-    // Primary: Clappr sources array (verified pattern from friend)
     const srcMatch = html.match(/sources:\s*\["([^"]+\.m3u8[^"]*)"\]/);
     if (srcMatch) return srcMatch[1];
-    // Fallback: any m3u8 URL
     const m3u8Match = html.match(/https:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*/);
     if (m3u8Match) return m3u8Match[0];
     return null;
   } catch { return null; }
 }
 
-
-function extractPixeldrain(embedUrl: string): string | null {
-  const m = embedUrl.match(/pixeldrain\.com\/u\/([a-zA-Z0-9]+)/);
-  if (!m) return null;
-  return `https://pixeldrain.com/api/file/${m[1]}/download`;
-}
-
-async function extractMediafire(mfUrl: string): Promise<string | null> {
+async function extractGofile(folderUrl: string) {
   try {
-    const res = await fetch(mfUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-        "Referer": "https://www.mediafire.com/",
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-      }
+    const folderId = folderUrl.split("/d/").pop()?.split(/[/?]/)[0];
+    if (!folderId) return null;
+
+    // Get guest account
+    const accR = await fetch("https://api.gofile.io/accounts", { method: "POST" });
+    const accData: any = await accR.json();
+    const token = accData?.data?.token;
+    if (!token) return null;
+
+    const r = await fetch(`https://api.gofile.io/contents/${folderId}?wt=4fd6sg89d7s6`, {
+      headers: { "Authorization": `Bearer ${token}` }
     });
-    const html = await res.text();
-    const m = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s]+/);
-    if (m) return m[0];
-    const btn = html.match(/href="(https:\/\/download\d+\.mediafire\.com[^"]+)"/);
-    return btn ? btn[1] : null;
+    const data: any = await r.json();
+    const file = Object.values(data?.data?.children || {})[0] as any;
+    return file?.directLink || null;
   } catch { return null; }
 }
 
-async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
+async function extractViaBridge(embedUrl: string, bridgeUrl: string, token?: string) {
   try {
-    const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(embedUrl)}`, { signal: AbortSignal.timeout(50000) });
+    const auth = token ? `&token=${token}` : "";
+    const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(embedUrl)}${auth}`, { signal: AbortSignal.timeout(50000) });
     if (!r.ok) return null;
     const data: any = await r.json();
     return data.url || null;
   } catch { return null; }
 }
 
-
-// ─── MEDIAFIRE RESOLVER ────────────────────────────────────────────────────
-// Verified Feb 27 2026: GET mediafire.com/file/{key}/{name}/file
-// → HTML contains CDN URL: download{n}.mediafire.com/.../{key}/{filename}
-// → 206 Partial Content, video/mp4, Accept-Ranges: bytes ✓
 async function resolveMediafire(mfUrl: string): Promise<string | null> {
   try {
     const r = await fetch(mfUrl, {
@@ -378,7 +367,6 @@ async function resolveMediafire(mfUrl: string): Promise<string | null> {
     const html = await r.text();
     const match = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s]+/);
     if (match) return match[0];
-    // Fallback: download button href
     const btnMatch = html.match(/aria-label="Download file"[^>]+href="([^"]+)"|href="([^"]+)"[^>]*id="downloadButton"|href="([^"]+)"[^>]*class="[^"]*popsok/);
     if (btnMatch) return btnMatch[1] || btnMatch[2] || btnMatch[3];
     return null;
@@ -394,8 +382,6 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   const embedUrls: { url: string; name: string }[] = [];
   const seen = new Set<string>();
 
-  // data-key = base64 of the base URL prefix
-  // data-player = path suffix to append (yourupload is the exception: full base64)
   const keyM = html.match(/data-key="([A-Za-z0-9+/=]+)"/);
   const baseUrl = keyM ? (() => { try { return atob(keyM[1]); } catch { return ""; } })() : "";
 
@@ -406,63 +392,35 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     seen.add(suffix);
 
     let embedUrl = "";
-    const nameLower = name.toLowerCase();
-
-    if (nameLower.includes("yourupload")) {
-      // yourupload uses full base64 in data-player
+    if (name.toLowerCase().includes("yourupload")) {
       try { embedUrl = atob(suffix); } catch { continue; }
     } else {
-      // everyone else: base64_base + suffix
       embedUrl = baseUrl + suffix;
     }
-
     if (embedUrl.startsWith("//")) embedUrl = `https:${embedUrl}`;
     if (!embedUrl.startsWith("http")) continue;
     embedUrls.push({ url: embedUrl, name });
   }
 
-  // Fallback: old-style full base64 in data-player (in case site changes back)
-  if (embedUrls.length === 0) {
-    for (const m of html.matchAll(/<a[^>]+data-player="([A-Za-z0-9+/=]{20,})"[^>]*>([\s\S]*?)<\/a>/gi)) {
-      const b64  = m[1];
-      const name = m[2].replace(/<[^>]+>/g, "").trim() || "Player";
-      if (seen.has(b64)) continue;
-      seen.add(b64);
-      let embedUrl = "";
-      try { embedUrl = atob(b64); } catch { continue; }
-      if (embedUrl.startsWith("//")) embedUrl = `https:${embedUrl}`;
-      if (!embedUrl.startsWith("http")) continue;
-      embedUrls.push({ url: embedUrl, name });
-    }
-  }
-
-  // Scrape download mirror links directly from episode page
   const mirrors: { mediafire?: string; savefiles?: string; pixeldrain?: string; mega?: string; gofile?: string } = {};
   for (const m of html.matchAll(/href=["']([^"']+)["']/gi)) {
     const href = m[1].trim();
     if (href.includes("mediafire.com") && href.includes("/file/") && !mirrors.mediafire) mirrors.mediafire = href;
     else if (href.includes("savefiles.com") && !href.includes("/d/") && !mirrors.savefiles) mirrors.savefiles = href;
     else if (href.includes("pixeldrain.com") && !mirrors.pixeldrain) mirrors.pixeldrain = href;
-    else if (href.includes("mega.nz") && !mirrors.mega) mirrors.mega = href;
+    else if (href.includes("mega.nz") && !mirrors.mega) mirrors.mega = href.replace("/file/", "/embed/");
     else if (href.includes("gofile.io") && !mirrors.gofile) mirrors.gofile = href;
   }
 
-  if (embedUrls.length === 0 && Object.keys(mirrors).length === 0) return { streams: [] };
-
   const bridgeUrl = (env.BRIDGE_URL || "").trim();
+  const bridgeToken = env.BRIDGE_TOKEN || "";
   const mfpBase = (env.MFP_URL || "").trim().replace(/\/$/, "");
   const mfpPass = (env.MFP_PASSWORD || "latanime").trim();
   const workerBase = new URL(request.url).origin;
 
   function hlsProxyUrl(m3u8Url: string, referer: string) {
-    // Use MFP if explicitly configured, otherwise use our own worker proxy
     if (mfpBase) {
-      const params = new URLSearchParams({
-        d: m3u8Url,
-        h_Referer: referer,
-        h_Origin: new URL(referer).origin,
-        api_password: mfpPass,
-      });
+      const params = new URLSearchParams({ d: m3u8Url, h_Referer: referer, h_Origin: new URL(referer).origin, api_password: mfpPass });
       return `${mfpBase}/proxy/hls/manifest.m3u8?${params}`;
     }
     return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(m3u8Url)}&ref=${encodeURIComponent(referer)}`;
@@ -474,39 +432,38 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   const streams: any[] = [];
   const extractedNames = new Set<string>();
 
-  // Build task list — embeds + savefiles mirror (all run in parallel)
-  const mirrorTasks: Promise<{ url: string; name: string; isHls: boolean } | null>[] = [];
-
-  // Priority 1: MediaFire — direct MP4, seekable, no expiry, ~185MB/ep
-  if (mirrors.mediafire) {
-    mirrorTasks.push((async () => {
-      const cdnUrl = await resolveMediafire(mirrors.mediafire!);
-      if (!cdnUrl) return null;
-      return { url: cdnUrl, name: "🔥 MediaFire MP4", isHls: false };
-    })());
+  interface StreamTaskResult {
+    url: string;
+    name: string;
+    isHls: boolean;
+    priority?: boolean;
   }
 
-  if (mirrors.savefiles) {
-    const sfCode = mirrors.savefiles.split("savefiles.com/").pop()?.split(/[/?]/)[0]?.trim();
-    if (sfCode && sfCode.length > 3) {
-      mirrorTasks.push((async () => {
-        const m3u8 = await extractSavefiles(`https://savefiles.com/${sfCode}`);
-        if (!m3u8) return null;
-        return { url: m3u8, name: "savefiles 1080p", isHls: true };
-      })());
-    }
+  const mirrorTasks: Promise<StreamTaskResult | null>[] = [];
+
+  if (mirrors.mediafire) {
+    mirrorTasks.push((async (): Promise<StreamTaskResult | null> => {
+      const cdnUrl = await resolveMediafire(mirrors.mediafire!);
+      return cdnUrl ? { url: cdnUrl, name: "🔥 MediaFire MP4", isHls: false, priority: true } : null;
+    })());
+  }
+  if (mirrors.mega) {
+    mirrorTasks.push(Promise.resolve({ url: mirrors.mega, name: "💎 Mega.nz", isHls: false, priority: true }));
+  }
+  if (mirrors.gofile) {
+    mirrorTasks.push((async (): Promise<StreamTaskResult | null> => {
+      const direct = await extractGofile(mirrors.gofile!);
+      return direct ? { url: direct, name: "🚀 Gofile", isHls: false, priority: true } : null;
+    })());
   }
 
   const results = await Promise.allSettled([
     ...mirrorTasks,
-    ...embedUrls.map(async (embed) => {
-      // Pixeldrain — direct stream, Stremio fetches from user's residential IP
+    ...embedUrls.map(async (embed): Promise<StreamTaskResult | null> => {
       if (embed.url.includes("pixeldrain.com")) {
         const idM = embed.url.match(/pixeldrain\.com\/(?:u\/|l\/)([a-zA-Z0-9]+)/);
-        if (idM) return { url: `https://pixeldrain.com/api/file/${idM[1]}`, name: embed.name, isHls: false };
-        return null;
+        return idM ? { url: `https://pixeldrain.com/api/file/${idM[1]}`, name: embed.name, isHls: false } : null;
       }
-
       if (embed.url.includes("hexload.com")) {
         const url = await extractHexload(embed.url);
         return url ? { url, name: embed.name, isHls: false } : null;
@@ -519,14 +476,9 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         const url = await extractSavefiles(embed.url);
         return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
       }
-      if (needsBrowser(embed.url)) {
-        if (!bridgeUrl) return null;
-        const url = await extractViaBridge(embed.url, bridgeUrl);
-        return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
-      }
-      if (bridgeUrl) {
-        const url = await extractViaBridge(embed.url, bridgeUrl);
-        if (url) return { url, name: embed.name, isHls: url.includes(".m3u8") };
+      if (needsBrowser(embed.url) || bridgeUrl) {
+        const url = await extractViaBridge(embed.url, bridgeUrl, bridgeToken);
+        return url ? { url, name: embed.name, isHls: !!url?.includes(".m3u8") } : null;
       }
       return null;
     })
@@ -534,50 +486,21 @@ async function getStreams(rawId: string, env: Env, request: Request) {
 
   for (const r of results) {
     if (r.status === "fulfilled" && r.value) {
-      const { url: streamUrl, name, isHls } = r.value;
-      const isSavefiles = streamUrl.includes("savefiles.com") || streamUrl.includes("s3.savefiles") || streamUrl.includes("s2.savefiles") || streamUrl.includes("streamhls.to");
-      let finalUrl: string;
-      if (isHls && isSavefiles) {
-        finalUrl = hlsProxyUrl(streamUrl, "https://streamhls.to/");
-      } else if (isHls) {
-        finalUrl = hlsProxyUrl(streamUrl, "https://latanime.org/");
-      } else {
-        finalUrl = streamUrl;
-      }
+      const { url: streamUrl, name, isHls, priority } = r.value as StreamTaskResult;
+      const isSavefiles = streamUrl.includes("savefiles.com") || streamUrl.includes("streamhls.to");
+      const finalUrl = isHls ? hlsProxyUrl(streamUrl, isSavefiles ? "https://streamhls.to/" : "https://latanime.org/") : streamUrl;
+
       if (!streams.some(s => s.url === finalUrl)) {
-        const isMediafire = name.includes("MediaFire");
         const entry = { url: finalUrl, title: `▶ ${name} — Latino`, behaviorHints: { notWebReady: isHls } };
-        if (isMediafire) streams.unshift(entry); else streams.push(entry);
+        if (priority) streams.unshift(entry); else streams.push(entry);
       }
       extractedNames.add(name);
-      // 480p variant for savefiles streams
-      if (isHls && isSavefiles) {
-        const m3u8_480 = streamUrl.replace(",_n,", ",_l,").replace("_n,", "_l,");
-        if (m3u8_480 !== streamUrl) {
-          const url480 = hlsProxyUrl(m3u8_480, "https://streamhls.to/");
-          if (!streams.some(s => s.url === url480)) {
-            streams.push({ url: url480, title: `▶ ${name} 480p — Latino`, behaviorHints: { notWebReady: true } });
-          }
-        }
-      }
     }
   }
 
   for (const embed of embedUrls) {
     if (!extractedNames.has(embed.name)) {
       streams.push({ url: embed.url, title: `🌐 ${embed.name} — Latino`, behaviorHints: { notWebReady: true } });
-    }
-  }
-
-  // Resolve download mirrors in parallel with embed extraction (already done above)
-  // Pixeldrain — instant, no async needed
-  if (mirrors.pixeldrain) {
-    const idM = mirrors.pixeldrain.match(/pixeldrain\.com\/u\/([a-zA-Z0-9]+)/);
-    if (idM) {
-      const pdUrl = `https://pixeldrain.com/api/file/${idM[1]}`;
-      if (!streams.some(s => s.url === pdUrl)) {
-        streams.unshift({ url: pdUrl, title: "▶ Pixeldrain — Latino", behaviorHints: { notWebReady: true } });
-      }
     }
   }
 
@@ -594,62 +517,39 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     if (path === "/" || path === "/manifest.json") return json(MANIFEST);
 
-    if (path === "/debug") {
-      return json({ tmdbKey: tmdbKey ? "set" : "not set", bridgeUrl: bridgeUrl || "not set", kvBinding: env.STREAM_CACHE ? "set" : "not set" });
-    }
-
-    if (path === "/debug-browser") {
-      const testUrl = url.searchParams.get("url");
-      if (!testUrl) return json({ error: "Missing ?url=" });
-      if (!bridgeUrl) return json({ error: "BRIDGE_URL not set" });
-      const t0 = Date.now();
-      const result = await extractViaBridge(testUrl, bridgeUrl);
-      return json({ streamUrl: result, ms: Date.now() - t0 });
-    }
-
-    if (path === "/debug-host") {
-      const embedUrl = url.searchParams.get("url");
-      if (!embedUrl) return new Response("Missing url", { status: 400 });
-      const hdrs = { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", "Referer": "https://latanime.org/", "Origin": "https://latanime.org", "Accept": "text/html,application/xhtml+xml,*/*;q=0.8", "Accept-Language": "es-ES,es;q=0.9" };
+    if (path === "/proxy/m3u8") {
+      const m3u8Url = url.searchParams.get("url");
+      const referer = url.searchParams.get("ref") || "https://latanime.org/";
+      if (!m3u8Url) return new Response("Missing url", { status: 400 });
       try {
-        const r = await fetch(embedUrl, { headers: hdrs });
-        const html = await r.text();
-        const urls = [...html.matchAll(/["'`](https?:\/\/[^"'`\s]{15,}\.(?:mp4|mkv|m3u8|ts)[^"'`\s]*)/gi)].map((m) => m[1]);
-        return Response.json({ status: r.status, contentType: r.headers.get("content-type"), htmlLen: html.length, foundUrls: urls, htmlSnippet: html.slice(0, 5000) }, { headers: CORS });
-      } catch (e) { return Response.json({ error: String(e) }, { headers: CORS }); }
+        const decoded = decodeURIComponent(m3u8Url);
+        const base = decoded.substring(0, decoded.lastIndexOf("/") + 1);
+        const workerBase = new URL(request.url).origin;
+        const r = await fetch(decoded, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": CHROME_UA } });
+        if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
+        const m3u8Text = await r.text();
+        const isMaster = m3u8Text.includes("#EXT-X-STREAM-INF");
+        const rewritten = m3u8Text.split("\n").map((line) => {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("#") || trimmed === "") return line;
+          const absUrl = trimmed.startsWith("http") ? trimmed : base + trimmed;
+          if (isMaster || absUrl.includes(".m3u8")) return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
+          return `${workerBase}/proxy/seg?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
+        }).join("\n");
+        return new Response(rewritten, { headers: { "Content-Type": "application/vnd.apple.mpegurl", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache" } });
+      } catch (e) { return new Response(String(e), { status: 500 }); }
     }
 
-    if (path === "/debug-savefiles") {
-      const code = url.searchParams.get("code") || "hxhufbkiftyf";
-      const t0 = Date.now();
-      const streamUrl = await extractSavefiles(`https://savefiles.com/${code}`);
-      const workerBase = new URL(request.url).origin;
-      const proxyUrl = streamUrl ? `${workerBase}/proxy/m3u8?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://streamhls.to/")}` : null;
-      return json({ code, streamUrl, proxyUrl, ms: Date.now() - t0 });
-    }
-
-    if (path === "/debug-bridge") {
-      const testUrl = url.searchParams.get("url") || "https://luluvid.com/e/t66o00zj95a9";
-      if (!bridgeUrl) return json({ error: "BRIDGE_URL not set" });
-      const t0 = Date.now();
+    if (path === "/proxy/seg") {
+      const segUrl = url.searchParams.get("url");
+      const referer = url.searchParams.get("ref") || "https://latanime.org/";
+      if (!segUrl) return new Response("Missing url", { status: 400 });
       try {
-        const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(testUrl)}`, { signal: AbortSignal.timeout(50000) });
-        const body = await r.text();
-        return json({ status: r.status, body, testUrl, bridgeUrl, ms: Date.now() - t0 });
-      } catch (e) { return json({ error: String(e), testUrl, bridgeUrl, ms: Date.now() - t0 }); }
-    }
-
-    if (path === "/cache-clear") {
-      const key = url.searchParams.get("key");
-      if (key && env.STREAM_CACHE) {
-        await env.STREAM_CACHE.delete(`br:${key}`);
-        return json({ cleared: key });
-      }
-      return json({ error: "Missing ?key= or no KV binding" });
-    }
-
-    if (path === "/_health") {
-      return json({ status: "alive", version: MANIFEST.version, kv: env.STREAM_CACHE ? "bound" : "missing" });
+        const decoded = decodeURIComponent(segUrl);
+        const r = await fetch(decoded, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": CHROME_UA } });
+        if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
+        return new Response(r.body, { headers: { "Content-Type": r.headers.get("Content-Type") || "video/MP2T", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600" } });
+      } catch (e) { return new Response(String(e), { status: 500 }); }
     }
 
     const catM = path.match(/^\/catalog\/([^/]+)\/([^/]+?)(?:\/([^/]+))?\.json$/);
@@ -684,41 +584,6 @@ export default {
         if (result.streams.length > 0) await cacheSet(`stream:${id}`, result, TTL.stream, env.STREAM_CACHE);
         return json(result);
       } catch (e) { return json({ streams: [], error: String(e) }); }
-    }
-
-    if (path === "/proxy/m3u8") {
-      const m3u8Url = url.searchParams.get("url");
-      const referer = url.searchParams.get("ref") || "https://latanime.org/";
-      if (!m3u8Url) return new Response("Missing url", { status: 400 });
-      try {
-        const decoded = decodeURIComponent(m3u8Url);
-        const base = decoded.substring(0, decoded.lastIndexOf("/") + 1);
-        const workerBase = new URL(request.url).origin;
-        const r = await fetch(decoded, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" } });
-        if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
-        const m3u8Text = await r.text();
-        const isMaster = m3u8Text.includes("#EXT-X-STREAM-INF");
-        const rewritten = m3u8Text.split("\n").map((line) => {
-          const trimmed = line.trim();
-          if (trimmed.startsWith("#") || trimmed === "") return line;
-          const absUrl = trimmed.startsWith("http") ? trimmed : base + trimmed;
-          if (isMaster || absUrl.includes(".m3u8")) return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
-          return `${workerBase}/proxy/seg?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
-        }).join("\n");
-        return new Response(rewritten, { headers: { "Content-Type": "application/vnd.apple.mpegurl", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache" } });
-      } catch (e) { return new Response(String(e), { status: 500 }); }
-    }
-
-    if (path === "/proxy/seg") {
-      const segUrl = url.searchParams.get("url");
-      const referer = url.searchParams.get("ref") || "https://latanime.org/";
-      if (!segUrl) return new Response("Missing url", { status: 400 });
-      try {
-        const decoded = decodeURIComponent(segUrl);
-        const r = await fetch(decoded, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" } });
-        if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
-        return new Response(r.body, { headers: { "Content-Type": r.headers.get("Content-Type") || "video/MP2T", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600" } });
-      } catch (e) { return new Response(String(e), { status: 500 }); }
     }
 
     return new Response("Not found", { status: 404, headers: CORS });
