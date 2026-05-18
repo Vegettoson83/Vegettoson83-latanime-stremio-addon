@@ -122,16 +122,18 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
       return result;
     } catch { }
 
-    // Phase 2: free proxies sequentially
-    for (const [name, proxyUrl] of [
+    // Phase 2: free proxies sequentially with entropy
+    const proxies = [
       ["allorigins", `https://api.allorigins.win/raw?url=${encoded}`],
       ["codetabs",   `https://api.codetabs.com/v1/proxy?quest=${encoded}`],
       ["corsproxy",  `https://corsproxy.io/?${encoded}`],
-    ] as [string, string][]) {
+    ] as [string, string][];
+
+    for (const [name, proxyUrl] of proxies.sort(() => Math.random() - 0.5)) {
       if (controller.signal.aborted) break;
       try {
         const html = await tryFetch(name, () =>
-          fetch(proxyUrl, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(8000) })
+          fetch(proxyUrl, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(7000 + Math.random() * 5000) })
         );
         clearTimeout(globalTimer);
         return html;
@@ -498,8 +500,12 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   }
 
   const results = await Promise.allSettled([
-    ...mirrorTasks,
+    ...mirrorTasks.map(async (t) => {
+      await new Promise((r) => setTimeout(r, Math.random() * 800));
+      return t;
+    }),
     ...embedUrls.map(async (embed) => {
+      await new Promise((r) => setTimeout(r, Math.random() * 1000));
       // Pixeldrain — direct stream, Stremio fetches from user's residential IP
       if (embed.url.includes("pixeldrain.com")) {
         const idM = embed.url.match(/pixeldrain\.com\/(?:u\/|l\/)([a-zA-Z0-9]+)/);
