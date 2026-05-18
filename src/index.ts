@@ -98,12 +98,14 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
   };
 
   try {
+    const bridgeToken = env?.BRIDGE_TOKEN || "";
     const phase1: Promise<string>[] = [
       tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
     ];
     if (bridgeUrl) {
+      const auth = bridgeToken ? `&token=${bridgeToken}` : "";
       phase1.push(tryFetch("bridge", () =>
-        fetch(`${bridgeUrl}/fetch?url=${encoded}`, { signal: AbortSignal.timeout(12000) })
+        fetch(`${bridgeUrl}/fetch?url=${encoded}${auth}`, { signal: AbortSignal.timeout(12000) })
       ));
     }
     try {

@@ -40,17 +40,38 @@ async function getBrowser() {
   return browser;
 }
 
-app.get('/extract', async (req, res) => {
-  const targetUrl = req.query.url;
+const auth = (req, res, next) => {
   const token = req.query.token;
+  if (!BRIDGE_TOKEN) return res.status(500).send("BRIDGE_TOKEN missing");
+  if (token !== BRIDGE_TOKEN) return res.status(401).send("Unauthorized");
+  next();
+};
 
-  if (!BRIDGE_TOKEN) {
-    return res.status(500).send("BRIDGE_TOKEN not configured");
-  }
+app.get('/fetch', auth, async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send("Missing url");
 
-  if (token !== BRIDGE_TOKEN) {
-    return res.status(401).send("Unauthorized");
+  activePages++;
+  try {
+    const b = await getBrowser();
+    const page = await b.newPage();
+    try {
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      const html = await page.content();
+      await new Promise(r => setTimeout(r, Math.random() * 500));
+      res.send(html);
+    } finally {
+      await page.close();
+    }
+  } catch (e) {
+    res.status(500).send(String(e));
+  } finally {
+    activePages--;
   }
+});
+
+app.get('/extract', auth, async (req, res) => {
+  const targetUrl = req.query.url;
 
   if (!targetUrl) return res.status(400).send("Missing url");
 
