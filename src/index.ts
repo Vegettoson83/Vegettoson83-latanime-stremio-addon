@@ -54,7 +54,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.4.0",
+  version: "4.4.1",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/public/img/logito.png",
@@ -394,46 +394,32 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   const embedUrls: { url: string; name: string }[] = [];
   const seen = new Set<string>();
 
-  // data-key = base64 of the base URL prefix
-  // data-player = path suffix to append (yourupload is the exception: full base64)
+  // The site has used two encodings for data-player:
+  //   • full base64 of the provider URL (current as of 2026-07, all players)
+  //   • literal path suffix appended to the data-key base64 prefix
+  // Decode-first handles both: a literal suffix never base64-decodes to a URL,
+  // and concatenating the current prefix ("…/reproductor?url=") only yields
+  // latanime's JS wrapper page, whose provider host the extractors below
+  // can never see.
   const keyM = html.match(/data-key="([A-Za-z0-9+/=]+)"/);
   const baseUrl = keyM ? (() => { try { return atob(keyM[1]); } catch { return ""; } })() : "";
 
   for (const m of html.matchAll(/<a[^>]+data-player="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
-    const suffix = m[1].trim();
-    const name   = m[2].replace(/<[^>]+>/g, "").trim() || "Player";
-    if (seen.has(suffix)) continue;
-    seen.add(suffix);
+    const raw  = m[1].trim();
+    const name = m[2].replace(/<[^>]+>/g, "").trim() || "Player";
+    if (seen.has(raw)) continue;
+    seen.add(raw);
 
     let embedUrl = "";
-    const nameLower = name.toLowerCase();
-
-    if (nameLower.includes("yourupload")) {
-      // yourupload uses full base64 in data-player
-      try { embedUrl = atob(suffix); } catch { continue; }
-    } else {
-      // everyone else: base64_base + suffix
-      embedUrl = baseUrl + suffix;
-    }
+    try {
+      const decoded = atob(raw);
+      if (decoded.startsWith("http") || decoded.startsWith("//")) embedUrl = decoded;
+    } catch { }
+    if (!embedUrl && baseUrl) embedUrl = baseUrl + raw;
 
     if (embedUrl.startsWith("//")) embedUrl = `https:${embedUrl}`;
     if (!embedUrl.startsWith("http")) continue;
     embedUrls.push({ url: embedUrl, name });
-  }
-
-  // Fallback: old-style full base64 in data-player (in case site changes back)
-  if (embedUrls.length === 0) {
-    for (const m of html.matchAll(/<a[^>]+data-player="([A-Za-z0-9+/=]{20,})"[^>]*>([\s\S]*?)<\/a>/gi)) {
-      const b64  = m[1];
-      const name = m[2].replace(/<[^>]+>/g, "").trim() || "Player";
-      if (seen.has(b64)) continue;
-      seen.add(b64);
-      let embedUrl = "";
-      try { embedUrl = atob(b64); } catch { continue; }
-      if (embedUrl.startsWith("//")) embedUrl = `https:${embedUrl}`;
-      if (!embedUrl.startsWith("http")) continue;
-      embedUrls.push({ url: embedUrl, name });
-    }
   }
 
   // Scrape download mirror links directly from episode page
