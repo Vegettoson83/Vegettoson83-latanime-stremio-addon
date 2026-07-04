@@ -54,10 +54,10 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.4.2",
+  version: "4.4.3",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
-  logo: "https://latanime.org/public/img/logito.png",
+  logo: "https://latanime.org/img/logito.png",
   resources: ["catalog", "meta", "stream"],
   types: ["series"],
   catalogs: [
@@ -195,7 +195,7 @@ function parseAnimeCards(html: string) {
 }
 
 function toMetaPreview(c: { id: string; name: string; poster: string }) {
-  return { id: c.id, type: "series", name: c.name, poster: c.poster || `${BASE_URL}/public/img/anime.png`, posterShape: "poster" };
+  return { id: c.id, type: "series", name: c.name, poster: c.poster || `${BASE_URL}/img/anime.png`, posterShape: "poster" };
 }
 
 async function searchAnimes(query: string, env?: Env) {
