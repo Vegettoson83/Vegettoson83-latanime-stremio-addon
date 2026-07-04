@@ -54,10 +54,10 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.4.1",
+  version: "4.4.3",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
-  logo: "https://latanime.org/public/img/logito.png",
+  logo: "https://latanime.org/img/logito.png",
   resources: ["catalog", "meta", "stream"],
   types: ["series"],
   catalogs: [
@@ -195,7 +195,7 @@ function parseAnimeCards(html: string) {
 }
 
 function toMetaPreview(c: { id: string; name: string; poster: string }) {
-  return { id: c.id, type: "series", name: c.name, poster: c.poster || `${BASE_URL}/public/img/anime.png`, posterShape: "poster" };
+  return { id: c.id, type: "series", name: c.name, poster: c.poster || `${BASE_URL}/img/anime.png`, posterShape: "poster" };
 }
 
 async function searchAnimes(query: string, env?: Env) {
@@ -532,7 +532,20 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       }
       if (!streams.some(s => s.url === finalUrl)) {
         const isMediafire = name.includes("MediaFire");
-        const entry = { url: finalUrl, title: `▶ ${name} — Latino`, behaviorHints: { notWebReady: isHls } };
+        const label = `▶ ${name} — Latino`;
+        const entry = {
+          url: finalUrl,
+          name: `Latanime ${isHls ? "HLS" : "MP4"}`,
+          title: label,
+          description: label,
+          behaviorHints: {
+            notWebReady: isHls,
+            // filename drives format detection in Stremio's local streaming
+            // server — the proxied URLs carry no usable extension themselves
+            filename: `${slug}-e${epNum}.${isHls ? "m3u8" : "mp4"}`,
+            bingeGroup: `latanime-${name}`,
+          },
+        };
         if (isMediafire) streams.unshift(entry); else streams.push(entry);
       }
       extractedNames.add(name);
@@ -542,7 +555,14 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         if (m3u8_480 !== streamUrl) {
           const url480 = hlsProxyUrl(m3u8_480, "https://streamhls.to/");
           if (!streams.some(s => s.url === url480)) {
-            streams.push({ url: url480, title: `▶ ${name} 480p — Latino`, behaviorHints: { notWebReady: true } });
+            const label480 = `▶ ${name} 480p — Latino`;
+            streams.push({
+              url: url480,
+              name: "Latanime HLS 480p",
+              title: label480,
+              description: label480,
+              behaviorHints: { notWebReady: true, filename: `${slug}-e${epNum}-480p.m3u8`, bingeGroup: `latanime-${name}-480p` },
+            });
           }
         }
       }
@@ -551,7 +571,14 @@ async function getStreams(rawId: string, env: Env, request: Request) {
 
   for (const embed of embedUrls) {
     if (!extractedNames.has(embed.name)) {
-      streams.push({ url: embed.url, title: `🌐 ${embed.name} — Latino`, behaviorHints: { notWebReady: true } });
+      const label = `🌐 ${embed.name} — Latino`;
+      streams.push({
+        url: embed.url,
+        name: "Latanime 🌐",
+        title: label,
+        description: label,
+        behaviorHints: { notWebReady: true, bingeGroup: `latanime-${embed.name}` },
+      });
     }
   }
 
@@ -562,7 +589,13 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     if (idM) {
       const pdUrl = `https://pixeldrain.com/api/file/${idM[1]}`;
       if (!streams.some(s => s.url === pdUrl)) {
-        streams.unshift({ url: pdUrl, title: "▶ Pixeldrain — Latino", behaviorHints: { notWebReady: true } });
+        streams.unshift({
+          url: pdUrl,
+          name: "Latanime MP4",
+          title: "▶ Pixeldrain — Latino",
+          description: "▶ Pixeldrain — Latino",
+          behaviorHints: { notWebReady: true, filename: `${slug}-e${epNum}.mp4`, bingeGroup: "latanime-pixeldrain" },
+        });
       }
     }
   }
