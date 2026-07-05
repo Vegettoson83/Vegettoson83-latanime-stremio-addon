@@ -111,7 +111,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.5.0",
+  version: "4.5.1",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/img/logito.png",
@@ -447,7 +447,9 @@ async function extractMediafire(mfUrl: string): Promise<string | null> {
 
 async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
   try {
-    const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(embedUrl)}`, { signal: AbortSignal.timeout(50000) });
+    // 12s cap: a sleeping/broken bridge must not stall /stream past the
+    // Stremio client's patience — extraction runs inside the response
+    const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(embedUrl)}`, { signal: AbortSignal.timeout(12000) });
     if (!r.ok) return null;
     const data: any = await r.json();
     return data.url || null;
@@ -479,12 +481,7 @@ async function resolveMediafire(mfUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
-async function getStreams(rawId: string, env: Env, request: Request) {
-  const parts = rawId.replace("latanime:", "").split(":");
-  if (parts.length < 2) return { streams: [] };
-  const [slug, epNum] = parts;
-
-  const html = await fetchHtml(`${BASE_URL}/ver/${slug}-episodio-${epNum}`, env);
+function parseEpisodeEmbeds(html: string) {
   const embedUrls: { url: string; name: string }[] = [];
   const seen = new Set<string>();
 
@@ -526,6 +523,17 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     else if (href.includes("mega.nz") && !mirrors.mega) mirrors.mega = href;
     else if (href.includes("gofile.io") && !mirrors.gofile) mirrors.gofile = href;
   }
+
+  return { embedUrls, mirrors };
+}
+
+async function getStreams(rawId: string, env: Env, request: Request) {
+  const parts = rawId.replace("latanime:", "").split(":");
+  if (parts.length < 2) return { streams: [] };
+  const [slug, epNum] = parts;
+
+  const html = await fetchHtml(`${BASE_URL}/ver/${slug}-episodio-${epNum}`, env);
+  const { embedUrls, mirrors } = parseEpisodeEmbeds(html);
 
   if (embedUrls.length === 0 && Object.keys(mirrors).length === 0) return { streams: [] };
 
@@ -668,12 +676,14 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   for (const embed of embedUrls) {
     if (!extractedNames.has(embed.name)) {
       const label = `🌐 ${embed.name} — Latino`;
+      // Embed pages are HTML, not video — externalUrl is the spec-correct
+      // field, and unlike notWebReady url streams it stays visible on
+      // Stremio Web even when every extractor above failed.
       streams.push({
-        url: embed.url,
+        externalUrl: embed.url,
         name: "Latanime 🌐",
         title: label,
         description: label,
-        behaviorHints: { notWebReady: true, bingeGroup: `latanime-${embed.name}` },
       });
     }
   }
@@ -732,6 +742,52 @@ export default {
         const urls = [...html.matchAll(/["'`](https?:\/\/[^"'`\s]{15,}\.(?:mp4|mkv|m3u8|ts)[^"'`\s]*)/gi)].map((m) => m[1]);
         return Response.json({ status: r.status, contentType: r.headers.get("content-type"), htmlLen: html.length, foundUrls: urls, htmlSnippet: html.slice(0, 5000) }, { headers: CORS });
       } catch (e) { return Response.json({ error: String(e) }, { headers: CORS }); }
+    }
+
+    if (path === "/debug-extract") {
+      // Runs every extractor for one episode with per-provider outcome and
+      // timing, so extraction failures can be diagnosed from the deployed
+      // worker (e.g. hosts blocking Cloudflare egress, bridge outages).
+      // Usage: /debug-extract?id=black-torch-castellano:1
+      const id = url.searchParams.get("id") || "";
+      const [slug, ep] = id.split(":");
+      if (!slug || !ep) return json({ error: "Missing ?id=slug:episode" });
+      const t0 = Date.now();
+      try {
+        const html = await fetchHtml(`${BASE_URL}/ver/${slug}-episodio-${ep}`, env);
+        const { embedUrls, mirrors } = parseEpisodeEmbeds(html);
+        const tests: { name: string; ok: boolean; ms: number; result?: string; error?: string }[] = [];
+        const tryX = async (name: string, fn: () => Promise<string | null>) => {
+          const t = Date.now();
+          try {
+            const r = await fn();
+            tests.push({ name, ok: !!r, ms: Date.now() - t, result: r ? r.slice(0, 140) : undefined });
+          } catch (e) {
+            tests.push({ name, ok: false, ms: Date.now() - t, error: String(e).slice(0, 200) });
+          }
+        };
+        await Promise.all([
+          mirrors.mediafire ? tryX("mirror:mediafire", () => resolveMediafire(mirrors.mediafire!)) : Promise.resolve(),
+          mirrors.savefiles ? tryX("mirror:savefiles", () => extractSavefiles(mirrors.savefiles!)) : Promise.resolve(),
+          ...embedUrls.map((e) => {
+            if (e.url.includes("hexload.com")) return tryX(`embed:${e.name}`, () => extractHexload(e.url));
+            if (e.url.includes("mp4upload.com")) return tryX(`embed:${e.name}`, () => extractMp4upload(e.url));
+            if (e.url.includes("savefiles.com") || e.url.includes("streamhls.to")) return tryX(`embed:${e.name}`, () => extractSavefiles(e.url));
+            if (bridgeUrl) return tryX(`bridge:${e.name}`, () => extractViaBridge(e.url, bridgeUrl));
+            return Promise.resolve();
+          }),
+        ]);
+        return json({
+          id, totalMs: Date.now() - t0,
+          episodeFetch: "ok",
+          embeds: embedUrls.map((e) => `${e.name}: ${e.url}`),
+          mirrors,
+          bridge: bridgeUrl || "not set",
+          tests: tests.sort((a, b) => Number(b.ok) - Number(a.ok)),
+        });
+      } catch (e) {
+        return json({ id, totalMs: Date.now() - t0, episodeFetch: "FAILED", error: String(e).slice(0, 300) });
+      }
     }
 
     if (path === "/debug-savefiles") {
