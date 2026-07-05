@@ -111,9 +111,9 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.5.1",
+  version: "4.6.0",
   name: "Latanime",
-  description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
+  description: "Anime Latino y Castellano desde latanime.org — extracción directa sin bridge",
   logo: "https://latanime.org/img/logito.png",
   resources: ["catalog", "meta", "stream"],
   types: ["series"],
@@ -428,22 +428,75 @@ function extractPixeldrain(embedUrl: string): string | null {
   return `https://pixeldrain.com/api/file/${m[1]}/download`;
 }
 
-async function extractMediafire(mfUrl: string): Promise<string | null> {
+// ─── BRIDGE-FREE EMBED EXTRACTION ───────────────────────────────────────────
+// Most remaining hosts wrap their real media URL in Dean Edwards "p,a,c,k,e,d"
+// packed JavaScript. Reversing it in-Worker (pure string ops — the runtime
+// forbids eval) pulls the m3u8/mp4 out without a headless browser, which is why
+// the external Playwright bridge is no longer required for these providers.
+const EMBED_HEADERS = {
+  "User-Agent": CHROME_UA,
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+  "Referer": "https://latanime.org/",
+};
+const PACKED_RE = /eval\(function\(p,a,c,k,e,d\)[\s\S]*?\.split\('\|'\)[\s\S]*?\)\)/;
+
+// Reverses the p,a,c,k,e,d packer. Returns "" when the input isn't packed.
+function unpackPacked(source: string): string {
+  const start = source.indexOf("}(");
+  if (start < 0) return "";
+  const rest = source.slice(start + 2);
+  const pm = rest.match(/^'((?:\\.|[^'\\])*)'/s);
+  if (!pm) return "";
+  const nums = rest.slice(pm[0].length).match(/^\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:\\.|[^'\\])*)'\s*\.split\('\|'\)/s);
+  if (!nums) return "";
+  const base = parseInt(nums[1], 10);
+  const count = parseInt(nums[2], 10);
+  const symtab = nums[3].split("|");
+  const payload = pm[1].replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+  const enc = (n: number): string => (n < base ? "" : enc(Math.floor(n / base))) + ((n % base > 35) ? String.fromCharCode(n % base + 29) : (n % base).toString(36));
+  const dict: Record<string, string> = {};
+  for (let n = 0; n < count; n++) { const k = enc(n); dict[k] = symtab[n] || k; }
+  return payload.replace(/\b\w+\b/g, (w) => (dict[w] !== undefined ? dict[w] : w));
+}
+
+// Pull the first playable m3u8/mp4 out of arbitrary embed HTML, unpacking any
+// packed JS first. Covers the streamwish/filemoon/filelions/vidhide/dood-style
+// family whose players are otherwise near-identical. Returns null for bot-gated
+// hosts (voe DDoS-Guard, playmogo 403) whose real HTML we never receive.
+async function extractGeneric(embedUrl: string): Promise<{ url: string; isHls: boolean } | null> {
   try {
-    const res = await fetch(mfUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-        "Referer": "https://www.mediafire.com/",
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-      }
-    });
-    const html = await res.text();
-    const m = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s]+/);
-    if (m) return m[0];
-    const btn = html.match(/href="(https:\/\/download\d+\.mediafire\.com[^"]+)"/);
-    return btn ? btn[1] : null;
+    const r = await fetch(embedUrl, { headers: EMBED_HEADERS, redirect: "follow" });
+    if (!r.ok) return null;
+    const raw = await r.text();
+    const packed = raw.match(PACKED_RE);
+    const text = packed ? raw + "\n" + unpackPacked(packed[0]) : raw;
+    const m3u8 = text.match(/https?:\\?\/\\?\/[^"'\s\\]+\.m3u8[^"'\s\\]*/);
+    if (m3u8) return { url: m3u8[0].replace(/\\/g, ""), isHls: true };
+    const mp4 = text.match(/https?:\\?\/\\?\/[^"'\s\\]+\.mp4[^"'\s\\]*/);
+    if (mp4) return { url: mp4[0].replace(/\\/g, ""), isHls: false };
+    return null;
   } catch { return null; }
 }
+
+// MixDrop: packed JS exposes MDCore.wurl (protocol-relative MP4, seekable, no
+// Referer required on the CDN). Its domain rotates (mixdrop.top → miixdrop.net
+// → …) so we follow redirects rather than hardcode a host.
+async function extractMixdrop(embedUrl: string): Promise<string | null> {
+  try {
+    const r = await fetch(embedUrl, { headers: EMBED_HEADERS, redirect: "follow" });
+    if (!r.ok) return null;
+    const raw = await r.text();
+    const packed = raw.match(PACKED_RE);
+    const text = packed ? unpackPacked(packed[0]) : raw;
+    const m = text.match(/MDCore\.wurl\s*=\s*"([^"]+)"/) || text.match(/\bwurl\s*=\s*"([^"]+)"/);
+    if (!m) return null;
+    let u = m[1];
+    if (u.startsWith("//")) u = `https:${u}`;
+    return u.startsWith("http") ? u : null;
+  } catch { return null; }
+}
+
 
 async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
   try {
@@ -458,25 +511,38 @@ async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
 
 
 // ─── MEDIAFIRE RESOLVER ────────────────────────────────────────────────────
-// Verified Feb 27 2026: GET mediafire.com/file/{key}/{name}/file
-// → HTML contains CDN URL: download{n}.mediafire.com/.../{key}/{filename}
-// → 206 Partial Content, video/mp4, Accept-Ranges: bytes ✓
+// The file page (mediafire.com/file/{key}) no longer embeds the CDN URL
+// directly — as of 2026-07 it serves an interstitial whose "Download" button
+// points at a ?dkey= link, and only that second page carries the real
+// download{n}.mediafire.com/.../{key}/{filename} URL (206 Partial Content,
+// video/mp4, Accept-Ranges: bytes ✓). So: fetch, grep, and if the CDN URL is
+// absent, follow the dkey link once and grep again.
+const MEDIAFIRE_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+  "Referer": "https://www.mediafire.com/",
+  "Accept-Language": "es-MX,es;q=0.9",
+};
+const MEDIAFIRE_CDN = /https:\/\/download\d+\.mediafire\.com[^"'\s]+/;
+
 async function resolveMediafire(mfUrl: string): Promise<string | null> {
   try {
-    const r = await fetch(mfUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-        "Referer": "https://www.mediafire.com/",
-        "Accept-Language": "es-MX,es;q=0.9",
-      },
-    });
+    const r = await fetch(mfUrl, { headers: MEDIAFIRE_HEADERS });
     if (!r.ok) return null;
     const html = await r.text();
-    const match = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s]+/);
+    const match = html.match(MEDIAFIRE_CDN);
     if (match) return match[0];
-    // Fallback: download button href
-    const btnMatch = html.match(/aria-label="Download file"[^>]+href="([^"]+)"|href="([^"]+)"[^>]*id="downloadButton"|href="([^"]+)"[^>]*class="[^"]*popsok/);
-    if (btnMatch) return btnMatch[1] || btnMatch[2] || btnMatch[3];
+
+    // Follow the dkey interstitial link the "Download" button points at.
+    const dkeyMatch = html.match(/href="((?:https?:)?\/\/[^"]*\?dkey=[^"]+)"/i);
+    if (dkeyMatch) {
+      let dkeyUrl = dkeyMatch[1];
+      if (dkeyUrl.startsWith("//")) dkeyUrl = `https:${dkeyUrl}`;
+      const r2 = await fetch(dkeyUrl, { headers: MEDIAFIRE_HEADERS });
+      if (r2.ok) {
+        const cdn = (await r2.text()).match(MEDIAFIRE_CDN);
+        if (cdn) return cdn[0];
+      }
+    }
     return null;
   } catch { return null; }
 }
@@ -556,9 +622,6 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(m3u8Url)}&ref=${encodeURIComponent(referer)}`;
   }
 
-  const BROWSER_PLAYERS = ["filemoon", "voe.sx", "lancewhosedifficult", "voeunblocked", "mxdrop", "dsvplay", "doodstream"];
-  const needsBrowser = (url: string) => BROWSER_PLAYERS.some((p) => url.includes(p));
-
   const streams: any[] = [];
   const extractedNames = new Set<string>();
 
@@ -607,11 +670,19 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         const url = await extractSavefiles(embed.url);
         return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
       }
-      if (needsBrowser(embed.url)) {
-        if (!bridgeUrl) return null;
-        const url = await extractViaBridge(embed.url, bridgeUrl);
-        return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
+      // MixDrop — protocol-relative MP4 from packed JS (handled specially
+      // because extractGeneric only matches scheme-qualified URLs)
+      if (embed.url.includes("mixdrop") || embed.url.includes("mxdrop") || embed.url.includes("miixdrop")) {
+        const url = await extractMixdrop(embed.url);
+        return url ? { url, name: embed.name, isHls: false } : null;
       }
+      // Everything else: manual, bridge-free extraction first (unpacks packed
+      // JS players like streamwish/filemoon/filelions/vidhide/dood). Only if
+      // that yields nothing — e.g. a bot-gated host — fall back to the bridge,
+      // and only when one is configured. The addon no longer depends on it.
+      const host = (() => { try { return `${new URL(embed.url).origin}/`; } catch { return "https://latanime.org/"; } })();
+      const g = await extractGeneric(embed.url);
+      if (g) return { url: g.url, name: embed.name, isHls: g.isHls, referer: host };
       if (bridgeUrl) {
         const url = await extractViaBridge(embed.url, bridgeUrl);
         if (url) return { url, name: embed.name, isHls: url.includes(".m3u8") };
@@ -623,12 +694,13 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   for (const r of results) {
     if (r.status === "fulfilled" && r.value) {
       const { url: streamUrl, name, isHls } = r.value;
+      const referer = (r.value as { referer?: string }).referer;
       const isSavefiles = streamUrl.includes("savefiles.com") || streamUrl.includes("s3.savefiles") || streamUrl.includes("s2.savefiles") || streamUrl.includes("streamhls.to");
       let finalUrl: string;
       if (isHls && isSavefiles) {
         finalUrl = hlsProxyUrl(streamUrl, "https://streamhls.to/");
       } else if (isHls) {
-        finalUrl = hlsProxyUrl(streamUrl, "https://latanime.org/");
+        finalUrl = hlsProxyUrl(streamUrl, referer || "https://latanime.org/");
       } else {
         finalUrl = streamUrl;
       }
@@ -773,8 +845,12 @@ export default {
             if (e.url.includes("hexload.com")) return tryX(`embed:${e.name}`, () => extractHexload(e.url));
             if (e.url.includes("mp4upload.com")) return tryX(`embed:${e.name}`, () => extractMp4upload(e.url));
             if (e.url.includes("savefiles.com") || e.url.includes("streamhls.to")) return tryX(`embed:${e.name}`, () => extractSavefiles(e.url));
-            if (bridgeUrl) return tryX(`bridge:${e.name}`, () => extractViaBridge(e.url, bridgeUrl));
-            return Promise.resolve();
+            if (e.url.includes("mixdrop") || e.url.includes("mxdrop") || e.url.includes("miixdrop")) return tryX(`mixdrop:${e.name}`, () => extractMixdrop(e.url));
+            return tryX(`manual:${e.name}`, async () => {
+              const g = await extractGeneric(e.url);
+              if (g) return g.url;
+              return bridgeUrl ? extractViaBridge(e.url, bridgeUrl) : null;
+            });
           }),
         ]);
         return json({
