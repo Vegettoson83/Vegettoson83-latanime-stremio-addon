@@ -111,7 +111,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.5.1",
+  version: "4.5.2",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/img/logito.png",
@@ -428,22 +428,6 @@ function extractPixeldrain(embedUrl: string): string | null {
   return `https://pixeldrain.com/api/file/${m[1]}/download`;
 }
 
-async function extractMediafire(mfUrl: string): Promise<string | null> {
-  try {
-    const res = await fetch(mfUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-        "Referer": "https://www.mediafire.com/",
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-      }
-    });
-    const html = await res.text();
-    const m = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s]+/);
-    if (m) return m[0];
-    const btn = html.match(/href="(https:\/\/download\d+\.mediafire\.com[^"]+)"/);
-    return btn ? btn[1] : null;
-  } catch { return null; }
-}
 
 async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
   try {
@@ -458,25 +442,38 @@ async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
 
 
 // ─── MEDIAFIRE RESOLVER ────────────────────────────────────────────────────
-// Verified Feb 27 2026: GET mediafire.com/file/{key}/{name}/file
-// → HTML contains CDN URL: download{n}.mediafire.com/.../{key}/{filename}
-// → 206 Partial Content, video/mp4, Accept-Ranges: bytes ✓
+// The file page (mediafire.com/file/{key}) no longer embeds the CDN URL
+// directly — as of 2026-07 it serves an interstitial whose "Download" button
+// points at a ?dkey= link, and only that second page carries the real
+// download{n}.mediafire.com/.../{key}/{filename} URL (206 Partial Content,
+// video/mp4, Accept-Ranges: bytes ✓). So: fetch, grep, and if the CDN URL is
+// absent, follow the dkey link once and grep again.
+const MEDIAFIRE_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+  "Referer": "https://www.mediafire.com/",
+  "Accept-Language": "es-MX,es;q=0.9",
+};
+const MEDIAFIRE_CDN = /https:\/\/download\d+\.mediafire\.com[^"'\s]+/;
+
 async function resolveMediafire(mfUrl: string): Promise<string | null> {
   try {
-    const r = await fetch(mfUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-        "Referer": "https://www.mediafire.com/",
-        "Accept-Language": "es-MX,es;q=0.9",
-      },
-    });
+    const r = await fetch(mfUrl, { headers: MEDIAFIRE_HEADERS });
     if (!r.ok) return null;
     const html = await r.text();
-    const match = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s]+/);
+    const match = html.match(MEDIAFIRE_CDN);
     if (match) return match[0];
-    // Fallback: download button href
-    const btnMatch = html.match(/aria-label="Download file"[^>]+href="([^"]+)"|href="([^"]+)"[^>]*id="downloadButton"|href="([^"]+)"[^>]*class="[^"]*popsok/);
-    if (btnMatch) return btnMatch[1] || btnMatch[2] || btnMatch[3];
+
+    // Follow the dkey interstitial link the "Download" button points at.
+    const dkeyMatch = html.match(/href="((?:https?:)?\/\/[^"]*\?dkey=[^"]+)"/i);
+    if (dkeyMatch) {
+      let dkeyUrl = dkeyMatch[1];
+      if (dkeyUrl.startsWith("//")) dkeyUrl = `https:${dkeyUrl}`;
+      const r2 = await fetch(dkeyUrl, { headers: MEDIAFIRE_HEADERS });
+      if (r2.ok) {
+        const cdn = (await r2.text()).match(MEDIAFIRE_CDN);
+        if (cdn) return cdn[0];
+      }
+    }
     return null;
   } catch { return null; }
 }

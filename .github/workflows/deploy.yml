@@ -18,3 +18,7 @@ jobs:
         run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Required for non-interactive deploys: a token scoped to more than
+          # one account cannot pick one on its own and wrangler aborts. Set the
+          # CLOUDFLARE_ACCOUNT_ID repo secret (see README) to resolve it.
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
