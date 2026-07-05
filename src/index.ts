@@ -1,6 +1,63 @@
 
 const ADDON_ID = "com.latanime.stremio";
 const BASE_URL = "https://latanime.org";
+
+// /animes filter values scraped from the site's filter form. Keys are the
+// display names Stremio sends back via the "genre" extra; values are the
+// query fragment for /animes. categoria=Película must keep the accent —
+// the site ignores the unaccented slug.
+const DIR_FILTERS: Record<string, string> = {
+  "Latino": "categoria=latino",
+  "Castellano": "categoria=castellano",
+  "Película": "categoria=Pel%C3%ADcula",
+  "OVA": "categoria=ova",
+  "ONA": "categoria=ona",
+  "Especial": "categoria=especial",
+  "Donghua": "categoria=donghua",
+  "Live Action": "categoria=live-action",
+  "Acción": "genero=accion",
+  "Aventura": "genero=aventura",
+  "Artes Marciales": "genero=artes-marciales",
+  "Carreras": "genero=carreras",
+  "Ciencia Ficción": "genero=ciencia-ficcion",
+  "Comedia": "genero=comedia",
+  "Cyberpunk": "genero=cyberpunk",
+  "Demonios": "genero=demonios",
+  "Deportes": "genero=deportes",
+  "Drama": "genero=drama",
+  "Ecchi": "genero=ecchi",
+  "Escolares": "genero=escolares",
+  "Espacial": "genero=espacial",
+  "Fantasía": "genero=fantasia",
+  "Gore": "genero=gore",
+  "Harem": "genero=harem",
+  "Histórico": "genero=historico",
+  "Horror": "genero=horror",
+  "Isekai": "genero=isekai",
+  "Josei": "genero=josei",
+  "Lucha": "genero=lucha",
+  "Magia": "genero=magia",
+  "Mecha": "genero=mecha",
+  "Militar": "genero=militar",
+  "Misterio": "genero=misterio",
+  "Monogatari": "genero=monogatari",
+  "Música": "genero=musica",
+  "Parodias": "genero=parodias",
+  "Policía": "genero=policia",
+  "Psicológico": "genero=psicologico",
+  "Recuerdos de la vida": "genero=recuerdos-de-la-vida",
+  "Romance": "genero=romance",
+  "Samurai": "genero=samurai",
+  "Seinen": "genero=seinen",
+  "Shojo": "genero=shojo",
+  "Shonen": "genero=shonen",
+  "Sobrenatural": "genero=sobrenatural",
+  "Suspenso": "genero=suspenso",
+  "Vampiros": "genero=vampiros",
+  "Yaoi": "genero=yaoi",
+  "Yuri": "genero=yuri",
+};
+for (let y = new Date().getFullYear(); y >= 2000; y--) DIR_FILTERS[String(y)] = `fecha=${y}`;
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
 
@@ -54,7 +111,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.4.3",
+  version: "4.5.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/img/logito.png",
@@ -63,7 +120,8 @@ const MANIFEST = {
   catalogs: [
     { type: "series", id: "latanime-latest", name: "Latanime — Recientes", extra: [{ name: "search", isRequired: false }] },
     { type: "series", id: "latanime-airing", name: "Latanime — En Emisión", extra: [] },
-    { type: "series", id: "latanime-directory", name: "Latanime — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
+    { type: "series", id: "latanime-directory", name: "Latanime — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }, { name: "genre", isRequired: false, options: Object.keys(DIR_FILTERS) }] },
+    { type: "series", id: "latanime-peliculas", name: "Latanime — Películas", extra: [{ name: "skip", isRequired: false }] },
   ],
   idPrefixes: ["latanime:"],
 };
@@ -194,6 +252,32 @@ function parseAnimeCards(html: string) {
   return results.slice(0, 100);
 }
 
+// The home page's "Recientes" section links to /ver/{slug}-episodio-N episode
+// pages, not /anime/{slug} — so recent shows never surface via parseAnimeCards.
+// Derive the anime slug from the episode URL and the title from the card's alt
+// text ("TITLE capitulo N").
+function parseEpisodeCards(html: string) {
+  const results: { id: string; name: string; poster: string }[] = [];
+  const seen = new Set<string>();
+  for (const m of html.matchAll(/href=["'](?:https?:\/\/latanime\.org)?\/ver\/([a-z0-9-]+)-episodio-[\d.]+["']/gi)) {
+    const slug = m[1];
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    const pos = m.index! + m[0].length;
+    const block = html.slice(pos, pos + 600);
+    const altM = block.match(/alt="([^"]{3,})"/);
+    const name = altM ? altM[1].replace(/\s+cap[ií]tulo\s+[\d.]+\s*$/i, "").trim() : slug;
+    const posterM =
+      block.match(/data-src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/) ||
+      block.match(/src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/);
+    let poster = posterM ? posterM[1] : "";
+    if (poster && !poster.startsWith("http")) poster = `${BASE_URL}${poster}`;
+    if (poster.includes("capblank")) poster = ""; // lazyload placeholder
+    results.push({ id: `latanime:${slug}`, name, poster });
+  }
+  return results;
+}
+
 function toMetaPreview(c: { id: string; name: string; poster: string }) {
   return { id: c.id, type: "series", name: c.name, poster: c.poster || `${BASE_URL}/img/anime.png`, posterShape: "poster" };
 }
@@ -220,11 +304,21 @@ async function searchAnimes(query: string, env?: Env) {
 async function getCatalog(catalogId: string, extra: Record<string, string>, env?: Env) {
   if (extra.search?.trim()) return { metas: (await searchAnimes(extra.search.trim(), env)).map(toMetaPreview) };
   if (catalogId === "latanime-airing") return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`, env)).map(toMetaPreview) };
-  if (catalogId === "latanime-directory") {
-    const page = Math.floor(parseInt(extra.skip || "0", 10) / 30) + 1;
-    return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/animes?page=${page}`, env)).map(toMetaPreview) };
+  const page = Math.floor(parseInt(extra.skip || "0", 10) / 30) + 1;
+  if (catalogId === "latanime-peliculas") {
+    return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/animes?${DIR_FILTERS["Película"]}&page=${page}`, env)).map(toMetaPreview) };
   }
-  return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/`, env)).map(toMetaPreview) };
+  if (catalogId === "latanime-directory") {
+    const filter = extra.genre && DIR_FILTERS[extra.genre] ? `${DIR_FILTERS[extra.genre]}&` : "";
+    return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/animes?${filter}page=${page}`, env)).map(toMetaPreview) };
+  }
+  // latanime-latest: true recents come from the episode cards; append the
+  // rest of the home page's anime cards (popular/seasonal sections) after
+  const home = await fetchHtml(`${BASE_URL}/`, env);
+  const recent = parseEpisodeCards(home);
+  const seenIds = new Set(recent.map((c) => c.id));
+  const rest = parseAnimeCards(home).filter((c) => !seenIds.has(c.id));
+  return { metas: [...recent, ...rest].slice(0, 100).map(toMetaPreview) };
 }
 
 async function getMeta(id: string, tmdbKey: string, env?: Env) {
@@ -539,7 +633,9 @@ async function getStreams(rawId: string, env: Env, request: Request) {
           title: label,
           description: label,
           behaviorHints: {
-            notWebReady: isHls,
+            // worker-proxied HLS is served with CORS over https, so the web
+            // player can use it; only externally proxied HLS (MFP) is opaque
+            notWebReady: isHls && !finalUrl.startsWith(workerBase),
             // filename drives format detection in Stremio's local streaming
             // server — the proxied URLs carry no usable extension themselves
             filename: `${slug}-e${epNum}.${isHls ? "m3u8" : "mp4"}`,
@@ -561,7 +657,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
               name: "Latanime HLS 480p",
               title: label480,
               description: label480,
-              behaviorHints: { notWebReady: true, filename: `${slug}-e${epNum}-480p.m3u8`, bingeGroup: `latanime-${name}-480p` },
+              behaviorHints: { notWebReady: !url480.startsWith(workerBase), filename: `${slug}-e${epNum}-480p.m3u8`, bingeGroup: `latanime-${name}-480p` },
             });
           }
         }
@@ -594,7 +690,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
           name: "Latanime MP4",
           title: "▶ Pixeldrain — Latino",
           description: "▶ Pixeldrain — Latino",
-          behaviorHints: { notWebReady: true, filename: `${slug}-e${epNum}.mp4`, bingeGroup: "latanime-pixeldrain" },
+          behaviorHints: { notWebReady: false, filename: `${slug}-e${epNum}.mp4`, bingeGroup: "latanime-pixeldrain" },
         });
       }
     }
@@ -677,7 +773,8 @@ export default {
       const extra: Record<string, string> = {};
       if (extraStr) extraStr.split("&").forEach((p) => { const [k, v] = p.split("="); if (k && v) extra[k] = decodeURIComponent(v); });
       if (url.searchParams.get("search")) extra.search = url.searchParams.get("search")!;
-      const cacheKey = `catalog:${catalogId}:${extra.search || extra.skip || ""}`;
+      if (url.searchParams.get("genre")) extra.genre = url.searchParams.get("genre")!;
+      const cacheKey = `catalog:${catalogId}:${extra.search || ""}:${extra.genre || ""}:${extra.skip || ""}`;
       const cached = await cacheGet(cacheKey, env.STREAM_CACHE);
       if (cached) return json(cached);
       try { const result = await getCatalog(catalogId, extra, env); await cacheSet(cacheKey, result, TTL.catalog, env.STREAM_CACHE); return json(result); }
