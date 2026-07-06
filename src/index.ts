@@ -114,7 +114,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.6.1",
+  version: "4.6.2",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -149,7 +149,7 @@ const CHROME_HEADERS = {
   "Upgrade-Insecure-Requests": "1",
 };
 
-async function fetchHtml(url: string, _env?: Env): Promise<string> {
+async function fetchHtml(url: string, env?: Env): Promise<string> {
   const encoded = encodeURIComponent(url);
 
   // Hard 25s budget — Worker wall time limit is 30s
@@ -167,14 +167,31 @@ async function fetchHtml(url: string, _env?: Env): Promise<string> {
   };
 
   try {
-    // Phase 1: direct fetch
-    try {
-      const result = await tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) }));
-      clearTimeout(globalTimer);
-      return result;
-    } catch { }
+    // Phase 1: direct fetch, two attempts. latanime.org sits behind Cloudflare
+    // and intermittently challenges Worker egress; the challenge returns fast,
+    // so a quick retry clears most transient failures for free.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (controller.signal.aborted) break;
+      try {
+        const result = await tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) }));
+        clearTimeout(globalTimer);
+        return result;
+      } catch { }
+    }
 
-    // Phase 2: free proxies sequentially
+    // Phase 2: Cloudflare Browser Rendering — a real edge browser that clears
+    // the Cloudflare challenge reliably. Only fires when configured; latanime
+    // pages are server-rendered so "load" is enough (no JS wait needed).
+    if (env && browserRenderingReady(env) && !controller.signal.aborted) {
+      const html = await renderPage(url, env, { wait: "load", timeoutMs: 16000 });
+      if (html && html.length >= 500) {
+        clearTimeout(globalTimer);
+        console.log(`[fetchHtml] render for ${url}`);
+        return html;
+      }
+    }
+
+    // Phase 3: free CORS proxies (last resort; frequently down)
     for (const [name, proxyUrl] of [
       ["allorigins", `https://api.allorigins.win/raw?url=${encoded}`],
       ["codetabs",   `https://api.codetabs.com/v1/proxy?quest=${encoded}`],
@@ -192,7 +209,7 @@ async function fetchHtml(url: string, _env?: Env): Promise<string> {
       }
     }
 
-    throw new Error(`All proxies failed for ${url}`);
+    throw new Error(`All fetch strategies failed for ${url}`);
   } finally {
     clearTimeout(globalTimer);
   }
@@ -465,20 +482,27 @@ async function extractMixdrop(embedUrl: string): Promise<string | null> {
 // old 1101 crashes). Passes JS challenges (DDoS-Guard), SPA hydration and
 // JS-built links that plain fetch can't, and runs from Cloudflare's browser
 // pool rather than blocked Worker egress. No-ops unless both env vars are set.
-async function renderPage(url: string, env: Env, referer = "https://latanime.org/"): Promise<string | null> {
+// `wait` is "load" for server-rendered pages (fast) and "networkidle0" for
+// player embeds whose media URL only exists after JS runs.
+function browserRenderingReady(env: Env): boolean {
+  return !!(env.CF_ACCOUNT_ID || "").trim() && !!(env.CF_API_TOKEN || "").trim();
+}
+
+async function renderPage(url: string, env: Env, opts: { referer?: string; wait?: "load" | "domcontentloaded" | "networkidle0"; timeoutMs?: number } = {}): Promise<string | null> {
   const acct = (env.CF_ACCOUNT_ID || "").trim();
   const token = (env.CF_API_TOKEN || "").trim();
   if (!acct || !token) return null;
+  const timeoutMs = opts.timeoutMs ?? 20000;
   try {
     const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acct}/browser-rendering/content`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
       body: JSON.stringify({
         url,
-        setExtraHTTPHeaders: { Referer: referer },
-        gotoOptions: { waitUntil: "networkidle0", timeout: 18000 },
+        setExtraHTTPHeaders: { Referer: opts.referer ?? "https://latanime.org/" },
+        gotoOptions: { waitUntil: opts.wait ?? "networkidle0", timeout: Math.max(6000, timeoutMs - 3000) },
       }),
-      signal: AbortSignal.timeout(25000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!r.ok) return null;
     const data: any = await r.json();
@@ -612,7 +636,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     tasks.push((async () => {
       let cdnUrl = await resolveMediafire(mirrors.mediafire!);
       if (!cdnUrl) {
-        const html = await renderPage(mirrors.mediafire!, env, "https://www.mediafire.com/");
+        const html = await renderPage(mirrors.mediafire!, env, { referer: "https://www.mediafire.com/" });
         cdnUrl = html ? (findMediaUrl(html)?.url ?? null) : null;
       }
       if (!cdnUrl) return null;
@@ -660,7 +684,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       // No manual extractor for this host (JS-challenge/SPA players like voe,
       // dsvplay, bysekoze). Render it with Browser Rendering if configured;
       // the provider CDN checks the referer of its own embed page.
-      const html = await renderPage(embed.url, env, embed.url);
+      const html = await renderPage(embed.url, env, { referer: embed.url });
       const media = html ? findMediaUrl(html) : null;
       if (media) return { url: media.url, name: embed.name, isHls: media.isHls, referer: embed.url };
       // Still nothing — falls through to an externalUrl entry below, playable
@@ -747,7 +771,7 @@ export default {
       return json({
         tmdbKey: tmdbKey ? "set" : "not set",
         kvBinding: env.STREAM_CACHE ? "set" : "not set",
-        browserRendering: (env.CF_ACCOUNT_ID || "").trim() && (env.CF_API_TOKEN || "").trim() ? "enabled" : "disabled (manual only)",
+        browserRendering: browserRenderingReady(env) ? "enabled" : "disabled (manual only)",
       });
     }
 
@@ -755,7 +779,7 @@ export default {
       const testUrl = url.searchParams.get("url");
       if (!testUrl) return json({ error: "Missing ?url=" });
       const t0 = Date.now();
-      const html = await renderPage(testUrl, env, url.searchParams.get("ref") || "https://latanime.org/");
+      const html = await renderPage(testUrl, env, { referer: url.searchParams.get("ref") || "https://latanime.org/" });
       if (html == null) return json({ error: "render returned null — CF_ACCOUNT_ID/CF_API_TOKEN unset or render failed", ms: Date.now() - t0 });
       return json({ testUrl, htmlLen: html.length, media: findMediaUrl(html), ms: Date.now() - t0 });
     }
@@ -803,7 +827,7 @@ export default {
             if (e.url.includes("savefiles.com") || e.url.includes("streamhls.to")) return tryX(`embed:${e.name}`, () => extractSavefiles(e.url));
             if (/mi+xdrop/.test(e.url)) return tryX(`embed:${e.name}`, () => extractMixdrop(e.url));
             return tryX(`render:${e.name}`, async () => {
-              const h = await renderPage(e.url, env, e.url);
+              const h = await renderPage(e.url, env, { referer: e.url });
               return h ? (findMediaUrl(h)?.url ?? null) : null;
             });
           }),
