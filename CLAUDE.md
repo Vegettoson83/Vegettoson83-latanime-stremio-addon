@@ -17,8 +17,11 @@ spec-compliant (https://github.com/Stremio/stremio-addon-sdk/tree/master/docs):
 - **Cache**: KV only (`STREAM_CACHE`), never in-memory state — a module-level
   Map previously grew unbounded and caused 1101 crashes. TTLs live in `TTL`.
 - **Time budget**: Worker wall time is 30s; `fetchHtml` holds a hard 25s
-  budget and the bridge extractor caps at 12s. New network calls need an
-  explicit `AbortSignal.timeout`.
+  budget. New network calls need an explicit `AbortSignal.timeout`.
+- **No server-side browser**: stream extraction is manual only — direct HTTP
+  fetch plus parsing/unpacking inside the Worker. There is no headless-browser
+  bridge. A host that can't be resolved manually is surfaced as an
+  `externalUrl` (opens in the user's own client), never rendered server-side.
 
 ## Volatile layer (expected churn)
 
@@ -30,9 +33,12 @@ old variant behind:
   scraping. `data-player` is base64 of the provider URL (decode-first, see
   comment in `parseEpisodeEmbeds`).
 - Per-host extractors (`extractMp4upload`, `extractHexload`,
-  `extractSavefiles`, `resolveMediafire`, `extractViaBridge`). Hosts that need
-  a real browser go through the Render bridge (`BRIDGE_URL`).
-- `/debug-extract?id=slug:episode` runs every extractor with timings — use it
+  `extractSavefiles`, `resolveMediafire`, `extractMixdrop`). Add a new host by
+  writing another manual extractor, not by reaching for a browser.
+- `unpackPacker` reverses Dean Edwards `eval(function(p,a,c,k,e,d){…})`
+  packing — reuse it for any host that ships its config that way.
+- `/debug-extract?id=slug:episode` runs every extractor with timings, and
+  `/debug-mixdrop?url=` / `/debug-host?url=` probe a single embed — use them
   to diagnose extraction failures on the deployed worker.
 
 ## Rules

@@ -70,7 +70,6 @@ const CORS = {
 interface Env {
   STREAM_CACHE: KVNamespace;
   TMDB_KEY: string;
-  BRIDGE_URL: string;
   MFP_URL: string;
   MFP_PASSWORD: string;
 }
@@ -110,9 +109,9 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.5.2",
+  version: "4.6.0",
   name: "Latanime",
-  description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
+  description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
   resources: ["catalog", "meta", "stream"],
   types: ["series"],
@@ -145,9 +144,8 @@ const CHROME_HEADERS = {
   "Upgrade-Insecure-Requests": "1",
 };
 
-async function fetchHtml(url: string, env?: Env): Promise<string> {
+async function fetchHtml(url: string, _env?: Env): Promise<string> {
   const encoded = encodeURIComponent(url);
-  const bridgeUrl = env?.BRIDGE_URL?.trim();
 
   // Hard 25s budget — Worker wall time limit is 30s
   const controller = new AbortController();
@@ -164,17 +162,9 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
   };
 
   try {
-    // Phase 1: direct + bridge race (2 subrequests max)
-    const phase1: Promise<string>[] = [
-      tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
-    ];
-    if (bridgeUrl) {
-      phase1.push(tryFetch("bridge", () =>
-        fetch(`${bridgeUrl}/fetch?url=${encoded}`, { signal: AbortSignal.timeout(12000) })
-      ));
-    }
+    // Phase 1: direct fetch
     try {
-      const result = await Promise.any(phase1);
+      const result = await tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) }));
       clearTimeout(globalTimer);
       return result;
     } catch { }
@@ -421,14 +411,45 @@ async function extractSavefiles(embedUrl: string) {
 }
 
 
-async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
+// ─── DEAN EDWARDS p.a.c.k.e.r UNPACKER ─────────────────────────────────────
+// Many embed hosts ship their player config inside an
+// `eval(function(p,a,c,k,e,d){…})` block. Reversing it here — pure string
+// work, no browser — recovers the plaintext the browser would have run,
+// which is where the real media URL lives.
+function unpackPacker(source: string): string | null {
+  const m = source.match(/}\s*\(\s*'(.*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'(.*?)'\.split\('\|'\)/s);
+  if (!m) return null;
+  const base = parseInt(m[2], 10);
+  const count = parseInt(m[3], 10);
+  const words = m[4].split("|");
+  const payload = m[1].replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+  const encode = (n: number): string =>
+    (n < base ? "" : encode(Math.floor(n / base))) +
+    ((n = n % base) > 35 ? String.fromCharCode(n + 29) : n.toString(36));
+  const dict: Record<string, string> = {};
+  for (let i = count - 1; i >= 0; i--) {
+    const k = encode(i);
+    dict[k] = words[i] || k;
+  }
+  return payload.replace(/\b\w+\b/g, (w) => dict[w] || w);
+}
+
+// MixDrop (and its rotating mirror domains — mixdrop.*, miixdrop.net) packs
+// MDCore.wurl inside a p.a.c.k.e.r block. The recovered URL is a direct,
+// seekable MP4 the Stremio client can fetch itself — no referer, no proxy.
+async function extractMixdrop(embedUrl: string): Promise<string | null> {
   try {
-    // 12s cap: a sleeping/broken bridge must not stall /stream past the
-    // Stremio client's patience — extraction runs inside the response
-    const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(embedUrl)}`, { signal: AbortSignal.timeout(12000) });
+    const r = await fetch(embedUrl, {
+      headers: { "User-Agent": CHROME_UA, "Referer": "https://latanime.org/" },
+      redirect: "follow",
+      signal: AbortSignal.timeout(10000),
+    });
     if (!r.ok) return null;
-    const data: any = await r.json();
-    return data.url || null;
+    const unpacked = unpackPacker(await r.text());
+    if (!unpacked) return null;
+    const m = unpacked.match(/MDCore\.wurl\s*=\s*"([^"]+)"/);
+    if (!m) return null;
+    return m[1].startsWith("//") ? `https:${m[1]}` : m[1];
   } catch { return null; }
 }
 
@@ -513,7 +534,6 @@ async function getStreams(rawId: string, env: Env, request: Request) {
 
   if (embedUrls.length === 0 && Object.keys(mirrors).length === 0) return { streams: [] };
 
-  const bridgeUrl = (env.BRIDGE_URL || "").trim();
   const mfpBase = (env.MFP_URL || "").trim().replace(/\/$/, "");
   const mfpPass = (env.MFP_PASSWORD || "latanime").trim();
   const workerBase = new URL(request.url).origin;
@@ -583,11 +603,14 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         const url = await extractSavefiles(embed.url);
         return url ? { url, name: embed.name, isHls: url.includes(".m3u8"), referer: "https://streamhls.to/" } : null;
       }
-      if (!bridgeUrl) return null;
-      // Bridge-extracted HLS: the provider's CDN checks the referer of its own
-      // embed page, not latanime's
-      const url = await extractViaBridge(embed.url, bridgeUrl);
-      return url ? { url, name: embed.name, isHls: url.includes(".m3u8"), referer: embed.url } : null;
+      if (/mi+xdrop/.test(embed.url)) {
+        const url = await extractMixdrop(embed.url);
+        return url ? { url, name: embed.name, isHls: false } : null;
+      }
+      // No manual extractor for this host (JS-challenge/SPA players like voe,
+      // dsvplay, bysekoze). Return null so it falls through to an externalUrl
+      // entry below — playable in the user's own client, no server-side browser.
+      return null;
     })());
   }
 
@@ -661,22 +684,12 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
     const tmdbKey = (env.TMDB_KEY || "").trim();
-    const bridgeUrl = (env.BRIDGE_URL || "").trim();
 
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     if (path === "/" || path === "/manifest.json") return json(MANIFEST);
 
     if (path === "/debug") {
-      return json({ tmdbKey: tmdbKey ? "set" : "not set", bridgeUrl: bridgeUrl || "not set", kvBinding: env.STREAM_CACHE ? "set" : "not set" });
-    }
-
-    if (path === "/debug-browser") {
-      const testUrl = url.searchParams.get("url");
-      if (!testUrl) return json({ error: "Missing ?url=" });
-      if (!bridgeUrl) return json({ error: "BRIDGE_URL not set" });
-      const t0 = Date.now();
-      const result = await extractViaBridge(testUrl, bridgeUrl);
-      return json({ streamUrl: result, ms: Date.now() - t0 });
+      return json({ tmdbKey: tmdbKey ? "set" : "not set", kvBinding: env.STREAM_CACHE ? "set" : "not set" });
     }
 
     if (path === "/debug-host") {
@@ -694,7 +707,7 @@ export default {
     if (path === "/debug-extract") {
       // Runs every extractor for one episode with per-provider outcome and
       // timing, so extraction failures can be diagnosed from the deployed
-      // worker (e.g. hosts blocking Cloudflare egress, bridge outages).
+      // worker (e.g. hosts blocking Cloudflare egress).
       // Usage: /debug-extract?id=black-torch-castellano:1
       const id = url.searchParams.get("id") || "";
       const [slug, ep] = id.split(":");
@@ -720,7 +733,7 @@ export default {
             if (e.url.includes("hexload.com")) return tryX(`embed:${e.name}`, () => extractHexload(e.url));
             if (e.url.includes("mp4upload.com")) return tryX(`embed:${e.name}`, () => extractMp4upload(e.url));
             if (e.url.includes("savefiles.com") || e.url.includes("streamhls.to")) return tryX(`embed:${e.name}`, () => extractSavefiles(e.url));
-            if (bridgeUrl) return tryX(`bridge:${e.name}`, () => extractViaBridge(e.url, bridgeUrl));
+            if (/mi+xdrop/.test(e.url)) return tryX(`embed:${e.name}`, () => extractMixdrop(e.url));
             return Promise.resolve();
           }),
         ]);
@@ -729,7 +742,6 @@ export default {
           episodeFetch: "ok",
           embeds: embedUrls.map((e) => `${e.name}: ${e.url}`),
           mirrors,
-          bridge: bridgeUrl || "not set",
           tests: tests.sort((a, b) => Number(b.ok) - Number(a.ok)),
         });
       } catch (e) {
@@ -746,15 +758,12 @@ export default {
       return json({ code, streamUrl, proxyUrl, ms: Date.now() - t0 });
     }
 
-    if (path === "/debug-bridge") {
-      const testUrl = url.searchParams.get("url") || "https://luluvid.com/e/t66o00zj95a9";
-      if (!bridgeUrl) return json({ error: "BRIDGE_URL not set" });
+    if (path === "/debug-mixdrop") {
+      const testUrl = url.searchParams.get("url");
+      if (!testUrl) return json({ error: "Missing ?url=" });
       const t0 = Date.now();
-      try {
-        const r = await fetch(`${bridgeUrl}/extract?url=${encodeURIComponent(testUrl)}`, { signal: AbortSignal.timeout(50000) });
-        const body = await r.text();
-        return json({ status: r.status, body, testUrl, bridgeUrl, ms: Date.now() - t0 });
-      } catch (e) { return json({ error: String(e), testUrl, bridgeUrl, ms: Date.now() - t0 }); }
+      const streamUrl = await extractMixdrop(testUrl);
+      return json({ testUrl, streamUrl, ms: Date.now() - t0 });
     }
 
     if (path === "/cache-clear") {

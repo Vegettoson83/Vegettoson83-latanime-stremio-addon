@@ -12,7 +12,6 @@ enabled = true
 
 [vars]
 TMDB_KEY     = ""
-BRIDGE_URL   = "https://latanime-bridge.onrender.com"
 MFP_URL      = ""
 MFP_PASSWORD = "latanime"
 
