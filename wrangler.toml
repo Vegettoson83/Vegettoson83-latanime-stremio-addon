@@ -14,6 +14,11 @@ enabled = true
 TMDB_KEY     = ""
 MFP_URL      = ""
 MFP_PASSWORD = "latanime"
+# Cloudflare Browser Rendering (optional). Set CF_ACCOUNT_ID here and the
+# token as a secret:  wrangler secret put CF_API_TOKEN
+# Token needs the "Browser Rendering: Edit" permission. Leave blank to keep
+# extraction fully manual (no browser, no cost).
+CF_ACCOUNT_ID = ""
 
 [[kv_namespaces]]
 binding     = "STREAM_CACHE"
