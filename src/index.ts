@@ -72,6 +72,11 @@ interface Env {
   TMDB_KEY: string;
   MFP_URL: string;
   MFP_PASSWORD: string;
+  // Optional Cloudflare Browser Rendering (REST API). When both are set,
+  // hosts that need a real browser (JS challenges, SPA players, JS-built
+  // download links) are rendered on Cloudflare's edge. Unset = manual only.
+  CF_ACCOUNT_ID: string;
+  CF_API_TOKEN: string;
 }
 
 function json(data: unknown, status = 200) {
@@ -109,7 +114,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.6.0",
+  version: "4.6.1",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -454,10 +459,54 @@ async function extractMixdrop(embedUrl: string): Promise<string | null> {
 }
 
 
+// ─── CLOUDFLARE BROWSER RENDERING (optional) ───────────────────────────────
+// Renders a page with a real browser on Cloudflare's edge via the REST API —
+// no `@cloudflare/puppeteer` import (that import was the root cause of the
+// old 1101 crashes). Passes JS challenges (DDoS-Guard), SPA hydration and
+// JS-built links that plain fetch can't, and runs from Cloudflare's browser
+// pool rather than blocked Worker egress. No-ops unless both env vars are set.
+async function renderPage(url: string, env: Env, referer = "https://latanime.org/"): Promise<string | null> {
+  const acct = (env.CF_ACCOUNT_ID || "").trim();
+  const token = (env.CF_API_TOKEN || "").trim();
+  if (!acct || !token) return null;
+  try {
+    const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acct}/browser-rendering/content`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+      body: JSON.stringify({
+        url,
+        setExtraHTTPHeaders: { Referer: referer },
+        gotoOptions: { waitUntil: "networkidle0", timeout: 18000 },
+      }),
+      signal: AbortSignal.timeout(25000),
+    });
+    if (!r.ok) return null;
+    const data: any = await r.json();
+    // REST envelope: { success, result: "<html>" } (result may also be an object)
+    const html = typeof data?.result === "string" ? data.result : (data?.result?.html || "");
+    return html && html.length > 200 ? html : null;
+  } catch { return null; }
+}
+
+// Pull a playable media URL out of rendered page HTML — HLS first, then MP4,
+// then a MediaFire CDN link (its download button href is JS-populated).
+function findMediaUrl(html: string): { url: string; isHls: boolean } | null {
+  const m3u8 = html.match(/https?:\/\/[^"'\s\\<>]+\.m3u8[^"'\s\\<>]*/);
+  if (m3u8) return { url: m3u8[0], isHls: true };
+  const mf = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s\\<>]+/);
+  if (mf) return { url: mf[0], isHls: false };
+  const mp4 = html.match(/https?:\/\/[^"'\s\\<>]+\.mp4[^"'\s\\<>]*/);
+  if (mp4) return { url: mp4[0], isHls: false };
+  return null;
+}
+
 // ─── MEDIAFIRE RESOLVER ────────────────────────────────────────────────────
-// Verified Feb 27 2026: GET mediafire.com/file/{key}/{name}/file
-// → HTML contains CDN URL: download{n}.mediafire.com/.../{key}/{filename}
-// → 206 Partial Content, video/mp4, Accept-Ranges: bytes ✓
+// GET mediafire.com/file/{key}/{name}/file → the CDN URL used to be inline in
+// the HTML (download{n}.mediafire.com → 206, video/mp4, Accept-Ranges). As of
+// mid-2026 MediaFire builds that link in JS, so plain fetch can only succeed
+// when the static URL is still present; otherwise it returns null and the
+// caller falls back to browser rendering. It never returns the page URL — a
+// non-video link that only produced a dead "stream".
 async function resolveMediafire(mfUrl: string): Promise<string | null> {
   try {
     const r = await fetch(mfUrl, {
@@ -470,11 +519,7 @@ async function resolveMediafire(mfUrl: string): Promise<string | null> {
     if (!r.ok) return null;
     const html = await r.text();
     const match = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s]+/);
-    if (match) return match[0];
-    // Fallback: download button href
-    const btnMatch = html.match(/aria-label="Download file"[^>]+href="([^"]+)"|href="([^"]+)"[^>]*id="downloadButton"|href="([^"]+)"[^>]*class="[^"]*popsok/);
-    if (btnMatch) return btnMatch[1] || btnMatch[2] || btnMatch[3];
-    return null;
+    return match ? match[0] : null;
   } catch { return null; }
 }
 
@@ -561,10 +606,15 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   type Extracted = { url: string; name: string; isHls: boolean; referer?: string; priority?: boolean };
   const tasks: Promise<Extracted | null>[] = [];
 
-  // Priority: MediaFire — direct MP4, seekable, no expiry, ~185MB/ep
+  // Priority: MediaFire — direct MP4, seekable, no expiry, ~185MB/ep.
+  // Manual first; if MediaFire's JS-built link defeats it, render the page.
   if (mirrors.mediafire) {
     tasks.push((async () => {
-      const cdnUrl = await resolveMediafire(mirrors.mediafire!);
+      let cdnUrl = await resolveMediafire(mirrors.mediafire!);
+      if (!cdnUrl) {
+        const html = await renderPage(mirrors.mediafire!, env, "https://www.mediafire.com/");
+        cdnUrl = html ? (findMediaUrl(html)?.url ?? null) : null;
+      }
       if (!cdnUrl) return null;
       return { url: cdnUrl, name: "🔥 MediaFire MP4", isHls: false, priority: true };
     })());
@@ -608,8 +658,13 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         return url ? { url, name: embed.name, isHls: false } : null;
       }
       // No manual extractor for this host (JS-challenge/SPA players like voe,
-      // dsvplay, bysekoze). Return null so it falls through to an externalUrl
-      // entry below — playable in the user's own client, no server-side browser.
+      // dsvplay, bysekoze). Render it with Browser Rendering if configured;
+      // the provider CDN checks the referer of its own embed page.
+      const html = await renderPage(embed.url, env, embed.url);
+      const media = html ? findMediaUrl(html) : null;
+      if (media) return { url: media.url, name: embed.name, isHls: media.isHls, referer: embed.url };
+      // Still nothing — falls through to an externalUrl entry below, playable
+      // in the user's own client.
       return null;
     })());
   }
@@ -689,7 +744,20 @@ export default {
     if (path === "/" || path === "/manifest.json") return json(MANIFEST);
 
     if (path === "/debug") {
-      return json({ tmdbKey: tmdbKey ? "set" : "not set", kvBinding: env.STREAM_CACHE ? "set" : "not set" });
+      return json({
+        tmdbKey: tmdbKey ? "set" : "not set",
+        kvBinding: env.STREAM_CACHE ? "set" : "not set",
+        browserRendering: (env.CF_ACCOUNT_ID || "").trim() && (env.CF_API_TOKEN || "").trim() ? "enabled" : "disabled (manual only)",
+      });
+    }
+
+    if (path === "/debug-render") {
+      const testUrl = url.searchParams.get("url");
+      if (!testUrl) return json({ error: "Missing ?url=" });
+      const t0 = Date.now();
+      const html = await renderPage(testUrl, env, url.searchParams.get("ref") || "https://latanime.org/");
+      if (html == null) return json({ error: "render returned null — CF_ACCOUNT_ID/CF_API_TOKEN unset or render failed", ms: Date.now() - t0 });
+      return json({ testUrl, htmlLen: html.length, media: findMediaUrl(html), ms: Date.now() - t0 });
     }
 
     if (path === "/debug-host") {
@@ -734,7 +802,10 @@ export default {
             if (e.url.includes("mp4upload.com")) return tryX(`embed:${e.name}`, () => extractMp4upload(e.url));
             if (e.url.includes("savefiles.com") || e.url.includes("streamhls.to")) return tryX(`embed:${e.name}`, () => extractSavefiles(e.url));
             if (/mi+xdrop/.test(e.url)) return tryX(`embed:${e.name}`, () => extractMixdrop(e.url));
-            return Promise.resolve();
+            return tryX(`render:${e.name}`, async () => {
+              const h = await renderPage(e.url, env, e.url);
+              return h ? (findMediaUrl(h)?.url ?? null) : null;
+            });
           }),
         ]);
         return json({
