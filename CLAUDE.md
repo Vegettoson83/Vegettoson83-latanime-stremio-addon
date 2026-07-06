@@ -1,8 +1,10 @@
 # Latanime Stremio Addon
 
 Cloudflare Worker serving the Stremio addon protocol for latanime.org. Single
-source file: `src/index.ts`. Deployed by `.github/workflows/deploy.yml` on every
-push to `main` — there is no test suite; `npx tsc --noEmit` is the only gate.
+source file: `src/index.ts`. Deployed by **Cloudflare Workers Builds** (the
+dashboard Git integration) on every push to `main` — there is no deploy
+workflow in the repo, and there is no test suite; `npx tsc --noEmit` is the
+only gate.
 
 ## Invariant structure
 
@@ -18,10 +20,16 @@ spec-compliant (https://github.com/Stremio/stremio-addon-sdk/tree/master/docs):
   Map previously grew unbounded and caused 1101 crashes. TTLs live in `TTL`.
 - **Time budget**: Worker wall time is 30s; `fetchHtml` holds a hard 25s
   budget. New network calls need an explicit `AbortSignal.timeout`.
-- **No server-side browser**: stream extraction is manual only — direct HTTP
-  fetch plus parsing/unpacking inside the Worker. There is no headless-browser
-  bridge. A host that can't be resolved manually is surfaced as an
-  `externalUrl` (opens in the user's own client), never rendered server-side.
+- **Extraction is manual-first**: direct HTTP fetch plus parsing/unpacking
+  inside the Worker — no external headless-browser bridge (the Render bridge
+  and `@cloudflare/puppeteer` import both caused outages/1101 crashes and are
+  gone). The one optional escalation is **Cloudflare Browser Rendering** via
+  the REST `/content` API (`renderPage`), gated on `CF_ACCOUNT_ID` +
+  `CF_API_TOKEN`; it renders a page on Cloudflare's edge (no puppeteer import)
+  as a fallback for `fetchHtml` when latanime's Cloudflare challenge blocks
+  direct egress, and for player hosts that need JS. Unset ⇒ fully manual; a
+  host still unresolved is surfaced as an `externalUrl` (opens in the user's
+  own client).
 
 ## Volatile layer (expected churn)
 
@@ -43,8 +51,9 @@ old variant behind:
 
 ## Rules
 
-- One deploy workflow (`deploy.yml`). Never add a second workflow that
-  triggers on push to `main`.
+- One deployer: Cloudflare Workers Builds (dashboard Git integration). Don't
+  add a GitHub Actions `wrangler deploy` workflow — it would double-deploy on
+  every push to `main`.
 - No committed backup files (`*.bak`); git history is the backup.
 - Remove superseded code when replacing it — dead extractors and unused env
   vars are noise, not safety nets.
