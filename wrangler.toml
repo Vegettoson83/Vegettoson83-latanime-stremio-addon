@@ -14,6 +14,11 @@ enabled = true
 TMDB_KEY     = ""
 MFP_URL      = ""
 MFP_PASSWORD = "latanime"
+# Non-Cloudflare HTML fetch proxy (api/fetch.js, deployed by this repo's Vercel
+# integration). latanime.org blocks Cloudflare Worker egress; this relays its
+# HTML from Vercel's IP. Set this to your Vercel project's URL + /api/fetch.
+# Verify the domain under Vercel → Project → Domains (production URL).
+FETCH_PROXY_URL = "https://vegettoson83-latanime-stremio-addon.vercel.app/api/fetch"
 # Cloudflare Browser Rendering (optional). Set CF_ACCOUNT_ID here and the
 # token as a secret:  wrangler secret put CF_API_TOKEN
 # Token needs the "Browser Rendering: Edit" permission. Leave blank to keep
