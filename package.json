@@ -6,7 +6,6 @@
     "deploy": "npx wrangler@4 deploy"
   },
   "devDependencies": {
-    "@cloudflare/puppeteer": "^1.0.6",
     "@cloudflare/workers-types": "^4.0.0",
     "typescript": "^5.0.0",
     "wrangler": "^4.67.1"

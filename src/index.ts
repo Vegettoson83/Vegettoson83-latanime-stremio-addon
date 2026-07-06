@@ -73,7 +73,6 @@ interface Env {
   BRIDGE_URL: string;
   MFP_URL: string;
   MFP_PASSWORD: string;
-  SAVEFILES_KEY: string;
 }
 
 function json(data: unknown, status = 200) {
@@ -111,7 +110,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.5.1",
+  version: "4.5.2",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org — con Browser Rendering",
   logo: "https://latanime.org/img/logito.png",
@@ -422,29 +421,6 @@ async function extractSavefiles(embedUrl: string) {
 }
 
 
-function extractPixeldrain(embedUrl: string): string | null {
-  const m = embedUrl.match(/pixeldrain\.com\/u\/([a-zA-Z0-9]+)/);
-  if (!m) return null;
-  return `https://pixeldrain.com/api/file/${m[1]}/download`;
-}
-
-async function extractMediafire(mfUrl: string): Promise<string | null> {
-  try {
-    const res = await fetch(mfUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-        "Referer": "https://www.mediafire.com/",
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-      }
-    });
-    const html = await res.text();
-    const m = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s]+/);
-    if (m) return m[0];
-    const btn = html.match(/href="(https:\/\/download\d+\.mediafire\.com[^"]+)"/);
-    return btn ? btn[1] : null;
-  } catch { return null; }
-}
-
 async function extractViaBridge(embedUrl: string, bridgeUrl: string) {
   try {
     // 12s cap: a sleeping/broken bridge must not stall /stream past the
@@ -556,45 +532,45 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(m3u8Url)}&ref=${encodeURIComponent(referer)}`;
   }
 
-  const BROWSER_PLAYERS = ["filemoon", "voe.sx", "lancewhosedifficult", "voeunblocked", "mxdrop", "dsvplay", "doodstream"];
-  const needsBrowser = (url: string) => BROWSER_PLAYERS.some((p) => url.includes(p));
-
   const streams: any[] = [];
   const extractedNames = new Set<string>();
 
-  // Build task list — embeds + savefiles mirror (all run in parallel)
-  const mirrorTasks: Promise<{ url: string; name: string; isHls: boolean } | null>[] = [];
+  // Every extraction — mirrors and embeds — is a task yielding a playable URL
+  // plus the referer its HLS segments must be fetched with. Referer is decided
+  // where the host is known; the assembly loop below stays host-agnostic.
+  type Extracted = { url: string; name: string; isHls: boolean; referer?: string; priority?: boolean };
+  const tasks: Promise<Extracted | null>[] = [];
 
-  // Priority 1: MediaFire — direct MP4, seekable, no expiry, ~185MB/ep
+  // Priority: MediaFire — direct MP4, seekable, no expiry, ~185MB/ep
   if (mirrors.mediafire) {
-    mirrorTasks.push((async () => {
+    tasks.push((async () => {
       const cdnUrl = await resolveMediafire(mirrors.mediafire!);
       if (!cdnUrl) return null;
-      return { url: cdnUrl, name: "🔥 MediaFire MP4", isHls: false };
+      return { url: cdnUrl, name: "🔥 MediaFire MP4", isHls: false, priority: true };
     })());
+  }
+
+  // Priority: Pixeldrain — direct stream, Stremio fetches from user's residential IP
+  const pixeldrainSrc = mirrors.pixeldrain || embedUrls.find((e) => e.url.includes("pixeldrain.com"))?.url;
+  if (pixeldrainSrc) {
+    const idM = pixeldrainSrc.match(/pixeldrain\.com\/(?:u|l)\/([a-zA-Z0-9]+)/);
+    if (idM) tasks.push(Promise.resolve({ url: `https://pixeldrain.com/api/file/${idM[1]}`, name: "Pixeldrain", isHls: false, priority: true }));
   }
 
   if (mirrors.savefiles) {
     const sfCode = mirrors.savefiles.split("savefiles.com/").pop()?.split(/[/?]/)[0]?.trim();
     if (sfCode && sfCode.length > 3) {
-      mirrorTasks.push((async () => {
+      tasks.push((async () => {
         const m3u8 = await extractSavefiles(`https://savefiles.com/${sfCode}`);
         if (!m3u8) return null;
-        return { url: m3u8, name: "savefiles 1080p", isHls: true };
+        return { url: m3u8, name: "savefiles 1080p", isHls: true, referer: "https://streamhls.to/" };
       })());
     }
   }
 
-  const results = await Promise.allSettled([
-    ...mirrorTasks,
-    ...embedUrls.map(async (embed) => {
-      // Pixeldrain — direct stream, Stremio fetches from user's residential IP
-      if (embed.url.includes("pixeldrain.com")) {
-        const idM = embed.url.match(/pixeldrain\.com\/(?:u\/|l\/)([a-zA-Z0-9]+)/);
-        if (idM) return { url: `https://pixeldrain.com/api/file/${idM[1]}`, name: embed.name, isHls: false };
-        return null;
-      }
-
+  for (const embed of embedUrls) {
+    if (embed.url.includes("pixeldrain.com")) { extractedNames.add(embed.name); continue; } // handled above
+    tasks.push((async () => {
       if (embed.url.includes("hexload.com")) {
         const url = await extractHexload(embed.url);
         return url ? { url, name: embed.name, isHls: false } : null;
@@ -605,35 +581,24 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       }
       if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to")) {
         const url = await extractSavefiles(embed.url);
-        return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
+        return url ? { url, name: embed.name, isHls: url.includes(".m3u8"), referer: "https://streamhls.to/" } : null;
       }
-      if (needsBrowser(embed.url)) {
-        if (!bridgeUrl) return null;
-        const url = await extractViaBridge(embed.url, bridgeUrl);
-        return url ? { url, name: embed.name, isHls: url.includes(".m3u8") } : null;
-      }
-      if (bridgeUrl) {
-        const url = await extractViaBridge(embed.url, bridgeUrl);
-        if (url) return { url, name: embed.name, isHls: url.includes(".m3u8") };
-      }
-      return null;
-    })
-  ]);
+      if (!bridgeUrl) return null;
+      // Bridge-extracted HLS: the provider's CDN checks the referer of its own
+      // embed page, not latanime's
+      const url = await extractViaBridge(embed.url, bridgeUrl);
+      return url ? { url, name: embed.name, isHls: url.includes(".m3u8"), referer: embed.url } : null;
+    })());
+  }
+
+  const results = await Promise.allSettled(tasks);
 
   for (const r of results) {
     if (r.status === "fulfilled" && r.value) {
-      const { url: streamUrl, name, isHls } = r.value;
-      const isSavefiles = streamUrl.includes("savefiles.com") || streamUrl.includes("s3.savefiles") || streamUrl.includes("s2.savefiles") || streamUrl.includes("streamhls.to");
-      let finalUrl: string;
-      if (isHls && isSavefiles) {
-        finalUrl = hlsProxyUrl(streamUrl, "https://streamhls.to/");
-      } else if (isHls) {
-        finalUrl = hlsProxyUrl(streamUrl, "https://latanime.org/");
-      } else {
-        finalUrl = streamUrl;
-      }
+      const { url: streamUrl, name, isHls, referer, priority } = r.value;
+      const hlsReferer = referer || "https://latanime.org/";
+      const finalUrl = isHls ? hlsProxyUrl(streamUrl, hlsReferer) : streamUrl;
       if (!streams.some(s => s.url === finalUrl)) {
-        const isMediafire = name.includes("MediaFire");
         const label = `▶ ${name} — Latino`;
         const entry = {
           url: finalUrl,
@@ -650,14 +615,14 @@ async function getStreams(rawId: string, env: Env, request: Request) {
             bingeGroup: `latanime-${name}`,
           },
         };
-        if (isMediafire) streams.unshift(entry); else streams.push(entry);
+        if (priority) streams.unshift(entry); else streams.push(entry);
       }
       extractedNames.add(name);
       // 480p variant for savefiles streams
-      if (isHls && isSavefiles) {
+      if (isHls && (streamUrl.includes("savefiles") || streamUrl.includes("streamhls.to"))) {
         const m3u8_480 = streamUrl.replace(",_n,", ",_l,").replace("_n,", "_l,");
         if (m3u8_480 !== streamUrl) {
-          const url480 = hlsProxyUrl(m3u8_480, "https://streamhls.to/");
+          const url480 = hlsProxyUrl(m3u8_480, hlsReferer);
           if (!streams.some(s => s.url === url480)) {
             const label480 = `▶ ${name} 480p — Latino`;
             streams.push({
@@ -685,24 +650,6 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         title: label,
         description: label,
       });
-    }
-  }
-
-  // Resolve download mirrors in parallel with embed extraction (already done above)
-  // Pixeldrain — instant, no async needed
-  if (mirrors.pixeldrain) {
-    const idM = mirrors.pixeldrain.match(/pixeldrain\.com\/u\/([a-zA-Z0-9]+)/);
-    if (idM) {
-      const pdUrl = `https://pixeldrain.com/api/file/${idM[1]}`;
-      if (!streams.some(s => s.url === pdUrl)) {
-        streams.unshift({
-          url: pdUrl,
-          name: "Latanime MP4",
-          title: "▶ Pixeldrain — Latino",
-          description: "▶ Pixeldrain — Latino",
-          behaviorHints: { notWebReady: false, filename: `${slug}-e${epNum}.mp4`, bingeGroup: "latanime-pixeldrain" },
-        });
-      }
     }
   }
 
@@ -863,19 +810,33 @@ export default {
       const referer = url.searchParams.get("ref") || "https://latanime.org/";
       if (!m3u8Url) return new Response("Missing url", { status: 400 });
       try {
-        const decoded = decodeURIComponent(m3u8Url);
-        const base = decoded.substring(0, decoded.lastIndexOf("/") + 1);
+        // searchParams.get() already percent-decodes — decoding again would
+        // corrupt upstream URLs that carry literal %-sequences (signed tokens)
+        const base = m3u8Url.substring(0, m3u8Url.lastIndexOf("/") + 1);
         const workerBase = new URL(request.url).origin;
-        const r = await fetch(decoded, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" } });
+        const proxied = (absUrl: string, forceM3u8 = false) => {
+          const route = forceM3u8 || absUrl.includes(".m3u8") ? "m3u8" : "seg";
+          return `${workerBase}/proxy/${route}?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
+        };
+        const r = await fetch(m3u8Url, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" } });
         if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
         const m3u8Text = await r.text();
         const isMaster = m3u8Text.includes("#EXT-X-STREAM-INF");
         const rewritten = m3u8Text.split("\n").map((line) => {
           const trimmed = line.trim();
-          if (trimmed.startsWith("#") || trimmed === "") return line;
+          if (trimmed === "") return line;
+          if (trimmed.startsWith("#")) {
+            // EXT-X-KEY / EXT-X-MAP / EXT-X-MEDIA reference URLs via URI="…" —
+            // they need the same referer treatment as segments
+            const uriM = line.match(/URI="([^"]+)"/);
+            if (!uriM) return line;
+            const absUri = uriM[1].startsWith("http") ? uriM[1] : base + uriM[1];
+            return line.replace(uriM[1], proxied(absUri));
+          }
           const absUrl = trimmed.startsWith("http") ? trimmed : base + trimmed;
-          if (isMaster || absUrl.includes(".m3u8")) return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
-          return `${workerBase}/proxy/seg?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
+          // in a master playlist every non-# line is a variant playlist,
+          // whatever its extension
+          return proxied(absUrl, isMaster);
         }).join("\n");
         return new Response(rewritten, { headers: { "Content-Type": "application/vnd.apple.mpegurl", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache" } });
       } catch (e) { return new Response(String(e), { status: 500 }); }
@@ -886,8 +847,7 @@ export default {
       const referer = url.searchParams.get("ref") || "https://latanime.org/";
       if (!segUrl) return new Response("Missing url", { status: 400 });
       try {
-        const decoded = decodeURIComponent(segUrl);
-        const r = await fetch(decoded, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" } });
+        const r = await fetch(segUrl, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" } });
         if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
         return new Response(r.body, { headers: { "Content-Type": r.headers.get("Content-Type") || "video/MP2T", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600" } });
       } catch (e) { return new Response(String(e), { status: 500 }); }
