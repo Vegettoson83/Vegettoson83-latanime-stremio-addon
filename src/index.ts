@@ -117,7 +117,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.7.2",
+  version: "4.7.3",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -663,19 +663,17 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     if (idM) tasks.push(Promise.resolve({ url: `https://pixeldrain.com/api/file/${idM[1]}`, name: "Pixeldrain", isHls: false, priority: true }));
   }
 
-  if (mirrors.savefiles) {
-    const sfCode = mirrors.savefiles.split("savefiles.com/").pop()?.split(/[/?]/)[0]?.trim();
-    if (sfCode && sfCode.length > 3) {
-      tasks.push((async () => {
-        const m3u8 = await extractSavefiles(`https://savefiles.com/${sfCode}`);
-        if (!m3u8) return null;
-        return { url: m3u8, name: "savefiles 1080p", isHls: true, referer: "https://streamhls.to/" };
-      })());
-    }
-  }
-
   for (const embed of embedUrls) {
     if (embed.url.includes("pixeldrain.com")) { extractedNames.add(embed.name); continue; } // handled above
+    // IP-bound hosts (savefiles/streamhls, mixdrop) mint signed URLs locked to
+    // the extractor's IP, so a server-side extraction 403s when Stremio — a
+    // different IP — plays it. Don't extract them; let them fall through to an
+    // externalUrl, which the user's own client resolves from their IP where the
+    // token is valid. (savefiles HLS is restored inline via the stable-IP Deno
+    // resolver, tracked separately.)
+    if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to") || /mi+xdrop/.test(embed.url)) {
+      continue;
+    }
     tasks.push((async () => {
       if (embed.url.includes("hexload.com")) {
         const url = await extractHexload(embed.url);
@@ -683,14 +681,6 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       }
       if (embed.url.includes("mp4upload.com")) {
         const url = await extractMp4upload(embed.url);
-        return url ? { url, name: embed.name, isHls: false } : null;
-      }
-      if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to")) {
-        const url = await extractSavefiles(embed.url);
-        return url ? { url, name: embed.name, isHls: url.includes(".m3u8"), referer: "https://streamhls.to/" } : null;
-      }
-      if (/mi+xdrop/.test(embed.url)) {
-        const url = await extractMixdrop(embed.url);
         return url ? { url, name: embed.name, isHls: false } : null;
       }
       // No manual extractor for this host (JS-challenge/SPA players like voe,
@@ -732,23 +722,6 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         if (priority) streams.unshift(entry); else streams.push(entry);
       }
       extractedNames.add(name);
-      // 480p variant for savefiles streams
-      if (isHls && (streamUrl.includes("savefiles") || streamUrl.includes("streamhls.to"))) {
-        const m3u8_480 = streamUrl.replace(",_n,", ",_l,").replace("_n,", "_l,");
-        if (m3u8_480 !== streamUrl) {
-          const url480 = hlsProxyUrl(m3u8_480, hlsReferer);
-          if (!streams.some(s => s.url === url480)) {
-            const label480 = `▶ ${name} 480p — Latino`;
-            streams.push({
-              url: url480,
-              name: "Latanime HLS 480p",
-              title: label480,
-              description: label480,
-              behaviorHints: { notWebReady: !url480.startsWith(workerBase), filename: `${slug}-e${epNum}-480p.m3u8`, bingeGroup: `latanime-${name}-480p` },
-            });
-          }
-        }
-      }
     }
   }
 
