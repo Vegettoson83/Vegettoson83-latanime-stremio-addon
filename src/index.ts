@@ -117,7 +117,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.7.3",
+  version: "4.8.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -639,8 +639,14 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   // Every extraction — mirrors and embeds — is a task yielding a playable URL
   // plus the referer its HLS segments must be fetched with. Referer is decided
   // where the host is known; the assembly loop below stays host-agnostic.
-  type Extracted = { url: string; name: string; isHls: boolean; referer?: string; priority?: boolean };
+  // `proxied` marks a URL that is already a finished, web-ready stream (e.g. the
+  // Deno savefiles HLS) so the assembly doesn't re-wrap it in the worker proxy.
+  type Extracted = { url: string; name: string; isHls: boolean; referer?: string; priority?: boolean; proxied?: boolean };
   const tasks: Promise<Extracted | null>[] = [];
+
+  // Deno service base (FETCH_PROXY_URL is …/fetch); used for the savefiles HLS
+  // resolver, which must run extraction + playback from one stable IP.
+  const denoBase = (env.FETCH_PROXY_URL || "").trim().replace(/\/fetch\/?$/, "").replace(/\/$/, "");
 
   // Priority: MediaFire — direct MP4, seekable, no expiry, ~185MB/ep.
   // Manual first; if MediaFire's JS-built link defeats it, render the page.
@@ -663,15 +669,29 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     if (idM) tasks.push(Promise.resolve({ url: `https://pixeldrain.com/api/file/${idM[1]}`, name: "Pixeldrain", isHls: false, priority: true }));
   }
 
+  // savefiles HLS via the Deno resolver — savefiles binds the signed URL to the
+  // extractor's IP, so the whole flow (extract + all segment fetches) runs on
+  // Deno's one stable IP and the token stays valid. Deno serves it web-ready.
+  const savefilesSrc = mirrors.savefiles || embedUrls.find((e) => e.url.includes("savefiles.com") || e.url.includes("streamhls.to"))?.url;
+  if (denoBase && savefilesSrc) {
+    const code = savefilesSrc.split(/savefiles\.com\/|streamhls\.to\//).pop()?.replace(/^e\//, "").split(/[/?]/)[0]?.trim();
+    if (code && code.length > 3) {
+      tasks.push(Promise.resolve({ url: `${denoBase}/savefiles?code=${encodeURIComponent(code)}`, name: "savefiles 1080p", isHls: true, proxied: true }));
+    }
+  }
+
   for (const embed of embedUrls) {
     if (embed.url.includes("pixeldrain.com")) { extractedNames.add(embed.name); continue; } // handled above
-    // IP-bound hosts (savefiles/streamhls, mixdrop) mint signed URLs locked to
-    // the extractor's IP, so a server-side extraction 403s when Stremio — a
-    // different IP — plays it. Don't extract them; let them fall through to an
-    // externalUrl, which the user's own client resolves from their IP where the
-    // token is valid. (savefiles HLS is restored inline via the stable-IP Deno
-    // resolver, tracked separately.)
-    if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to") || /mi+xdrop/.test(embed.url)) {
+    // savefiles/streamhls handled above via Deno (when configured); mark it
+    // extracted so it isn't also shown as an externalUrl. Without a Deno base it
+    // falls through to an externalUrl instead. mixdrop mints IP-bound signed
+    // URLs too but is a single MP4 — server-side extraction 403s from another
+    // IP, so skip it and let the user's own client resolve the externalUrl.
+    if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to")) {
+      if (denoBase) extractedNames.add(embed.name);
+      continue;
+    }
+    if (/mi+xdrop/.test(embed.url)) {
       continue;
     }
     tasks.push((async () => {
@@ -699,9 +719,11 @@ async function getStreams(rawId: string, env: Env, request: Request) {
 
   for (const r of results) {
     if (r.status === "fulfilled" && r.value) {
-      const { url: streamUrl, name, isHls, referer, priority } = r.value;
+      const { url: streamUrl, name, isHls, referer, priority, proxied } = r.value;
       const hlsReferer = referer || "https://latanime.org/";
-      const finalUrl = isHls ? hlsProxyUrl(streamUrl, hlsReferer) : streamUrl;
+      // proxied streams (Deno savefiles HLS) are already finished + web-ready;
+      // everything else HLS goes through the worker proxy.
+      const finalUrl = (isHls && !proxied) ? hlsProxyUrl(streamUrl, hlsReferer) : streamUrl;
       if (!streams.some(s => s.url === finalUrl)) {
         const label = `▶ ${name} — Latino`;
         const entry = {
@@ -710,9 +732,10 @@ async function getStreams(rawId: string, env: Env, request: Request) {
           title: label,
           description: label,
           behaviorHints: {
-            // worker-proxied HLS is served with CORS over https, so the web
-            // player can use it; only externally proxied HLS (MFP) is opaque
-            notWebReady: isHls && !finalUrl.startsWith(workerBase),
+            // worker-proxied and Deno-proxied HLS are served with CORS over
+            // https, so the web player can use them; only externally proxied
+            // HLS (MFP) is opaque
+            notWebReady: isHls && !proxied && !finalUrl.startsWith(workerBase),
             // filename drives format detection in Stremio's local streaming
             // server — the proxied URLs carry no usable extension themselves
             filename: `${slug}-e${epNum}.${isHls ? "m3u8" : "mp4"}`,
