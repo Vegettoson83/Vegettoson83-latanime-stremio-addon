@@ -1,12 +1,13 @@
 # Latanime Stremio Addon
 
 Cloudflare Worker serving the Stremio addon protocol for latanime.org. Main
-source file: `src/index.ts`, plus one Vercel serverless helper `api/fetch.js`
-(see the fetch-proxy note below). Deployed by **Cloudflare Workers Builds** (the
-dashboard Git integration) on every push to `main`; `api/fetch.js` deploys via
-the repo's separate Vercel integration. No deploy workflow lives in the repo,
-and there is no test suite; `npx tsc --noEmit` (which only covers `src/`) is the
-only gate.
+source file: `src/index.ts`, plus two interchangeable non-Cloudflare HTML fetch
+proxies — `deno/fetch.ts` (Deno Deploy, preferred) and `api/fetch.js` (Vercel)
+— see the fetch-proxy note below. The Worker is deployed by **Cloudflare Workers
+Builds** (the dashboard Git integration) on every push to `main`; the proxy
+deploys via whichever of Deno Deploy / Vercel you connect. No deploy workflow
+lives in the repo, and there is no test suite; `npx tsc --noEmit` (which only
+covers `src/`) is the only gate.
 
 ## Invariant structure
 
@@ -24,10 +25,11 @@ spec-compliant (https://github.com/Stremio/stremio-addon-sdk/tree/master/docs):
   budget. New network calls need an explicit `AbortSignal.timeout`.
 - **latanime fetch path**: latanime.org is behind Cloudflare and blocks
   Worker egress at the network level, so direct `fetch` from the Worker is
-  unreliable. `fetchHtml` falls back in order: direct → `FETCH_PROXY_URL`
-  (the non-Cloudflare Vercel proxy `api/fetch.js`, the reliable path) →
-  Browser Rendering (if configured) → free CORS proxies (mostly dead). The
-  Vercel proxy allowlists latanime.org only — keep it that way.
+  unreliable. `fetchHtml` **races** direct against `FETCH_PROXY_URL` (the
+  non-Cloudflare proxy — `deno/fetch.ts` or `api/fetch.js`, the reliable path)
+  and takes the first valid HTML, then falls back to Browser Rendering (if
+  configured) → free CORS proxies (mostly dead). Both proxies allowlist
+  latanime.org only — keep it that way.
 - **Extraction is manual-first**: direct HTTP fetch plus parsing/unpacking
   inside the Worker — no external headless-browser bridge (the Render bridge
   and `@cloudflare/puppeteer` import both caused outages/1101 crashes and are
