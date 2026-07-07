@@ -51,8 +51,16 @@ old variant behind:
   scraping. `data-player` is base64 of the provider URL (decode-first, see
   comment in `parseEpisodeEmbeds`).
 - Per-host extractors (`extractMp4upload`, `extractHexload`,
-  `extractSavefiles`, `resolveMediafire`, `extractMixdrop`). Add a new host by
-  writing another manual extractor, not by reaching for a browser.
+  `resolveMediafire`). Add a new host by writing another manual extractor, not
+  by reaching for a browser.
+- **IP-bound hosts** (savefiles/streamhls, mixdrop) mint signed URLs locked to
+  the extractor's IP, so a Worker-side extraction 403s when Stremio (a
+  different IP) plays it. savefiles HLS is resolved and proxied entirely by the
+  Deno service (`/savefiles`, `/hls` in `deno/fetch.ts`) so extraction and every
+  segment fetch share Deno's one stable IP; the Worker just points Stremio at
+  `${denoBase}/savefiles?code=…`. mixdrop stays an `externalUrl` (user's own IP
+  resolves it). Never re-add a Worker-side savefiles/mixdrop extractor — it
+  produces a dead stream.
 - `unpackPacker` reverses Dean Edwards `eval(function(p,a,c,k,e,d){…})`
   packing — reuse it for any host that ships its config that way.
 - `/debug-extract?id=slug:episode` runs every extractor with timings, and
