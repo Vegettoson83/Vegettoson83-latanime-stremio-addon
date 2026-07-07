@@ -22,6 +22,6 @@ zero-repo setup, or use `deployctl deploy --entrypoint deno/fetch.ts`.
 ## Notes
 
 - Deno Deploy's free tier is generous (well beyond a personal addon's traffic)
-  and doesn't sleep, so latency stays flat — unlike the Vercel function
-  (`../api/fetch.js`), which cold-starts.
-- Once `FETCH_PROXY_URL` points here, `../api/fetch.js` can be removed.
+  and doesn't sleep, so latency stays flat (~1s per latanime fetch).
+- `deno.json` at the repo root pins the entrypoint (`deploy.runtime.entrypoint`)
+  so Deno Deploy runs this file, not the Worker in `src/`.

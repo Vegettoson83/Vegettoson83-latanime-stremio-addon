@@ -3,8 +3,8 @@
 // latanime.org is behind Cloudflare and blocks Cloudflare Worker egress at the
 // network level, so the Worker (src/index.ts) can't fetch it directly. This
 // relays the HTML from Deno Deploy's egress, which isn't caught by that block.
-// Unlike the Vercel function (api/fetch.js) this runs on always-warm edge
-// isolates — no scale-to-zero cold starts, so latency stays flat.
+// It runs on always-warm edge isolates — no scale-to-zero cold starts, so
+// latency stays flat (~1s per latanime fetch).
 //
 // Not an open relay: it only proxies https://latanime.org (and subdomains).
 //
