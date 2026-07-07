@@ -117,7 +117,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.7.0",
+  version: "4.7.1",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -170,34 +170,28 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
   };
 
   try {
-    // Phase 1: direct fetch. latanime.org sits behind Cloudflare and blocks
-    // Worker egress; the challenge returns fast, so this fails cheaply when
-    // blocked and the proxy below takes over.
-    if (!controller.signal.aborted) {
-      try {
-        const result = await tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) }));
-        clearTimeout(globalTimer);
-        return result;
-      } catch { }
-    }
-
-    // Phase 2: non-Cloudflare fetch proxy (Vercel — api/fetch.js). Its egress
-    // isn't caught by latanime's block on Worker IPs, so this is the reliable
-    // path. The proxy allowlists latanime.org only.
+    // Phase 1: race direct fetch against the non-Cloudflare Vercel proxy
+    // (api/fetch.js) and take whichever returns valid HTML first. latanime.org
+    // blocks Worker egress, so the direct leg almost always rejects fast while
+    // the proxy wins in ~2-3s — racing avoids burning ~8s on the doomed direct
+    // attempt before falling back (that lag was starving /stream and making
+    // catalog rows time out in Stremio). The proxy allowlists latanime.org only.
     const proxyBase = env?.FETCH_PROXY_URL?.trim();
-    if (proxyBase && !controller.signal.aborted) {
-      try {
-        const html = await tryFetch("fetchproxy", () =>
-          fetch(`${proxyBase}?url=${encoded}`, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(12000) })
-        );
-        clearTimeout(globalTimer);
-        return html;
-      } catch (e) {
-        console.log(`[fetchHtml] fetchproxy failed: ${e}`);
-      }
+    const racers: Promise<string>[] = [
+      tryFetch("direct", () => fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
+    ];
+    if (proxyBase) {
+      racers.push(tryFetch("fetchproxy", () =>
+        fetch(`${proxyBase}?url=${encoded}`, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(12000) })
+      ));
     }
+    try {
+      const html = await Promise.any(racers);
+      clearTimeout(globalTimer);
+      return html;
+    } catch { /* every racer rejected — fall through */ }
 
-    // Phase 3: Cloudflare Browser Rendering — a real edge browser that clears
+    // Phase 2: Cloudflare Browser Rendering — a real edge browser that clears
     // the Cloudflare challenge reliably. Only fires when configured; latanime
     // pages are server-rendered so "load" is enough (no JS wait needed).
     if (env && browserRenderingReady(env) && !controller.signal.aborted) {
@@ -209,7 +203,7 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
       }
     }
 
-    // Phase 4: free CORS proxies (last resort; frequently down)
+    // Phase 3: free CORS proxies (last resort; frequently down)
     for (const [name, proxyUrl] of [
       ["allorigins", `https://api.allorigins.win/raw?url=${encoded}`],
       ["codetabs",   `https://api.codetabs.com/v1/proxy?quest=${encoded}`],
