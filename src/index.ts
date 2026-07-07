@@ -72,8 +72,8 @@ interface Env {
   TMDB_KEY: string;
   MFP_URL: string;
   MFP_PASSWORD: string;
-  // Non-Cloudflare HTML fetch proxy (the Vercel function in api/fetch.js).
-  // latanime.org blocks Worker egress; this relays its HTML from Vercel's IP.
+  // Non-Cloudflare HTML fetch proxy (deno/fetch.ts on Deno Deploy).
+  // latanime.org blocks Worker egress; this relays its HTML from Deno's edge.
   FETCH_PROXY_URL: string;
   // Optional Cloudflare Browser Rendering (REST API). When both are set,
   // hosts that need a real browser (JS challenges, SPA players, JS-built
@@ -117,7 +117,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.7.1",
+  version: "4.7.2",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -170,8 +170,8 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
   };
 
   try {
-    // Phase 1: race direct fetch against the non-Cloudflare Vercel proxy
-    // (api/fetch.js) and take whichever returns valid HTML first. latanime.org
+    // Phase 1: race direct fetch against the non-Cloudflare Deno Deploy proxy
+    // (deno/fetch.ts) and take whichever returns valid HTML first. latanime.org
     // blocks Worker egress, so the direct leg almost always rejects fast while
     // the proxy wins in ~2-3s — racing avoids burning ~8s on the doomed direct
     // attempt before falling back (that lag was starving /stream and making

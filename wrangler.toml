@@ -14,13 +14,10 @@ enabled = true
 TMDB_KEY     = ""
 MFP_URL      = ""
 MFP_PASSWORD = "latanime"
-# Non-Cloudflare HTML fetch proxy. latanime.org blocks Cloudflare Worker egress;
-# this relays its HTML from a non-Cloudflare IP. Two implementations ship in the
-# repo — point this at whichever you deploy:
-#   • Deno Deploy (deno/fetch.ts): https://<project>.deno.dev/fetch  ← preferred
-#       (always-warm edge, no cold starts; see deno/README.md)
-#   • Vercel (api/fetch.js):       https://<project>.vercel.app/api/fetch
-FETCH_PROXY_URL = "https://vegettoson83-latanime-stremio-addon.vercel.app/api/fetch"
+# Non-Cloudflare HTML fetch proxy (deno/fetch.ts on Deno Deploy). latanime.org
+# blocks Cloudflare Worker egress; this relays its HTML from Deno's edge. See
+# deno/README.md to deploy your own, then set the URL here (+ /fetch).
+FETCH_PROXY_URL = "https://vegettoson83-latanime-stremi.vegettoson83.deno.net/fetch"
 # Cloudflare Browser Rendering (optional). Set CF_ACCOUNT_ID here and the
 # token as a secret:  wrangler secret put CF_API_TOKEN
 # Token needs the "Browser Rendering: Edit" permission. Leave blank to keep

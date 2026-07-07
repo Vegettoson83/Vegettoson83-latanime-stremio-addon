@@ -1,13 +1,13 @@
 # Latanime Stremio Addon
 
 Cloudflare Worker serving the Stremio addon protocol for latanime.org. Main
-source file: `src/index.ts`, plus two interchangeable non-Cloudflare HTML fetch
-proxies — `deno/fetch.ts` (Deno Deploy, preferred) and `api/fetch.js` (Vercel)
-— see the fetch-proxy note below. The Worker is deployed by **Cloudflare Workers
+source file: `src/index.ts`, plus a non-Cloudflare HTML fetch proxy
+`deno/fetch.ts` running on Deno Deploy (see the fetch-proxy note below;
+`deno.json` pins its entrypoint). The Worker is deployed by **Cloudflare Workers
 Builds** (the dashboard Git integration) on every push to `main`; the proxy
-deploys via whichever of Deno Deploy / Vercel you connect. No deploy workflow
-lives in the repo, and there is no test suite; `npx tsc --noEmit` (which only
-covers `src/`) is the only gate.
+deploys via Deno Deploy's Git integration. No deploy workflow lives in the repo,
+and there is no test suite; `npx tsc --noEmit` (which only covers `src/`) is the
+only gate.
 
 ## Invariant structure
 
@@ -26,9 +26,9 @@ spec-compliant (https://github.com/Stremio/stremio-addon-sdk/tree/master/docs):
 - **latanime fetch path**: latanime.org is behind Cloudflare and blocks
   Worker egress at the network level, so direct `fetch` from the Worker is
   unreliable. `fetchHtml` **races** direct against `FETCH_PROXY_URL` (the
-  non-Cloudflare proxy — `deno/fetch.ts` or `api/fetch.js`, the reliable path)
-  and takes the first valid HTML, then falls back to Browser Rendering (if
-  configured) → free CORS proxies (mostly dead). Both proxies allowlist
+  non-Cloudflare Deno Deploy proxy `deno/fetch.ts`, the reliable path) and
+  takes the first valid HTML, then falls back to Browser Rendering (if
+  configured) → free CORS proxies (mostly dead). The proxy allowlists
   latanime.org only — keep it that way.
 - **Extraction is manual-first**: direct HTTP fetch plus parsing/unpacking
   inside the Worker — no external headless-browser bridge (the Render bridge
