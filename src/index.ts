@@ -96,6 +96,9 @@ const TTL = {
   catalog:  10 * 60,        // 10 min (seconds for KV)
   meta:      2 * 60 * 60,   // 2 hr
   stream:   30 * 60,        // 30 min
+  render:    15 * 60,       // 15 min — a resolved browser-render result (signed
+                            // URLs expire, so keep it under typical token life)
+  renderMiss: 5 * 60,       // 5 min — retry a host that failed to render sooner
 };
 
 async function cacheGet(key: string, kv: KVNamespace | undefined): Promise<unknown> {
@@ -117,7 +120,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.8.0",
+  version: "4.9.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -524,9 +527,38 @@ async function renderPage(url: string, env: Env, opts: { referer?: string; wait?
   } catch { return null; }
 }
 
-// Pull a playable media URL out of rendered page HTML — HLS first, then MP4,
-// then a MediaFire CDN link (its download button href is JS-populated).
+// VOE hides its real source in a <script type="application/json"> blob that a
+// multi-step obfuscation encodes. Reversing it (rot13 → strip pattern chars →
+// base64 → char-shift(-3) → reverse → base64 → JSON) yields { source, … }.
+// Ported from StreamFlix's DecryptHelper.decryptF7. voe.sx DDoS-Guards server
+// egress, so this only fires on Browser-Rendering output (a real browser clears
+// the challenge); the decode itself is what plain regex can't do.
+function decodeVoe(encoded: string): { url: string; isHls: boolean } | null {
+  try {
+    let v = encoded.replace(/[a-zA-Z]/g, (c) => {
+      const base = c <= "Z" ? 65 : 97;
+      return String.fromCharCode(((c.charCodeAt(0) - base + 13) % 26) + base);
+    });
+    for (const p of ["@$", "^^", "~@", "%?", "*~", "!!", "#&"]) v = v.split(p).join("_");
+    v = v.replace(/_/g, "");
+    v = atob(v);
+    v = v.split("").map((c) => String.fromCharCode(c.charCodeAt(0) - 3)).join("");
+    v = atob(v.split("").reverse().join(""));
+    const src = JSON.parse(v)?.source;
+    if (typeof src === "string" && src.startsWith("http")) return { url: src, isHls: src.includes(".m3u8") };
+  } catch { }
+  return null;
+}
+
+// Pull a playable media URL out of rendered page HTML. VOE's encrypted JSON
+// first (domain-agnostic — its aliases rotate), then a bare HLS/MP4/MediaFire
+// link (some players build the src in JS, which the render surfaces).
 function findMediaUrl(html: string): { url: string; isHls: boolean } | null {
+  const jm = html.match(/<script\s+type="application\/json">([\s\S]*?)<\/script>/);
+  if (jm) {
+    const voe = decodeVoe(jm[1].trim());
+    if (voe) return voe;
+  }
   const m3u8 = html.match(/https?:\/\/[^"'\s\\<>]+\.m3u8[^"'\s\\<>]*/);
   if (m3u8) return { url: m3u8[0], isHls: true };
   const mf = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s\\<>]+/);
@@ -534,6 +566,24 @@ function findMediaUrl(html: string): { url: string; isHls: boolean } | null {
   const mp4 = html.match(/https?:\/\/[^"'\s\\<>]+\.mp4[^"'\s\\<>]*/);
   if (mp4) return { url: mp4[0], isHls: false };
   return null;
+}
+
+// Cached browser-render resolve: render an embed once and reuse the result.
+// Browser Rendering is slow (~10-20s) and metered, so the outcome — a resolved
+// { url, isHls } or a miss — is cached in KV per embed URL (short TTL because
+// the URLs are signed/expiring). No-ops to null when rendering is unconfigured.
+async function resolveViaRender(
+  embedUrl: string,
+  env: Env,
+): Promise<{ url: string; isHls: boolean } | null> {
+  if (!browserRenderingReady(env)) return null;
+  const key = `rr:${embedUrl}`;
+  const cached = await cacheGet(key, env.STREAM_CACHE) as { url: string; isHls: boolean; miss?: boolean } | null;
+  if (cached) return cached.miss ? null : cached;
+  const html = await renderPage(embedUrl, env, { referer: embedUrl });
+  const media = html ? findMediaUrl(html) : null;
+  await cacheSet(key, media ?? { miss: true }, media ? TTL.render : TTL.renderMiss, env.STREAM_CACHE);
+  return media;
 }
 
 // ─── MEDIAFIRE RESOLVER ────────────────────────────────────────────────────
@@ -704,10 +754,9 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         return url ? { url, name: embed.name, isHls: false } : null;
       }
       // No manual extractor for this host (JS-challenge/SPA players like voe,
-      // dsvplay, bysekoze). Render it with Browser Rendering if configured;
-      // the provider CDN checks the referer of its own embed page.
-      const html = await renderPage(embed.url, env, { referer: embed.url });
-      const media = html ? findMediaUrl(html) : null;
+      // dsvplay, bysekoze). Render it with Browser Rendering if configured
+      // (cached per embed); findMediaUrl decodes VOE's blob or a bare src.
+      const media = await resolveViaRender(embed.url, env);
       if (media) return { url: media.url, name: embed.name, isHls: media.isHls, referer: embed.url };
       // Still nothing — falls through to an externalUrl entry below, playable
       // in the user's own client.

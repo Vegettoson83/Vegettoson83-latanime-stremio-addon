@@ -63,6 +63,10 @@ old variant behind:
   produces a dead stream.
 - `unpackPacker` reverses Dean Edwards `eval(function(p,a,c,k,e,d){…})`
   packing — reuse it for any host that ships its config that way.
+- `decodeVoe` reverses VOE's `<script type="application/json">` obfuscation
+  (ported from StreamFlix's `decryptF7`). VOE DDoS-Guards server egress, so
+  `findMediaUrl` only sees the blob via Browser-Rendering output; the render
+  resolve is cached per embed (`resolveViaRender`, `rr:` KV keys, `TTL.render`).
 - `/debug-extract?id=slug:episode` runs every extractor with timings, and
   `/debug-mixdrop?url=` / `/debug-host?url=` probe a single embed — use them
   to diagnose extraction failures on the deployed worker.
