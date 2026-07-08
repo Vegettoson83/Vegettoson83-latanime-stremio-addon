@@ -120,7 +120,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.9.0",
+  version: "4.9.1",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -239,7 +239,7 @@ async function fetchTmdb(animeName: string, tmdbKey: string) {
   try {
     const r = await fetch(
       `${TMDB_BASE}/search/tv?api_key=${tmdbKey}&query=${encodeURIComponent(cleanName)}&language=es-ES`,
-      { headers: { Accept: "application/json" } }
+      { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(6000) }
     );
     if (!r.ok) return null;
     const data: any = await r.json();
@@ -317,6 +317,7 @@ async function searchAnimes(query: string, env?: Env) {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "Referer": `${BASE_URL}/`, "Origin": BASE_URL, "User-Agent": "Mozilla/5.0" },
       body: JSON.stringify({ q: query }),
+      signal: AbortSignal.timeout(8000),
     });
     if (r.ok) {
       const html = await r.text();
@@ -398,6 +399,7 @@ async function extractHexload(embedUrl: string) {
     if (!fileId) return null;
     const embedR = await fetch(embedUrl, {
       headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", "Referer": "https://latanime.org/" },
+      signal: AbortSignal.timeout(8000),
     });
     const cookies = embedR.headers.get("set-cookie") || "";
     const r = await fetch("https://hexload.com/download", {
@@ -409,6 +411,7 @@ async function extractHexload(embedUrl: string) {
         "X-Requested-With": "XMLHttpRequest", "Cookie": cookies,
       },
       body: new URLSearchParams({ op: "download3", id: fileId, ajax: "1", method_free: "1" }).toString(),
+      signal: AbortSignal.timeout(10000),
     });
     const data: any = await r.json();
     if (data.msg === "OK" && data.result?.url) return data.result.url;
@@ -435,6 +438,7 @@ async function extractSavefiles(embedUrl: string) {
       },
       body: `op=embed&file_code=${fileCode}&auto=1&referer=https://savefiles.com/${fileCode}`,
       redirect: "follow",
+      signal: AbortSignal.timeout(12000),
     });
     const html = await dlR.text();
     // Primary: Clappr sources array (verified pattern from friend)
@@ -601,6 +605,7 @@ async function resolveMediafire(mfUrl: string): Promise<string | null> {
         "Referer": "https://www.mediafire.com/",
         "Accept-Language": "es-MX,es;q=0.9",
       },
+      signal: AbortSignal.timeout(10000),
     });
     if (!r.ok) return null;
     const html = await r.text();
@@ -847,11 +852,11 @@ export default {
       if (!embedUrl) return new Response("Missing url", { status: 400 });
       const hdrs = { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", "Referer": "https://latanime.org/", "Origin": "https://latanime.org", "Accept": "text/html,application/xhtml+xml,*/*;q=0.8", "Accept-Language": "es-ES,es;q=0.9" };
       try {
-        const r = await fetch(embedUrl, { headers: hdrs });
+        const r = await fetch(embedUrl, { headers: hdrs, signal: AbortSignal.timeout(10000) });
         const html = await r.text();
         const urls = [...html.matchAll(/["'`](https?:\/\/[^"'`\s]{15,}\.(?:mp4|mkv|m3u8|ts)[^"'`\s]*)/gi)].map((m) => m[1]);
-        return Response.json({ status: r.status, contentType: r.headers.get("content-type"), htmlLen: html.length, foundUrls: urls, htmlSnippet: html.slice(0, 5000) }, { headers: CORS });
-      } catch (e) { return Response.json({ error: String(e) }, { headers: CORS }); }
+        return json({ status: r.status, contentType: r.headers.get("content-type"), htmlLen: html.length, foundUrls: urls, htmlSnippet: html.slice(0, 5000) });
+      } catch (e) { return json({ error: String(e) }); }
     }
 
     if (path === "/debug-extract") {
@@ -920,12 +925,14 @@ export default {
     }
 
     if (path === "/cache-clear") {
+      // Takes the full KV key incl. prefix — live prefixes are catalog:,
+      // meta:, stream: and rr: (the old br: prefix no longer exists).
       const key = url.searchParams.get("key");
       if (key && env.STREAM_CACHE) {
-        await env.STREAM_CACHE.delete(`br:${key}`);
+        await env.STREAM_CACHE.delete(key);
         return json({ cleared: key });
       }
-      return json({ error: "Missing ?key= or no KV binding" });
+      return json({ error: "Missing ?key= (full KV key, e.g. stream:latanime:slug:1) or no KV binding" });
     }
 
     if (path === "/_health") {
@@ -980,7 +987,7 @@ export default {
           const route = forceM3u8 || absUrl.includes(".m3u8") ? "m3u8" : "seg";
           return `${workerBase}/proxy/${route}?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
         };
-        const r = await fetch(m3u8Url, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" } });
+        const r = await fetch(m3u8Url, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" }, signal: AbortSignal.timeout(15000) });
         if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
         const m3u8Text = await r.text();
         const isMaster = m3u8Text.includes("#EXT-X-STREAM-INF");
@@ -1009,6 +1016,8 @@ export default {
       const referer = url.searchParams.get("ref") || "https://latanime.org/";
       if (!segUrl) return new Response("Missing url", { status: 400 });
       try {
+        // deliberately no AbortSignal here: the response body is streamed, and
+        // a timeout signal would abort slow segment downloads mid-stream
         const r = await fetch(segUrl, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" } });
         if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
         return new Response(r.body, { headers: { "Content-Type": r.headers.get("Content-Type") || "video/MP2T", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600" } });
