@@ -120,7 +120,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.9.1",
+  version: "4.9.2",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -380,7 +380,9 @@ async function getMeta(id: string, tmdbKey: string, env?: Env) {
       posterShape: "poster",
       releaseInfo: tmdb?.year || "",
       genres: genres.slice(0, 10),
-      videos: episodes.map((ep) => ({ id: ep.id, title: `Episodio ${ep.number}`, season: 1, episode: ep.number, released: new Date(0).toISOString() })),
+      // no released date — latanime doesn't expose one, and a fake epoch
+      // renders as "1969"/"1970" in the apps
+      videos: episodes.map((ep) => ({ id: ep.id, title: `Episodio ${ep.number}`, season: 1, episode: ep.number })),
     },
   };
 }
@@ -779,12 +781,16 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       // everything else HLS goes through the worker proxy.
       const finalUrl = (isHls && !proxied) ? hlsProxyUrl(streamUrl, hlsReferer) : streamUrl;
       if (!streams.some(s => s.url === finalUrl)) {
+        // title only, never title AND description: stremio-core deserializes
+        // title as a serde alias of description, and serde rejects an object
+        // carrying both as a duplicate field — every such stream is silently
+        // dropped by the new (Rust-core) Android/Web clients. Legacy clients
+        // read title directly.
         const label = `▶ ${name} — Latino`;
         const entry = {
           url: finalUrl,
           name: `Latanime ${isHls ? "HLS" : "MP4"}`,
           title: label,
-          description: label,
           behaviorHints: {
             // worker-proxied and Deno-proxied HLS are served with CORS over
             // https, so the web player can use them; only externally proxied
@@ -812,7 +818,6 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         externalUrl: embed.url,
         name: "Latanime 🌐",
         title: label,
-        description: label,
       });
     }
   }
@@ -926,7 +931,7 @@ export default {
 
     if (path === "/cache-clear") {
       // Takes the full KV key incl. prefix — live prefixes are catalog:,
-      // meta:, stream: and rr: (the old br: prefix no longer exists).
+      // meta:, stream:v2: and rr: (old br: and unversioned stream: are gone).
       const key = url.searchParams.get("key");
       if (key && env.STREAM_CACHE) {
         await env.STREAM_CACHE.delete(key);
@@ -965,11 +970,13 @@ export default {
     const streamM = path.match(/^\/stream\/([^/]+)\/(.+)\.json$/);
     if (streamM) {
       const id = decodeURIComponent(streamM[2]);
-      const cached = await cacheGet(`stream:${id}`, env.STREAM_CACHE);
+      // v2: pre-4.9.2 cached entries carry title+description, which Rust-core
+      // clients drop as invalid — keying past them instead of serving them out
+      const cached = await cacheGet(`stream:v2:${id}`, env.STREAM_CACHE);
       if (cached) return json(cached);
       try {
         const result = await getStreams(id, env, request);
-        if (result.streams.length > 0) await cacheSet(`stream:${id}`, result, TTL.stream, env.STREAM_CACHE);
+        if (result.streams.length > 0) await cacheSet(`stream:v2:${id}`, result, TTL.stream, env.STREAM_CACHE);
         return json(result);
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }

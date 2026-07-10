@@ -19,6 +19,11 @@ spec-compliant (https://github.com/Stremio/stremio-addon-sdk/tree/master/docs):
   endpoints. All JSON responses go through `json()` and carry CORS headers.
 - **ID scheme**: `latanime:{slug}` for series, `latanime:{slug}:{episode}` for
   streams. `idPrefixes: ["latanime:"]` in the manifest depends on this.
+- **Stream objects carry `title` OR `description`, never both**: stremio-core
+  (the Rust core behind current Android + Web) deserializes `title` as a serde
+  alias of `description`, so an object with both fails as a duplicate field and
+  the client silently drops every such stream ("No streams were found" while
+  curl shows a full response). Verified live against web.stremio.com.
 - **Cache**: KV only (`STREAM_CACHE`), never in-memory state — a module-level
   Map previously grew unbounded and caused 1101 crashes. TTLs live in `TTL`.
 - **Time budget**: Worker wall time is 30s; `fetchHtml` holds a hard 25s
