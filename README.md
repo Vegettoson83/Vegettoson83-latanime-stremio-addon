@@ -2,49 +2,46 @@
 
 A Stremio addon for watching anime in Spanish (Latino/Castellano) from latanime.org, running as a Cloudflare Worker.
 
-## Auto-Deploy via GitHub Actions
+## Add to Stremio
 
-Every push to `main` automatically deploys to Cloudflare Workers.
+The deployed addon lives at:
 
-### One-time Setup
-
-#### 1. Get your Cloudflare credentials
-
-- **Account ID**: Go to [dash.cloudflare.com](https://dash.cloudflare.com) → any domain or Workers page → right sidebar shows your Account ID
-- **API Token**: Go to [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) → Create Token → use the **"Edit Cloudflare Workers"** template → Create Token → copy it
-
-#### 2. Add secrets to GitHub
-
-In your GitHub repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
-
-| Secret Name | Value |
-|---|---|
-| `CLOUDFLARE_API_TOKEN` | Your API token from step 1 |
-| `CLOUDFLARE_ACCOUNT_ID` | Your Account ID from step 1 |
-
-#### 3. Push to main
-
-```bash
-git add .
-git commit -m "Initial deploy"
-git push origin main
 ```
-
-GitHub Actions will deploy automatically. Check the **Actions** tab for progress.
-
-#### 4. Add to Stremio
-
-After deploy succeeds, your URL will be:
-```
-https://latanime-stremio.<your-subdomain>.workers.dev
+https://123456.vegettoson83.workers.dev/manifest.json
 ```
 
 In Stremio → **Addons** → **Community Addons** → paste the URL → Install 🎉
 
-## Manual Deploy
+> The Worker's name in the Cloudflare dashboard is `123456`, which is what
+> determines the `workers.dev` URL. If you rename the Worker, the URL changes
+> and every existing Stremio install breaks — update `name` in `wrangler.toml`
+> and this README together if you ever do.
+
+## How it deploys
+
+There is **no GitHub Actions deploy workflow** — adding one would double-deploy.
+
+- **Worker** (`src/index.ts`): deployed by **Cloudflare Workers Builds** (the
+  dashboard Git integration) on every push to `main`.
+- **Fetch proxy** (`deno/fetch.ts`): deployed by **Deno Deploy**'s Git
+  integration (entrypoint pinned by `deno.json`). latanime.org blocks
+  Cloudflare Worker egress, so the Worker relays HTML through this proxy
+  (`FETCH_PROXY_URL` in `wrangler.toml`), and savefiles HLS is resolved and
+  served entirely from Deno's stable IP.
+
+## Manual deploy (emergency only)
 
 ```bash
 npm install
 npx wrangler login
 npx wrangler deploy
 ```
+
+`name` in `wrangler.toml` must stay `123456` (the live Worker) or this creates
+a second Worker at a different URL instead of updating the real one.
+
+## Health checks
+
+- `https://123456.vegettoson83.workers.dev/_health` — version + KV binding
+- `https://123456.vegettoson83.workers.dev/debug` — config (proxy, rendering)
+- `/debug-extract?id=<slug>:<episode>` — runs every extractor with timings
