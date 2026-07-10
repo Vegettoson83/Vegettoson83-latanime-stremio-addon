@@ -122,9 +122,15 @@ const TTL = {
   catalog:  10 * 60,        // 10 min (seconds for KV)
   meta:      2 * 60 * 60,   // 2 hr
   stream:   30 * 60,        // 30 min
-  render:    15 * 60,       // 15 min — a resolved browser-render result (signed
-                            // URLs expire, so keep it under typical token life)
-  renderMiss: 5 * 60,       // 5 min — retry a host that failed to render sooner
+  // Browser Rendering is metered, so cache each render hard — one render per
+  // unique embed, reused for every request until it expires. The ceiling is
+  // the signed-URL lifetime baked into the rendered result (voe tokens, HLS
+  // expires=): cache longer than the token lives and playback 403s. 60 min is
+  // aggressive but under typical token life; push higher only if you accept the
+  // occasional stale re-render. Misses cache 15 min so a dead host isn't
+  // re-rendered (and re-billed) on every request.
+  render:    60 * 60,       // 60 min — resolved browser-render result
+  renderMiss: 15 * 60,      // 15 min — a host that failed to render
 };
 
 async function cacheGet(key: string, kv: KVNamespace | undefined): Promise<unknown> {
@@ -146,7 +152,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.10.0",
+  version: "4.10.1",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
