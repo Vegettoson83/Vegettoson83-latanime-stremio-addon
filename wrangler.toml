@@ -1,4 +1,8 @@
-name = "latanime"
+# Must match the Worker's name in the Cloudflare dashboard — the deployed
+# service is "123456" (https://123456.vegettoson83.workers.dev). A different
+# name here makes a manual `wrangler deploy` create a second Worker at a new
+# URL instead of updating the live one.
+name = "123456"
 main = "src/index.ts"
 compatibility_date = "2026-04-04"
 compatibility_flags = ["nodejs_compat"]
