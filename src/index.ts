@@ -75,6 +75,18 @@ const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
 // episode page HTML (custom post types aren't REST-exposed), also via Deno.
 const AON_BASE = "https://ww3.animeonline.ninja";
 
+// ─── ANIMEFÉNIX ──────────────────────────────────────────────────────────────
+// A second source (animefenix2.tv). Unlike Ninja it's reachable server-side
+// (Cloudflare-fronted but no JS challenge), scraped like latanime:
+//   • /directorio/anime?p={n}&q={query}   — catalog + search (cards → /{slug})
+//   • /{slug}                             — detail (og: title/poster/synopsis)
+//   • /{slug}?id={slug}&load=episodes&start={n} — episode-list HTML fragment
+//   • /ver/{slug}-{ep}                    — embeds inline as redirect.php?id=…
+// ID scheme: af:{slug} series, af:{slug}:{ep} streams. Hosts overlap latanime
+// (mp4upload plays inline; voe/streamtape/uqload are IP-bound or JS-gated →
+// externalUrl so the user's own client resolves them, never a dead stream).
+const AF_BASE = "https://animefenix2.tv";
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "*",
@@ -134,7 +146,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.9.2",
+  version: "4.10.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -145,8 +157,9 @@ const MANIFEST = {
     { type: "series", id: "latanime-airing", name: "Latanime — En Emisión", extra: [] },
     { type: "series", id: "latanime-directory", name: "Latanime — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }, { name: "genre", isRequired: false, options: Object.keys(DIR_FILTERS) }] },
     { type: "series", id: "latanime-peliculas", name: "Latanime — Películas", extra: [{ name: "skip", isRequired: false }] },
+    { type: "series", id: "animefenix-directory", name: "AnimeFénix — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
   ],
-  idPrefixes: ["latanime:"],
+  idPrefixes: ["latanime:", "af:"],
 };
 
 // ─── PROXY LOAD BALANCER ──────────────────────────────────────────────────────
@@ -359,6 +372,7 @@ async function searchAnimes(query: string, env?: Env) {
 }
 
 async function getCatalog(catalogId: string, extra: Record<string, string>, env?: Env) {
+  if (catalogId.startsWith("animefenix-")) return getAfCatalog(catalogId, extra, env);
   if (extra.search?.trim()) return { metas: (await searchAnimes(extra.search.trim(), env)).map(toMetaPreview) };
   if (catalogId === "latanime-airing") return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`, env)).map(toMetaPreview) };
   const page = Math.floor(parseInt(extra.skip || "0", 10) / 30) + 1;
@@ -379,6 +393,7 @@ async function getCatalog(catalogId: string, extra: Record<string, string>, env?
 }
 
 async function getMeta(id: string, tmdbKey: string, env?: Env) {
+  if (id.startsWith("af:")) return getAfMeta(id, tmdbKey, env);
   const slug = id.replace("latanime:", "");
   const html = await fetchHtml(`${BASE_URL}/anime/${slug}`, env);
   const titleM = html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i) || html.match(/<title>(.*?)\s*[—\-|].*?<\/title>/i);
@@ -693,6 +708,7 @@ function parseEpisodeEmbeds(html: string) {
 }
 
 async function getStreams(rawId: string, env: Env, request: Request) {
+  if (rawId.startsWith("af:")) return getAfStreams(rawId, env, request);
   const parts = rawId.replace("latanime:", "").split(":");
   if (parts.length < 2) return { streams: [] };
   const [slug, epNum] = parts;
@@ -855,6 +871,158 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   return { streams };
 }
 
+// ─── ANIMEFÉNIX scrapers ─────────────────────────────────────────────────────
+// Decode the handful of HTML entities that show up in AnimeFénix titles
+// (accented Spanish + the numeric ones). Not a full decoder — just enough.
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+    .replace(/&([a-z]+);/gi, (m, e) => (({
+      amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", hellip: "…",
+      eacute: "é", aacute: "á", iacute: "í", oacute: "ó", uacute: "ú", ntilde: "ñ",
+      Eacute: "É", Aacute: "Á", Iacute: "Í", Oacute: "Ó", Uacute: "Ú", Ntilde: "Ñ",
+      uuml: "ü", Uuml: "Ü", ordf: "ª", ordm: "º",
+    } as Record<string, string>)[e] ?? m));
+}
+
+// AnimeFénix is Cloudflare-fronted but serves content to server IPs (no JS
+// challenge). Race a direct Worker fetch against the Deno relay (allowlisted to
+// animefenix2.tv) and take whichever returns first — no 500-byte floor because
+// the episode-list fragments are legitimately small.
+async function fetchAf(url: string, env?: Env, timeoutMs = 12000): Promise<string> {
+  const proxyBase = env?.FETCH_PROXY_URL?.trim();
+  const pull = async (name: string, r: Promise<Response>) => {
+    const res = await r;
+    if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`);
+    const txt = await res.text();
+    if (!txt) throw new Error(`${name}: empty`);
+    return txt;
+  };
+  const racers: Promise<string>[] = [
+    pull("direct", fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
+  ];
+  if (proxyBase) {
+    racers.push(pull("relay", fetch(`${proxyBase}?url=${encodeURIComponent(url)}`, {
+      headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(timeoutMs),
+    })));
+  }
+  return Promise.any(racers);
+}
+
+// Directory/search/home cards: <a href="/{slug}"><figure>…<img src="{poster}"
+// alt="{title}">…  The trailing <figure> requirement filters out nav links
+// (/directorio, /ver/…, /media) since those aren't card anchors.
+function parseAfCards(html: string) {
+  const results: { id: string; name: string; poster: string }[] = [];
+  const seen = new Set<string>();
+  for (const m of html.matchAll(/<a\s+href="\/([a-z0-9][a-z0-9-]+)"\s*>\s*<figure[\s\S]{0,600}?<img[^>]+src="([^"]+)"[^>]*alt="([^"]*)"/gi)) {
+    const slug = m[1];
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    const poster = m[2].startsWith("http") ? m[2] : `${AF_BASE}${m[2]}`;
+    const name = decodeEntities(m[3]).trim() || slug;
+    results.push({ id: `af:${slug}`, name, poster });
+  }
+  return results.slice(0, 100);
+}
+
+async function getAfCatalog(catalogId: string, extra: Record<string, string>, env?: Env) {
+  if (extra.search?.trim()) {
+    return { metas: parseAfCards(await fetchAf(`${AF_BASE}/directorio/anime?q=${encodeURIComponent(extra.search.trim())}`, env)).map(toMetaPreview) };
+  }
+  const page = Math.floor(parseInt(extra.skip || "0", 10) / 24) + 1;
+  return { metas: parseAfCards(await fetchAf(`${AF_BASE}/directorio/anime?p=${page}`, env)).map(toMetaPreview) };
+}
+
+async function getAfMeta(id: string, tmdbKey: string, env?: Env) {
+  const slug = id.replace("af:", "");
+  const html = await fetchAf(`${AF_BASE}/${slug}`, env);
+  const ogTitle = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i)?.[1]
+    || html.match(/<title>\s*(?:Ver\s+)?([\s\S]*?)\s*[-|]\s*AnimeF[eé]nix/i)?.[1] || slug;
+  const name = decodeEntities(ogTitle).replace(/^Ver\s+/i, "").trim();
+  const poster = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i)?.[1] || "";
+  const description = decodeEntities(html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/i)?.[1] || "").trim();
+
+  // Episode list is an infinite-scroll HTML fragment: ?id={slug}&load=episodes
+  // &start={n}. Each call returns from episode start+1 to the end; paginate by
+  // the count seen so far until no new episodes appear (cap the loop).
+  const episodes: { id: string; number: number }[] = [];
+  const seen = new Set<number>();
+  for (let pageN = 0; pageN < 25; pageN++) {
+    let frag: string;
+    try { frag = await fetchAf(`${AF_BASE}/${slug}?id=${encodeURIComponent(slug)}&load=episodes&start=${seen.size}`, env); }
+    catch { break; }
+    const before = seen.size;
+    for (const em of frag.matchAll(/href="\/ver\/([a-z0-9-]+)-(\d+(?:\.\d+)?)"/gi)) {
+      if (em[1] !== slug) continue;
+      const num = parseFloat(em[2]);
+      if (seen.has(num)) continue;
+      seen.add(num);
+      episodes.push({ id: `af:${slug}:${num}`, number: num });
+    }
+    if (seen.size === before) break;
+  }
+  episodes.sort((a, b) => a.number - b.number);
+
+  const tmdb = await fetchTmdb(name, tmdbKey);
+  return {
+    meta: {
+      id, type: "series", name,
+      poster: tmdb?.poster || poster,
+      background: tmdb?.background || poster,
+      description: tmdb?.description || description,
+      posterShape: "poster",
+      releaseInfo: tmdb?.year || "",
+      // no released date — AnimeFénix exposes none, and a fake epoch renders
+      // as "1969" in the apps (see the latanime videos note)
+      videos: episodes.map((ep) => ({ id: ep.id, title: `Episodio ${ep.number}`, season: 1, episode: ep.number })),
+    },
+  };
+}
+
+// Streamtape / uqload mint IP-bound signed URLs and voe is JS-gated, so those
+// stay externalUrl (the user's own client resolves them). mp4upload yields a
+// plain, cross-IP-playable MP4 — the one host worth extracting inline here.
+async function getAfStreams(rawId: string, env: Env, request: Request) {
+  const parts = rawId.replace("af:", "").split(":");
+  if (parts.length < 2) return { streams: [] };
+  const [slug, ep] = parts;
+  const html = await fetchAf(`${AF_BASE}/ver/${slug}-${ep}`, env);
+
+  // Real video hosts only — the page also lists ad-redirector layers
+  // (re.ironhentai.com/face.php etc.) that are not streams.
+  const KNOWN_HOSTS = /(mp4upload|voe|streamtape|uqload|streamwish|filemoon|filelions|vidhide|luluvid|doodstream|dood|okru|ok\.ru|yourupload|sendvid|mixdrop|savefiles|streamhls|hexload|mega\.nz|pixeldrain)/i;
+  const embeds: string[] = [];
+  const seenEmbed = new Set<string>();
+  for (const m of html.matchAll(/redirect\.php\?id=(https?:\/\/[^"'&\s<>]+)/gi)) {
+    let u = m[1];
+    try { u = decodeURIComponent(u); } catch { }
+    if (!KNOWN_HOSTS.test(u) || seenEmbed.has(u)) continue;
+    seenEmbed.add(u);
+    embeds.push(u);
+  }
+  if (embeds.length === 0) return { streams: [] };
+
+  const streams: any[] = [];
+  for (const embed of embeds) {
+    const host = (embed.match(/https?:\/\/(?:www\.)?([a-z0-9-]+\.[a-z.]+)/i)?.[1] || "host").split(".")[0];
+    if (embed.includes("mp4upload.com")) {
+      const url = await extractMp4upload(embed);
+      if (url) {
+        const label = `▶ mp4upload — AnimeFénix`;
+        streams.push({
+          url, name: "AnimeFénix MP4", title: label,
+          behaviorHints: { notWebReady: false, filename: `${slug}-e${ep}.mp4`, bingeGroup: "animefenix-mp4upload" },
+        });
+        continue;
+      }
+    }
+    // IP-bound or JS-gated host → externalUrl, playable in the user's own client
+    streams.push({ externalUrl: embed, name: "AnimeFénix 🌐", title: `🌐 ${host} — AnimeFénix` });
+  }
+  return { streams };
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -939,6 +1107,31 @@ export default {
         });
       } catch (e) {
         return json({ id, totalMs: Date.now() - t0, episodeFetch: "FAILED", error: String(e).slice(0, 300) });
+      }
+    }
+
+    if (path === "/debug-af") {
+      // Exercises the AnimeFénix scrapers end to end for live validation.
+      //   /debug-af                  → catalog sample
+      //   /debug-af?id=slug          → meta (episode count)
+      //   /debug-af?id=slug:episode  → stream embeds + extraction
+      const id = url.searchParams.get("id");
+      const t0 = Date.now();
+      try {
+        if (id && id.includes(":")) {
+          const result = await getAfStreams(`af:${id}`, env, request);
+          const html = await fetchAf(`${AF_BASE}/ver/${id.replace(":", "-")}`, env);
+          const embeds = [...html.matchAll(/redirect\.php\?id=(https?:\/\/[^"'&\s<>]+)/gi)].map((m) => { try { return decodeURIComponent(m[1]); } catch { return m[1]; } });
+          return json({ id, ms: Date.now() - t0, embeds: [...new Set(embeds)], streams: result.streams });
+        }
+        if (id) {
+          const meta = await getAfMeta(`af:${id}`, (env.TMDB_KEY || "").trim(), env);
+          return json({ id, ms: Date.now() - t0, name: meta.meta.name, poster: meta.meta.poster, episodes: meta.meta.videos.length, first: meta.meta.videos.slice(0, 3) });
+        }
+        const cat = await getAfCatalog("animefenix-directory", {}, env);
+        return json({ ms: Date.now() - t0, count: cat.metas.length, sample: cat.metas.slice(0, 5) });
+      } catch (e) {
+        return json({ id, ms: Date.now() - t0, error: String(e).slice(0, 300) });
       }
     }
 
