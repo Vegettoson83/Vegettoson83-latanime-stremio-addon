@@ -61,6 +61,20 @@ for (let y = new Date().getFullYear(); y >= 2000; y--) DIR_FILTERS[String(y)] = 
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
 
+// ─── ANIME ONLINE NINJA ──────────────────────────────────────────────────────
+// A DooPlay WordPress site behind a Cloudflare IP-reputation challenge:
+// datacenter IPs (the Worker) get "Just a moment", clean IPs (the Deno relay)
+// pass — so every AON call is relayed through FETCH_PROXY_URL. Its public REST
+// API gives structured JSON instead of HTML scraping:
+//   • GET /wp-json/dooplay/glossary            — full A–Z catalog listing
+//   • GET /wp-json/dooplay/search?keyword=…    — search
+//   • GET /wp-json/dooplayer/v1/post/{id}      — resolves a player option to its
+//     embed URL (the "reproductor" endpoint) → reuse the host extractors below
+//   • GET /wp-json/wp/v2/genres | dtyear | …   — taxonomies for filters
+// Episode lists + per-episode player-option ids still come from the anime/
+// episode page HTML (custom post types aren't REST-exposed), also via Deno.
+const AON_BASE = "https://ww3.animeonline.ninja";
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "*",
@@ -228,6 +242,22 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
   } finally {
     clearTimeout(globalTimer);
   }
+}
+
+// Relay an Anime Online Ninja URL (API JSON or page HTML) through the Deno
+// proxy — the Worker's own egress is Cloudflare-challenged. Returns raw text;
+// callers JSON.parse API responses. No 500-byte floor (search hits can be
+// small) and no direct-fetch race (the direct leg is always challenged).
+async function fetchAon(pathOrUrl: string, env?: Env, timeoutMs = 12000): Promise<string> {
+  const target = pathOrUrl.startsWith("http") ? pathOrUrl : `${AON_BASE}${pathOrUrl}`;
+  const proxyBase = env?.FETCH_PROXY_URL?.trim();
+  if (!proxyBase) throw new Error("AON: FETCH_PROXY_URL not set");
+  const r = await fetch(`${proxyBase}?url=${encodeURIComponent(target)}`, {
+    headers: { "User-Agent": CHROME_UA },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!r.ok) throw new Error(`AON proxy HTTP ${r.status}`);
+  return r.text();
 }
 
 async function fetchTmdb(animeName: string, tmdbKey: string) {
@@ -910,6 +940,45 @@ export default {
       } catch (e) {
         return json({ id, totalMs: Date.now() - t0, episodeFetch: "FAILED", error: String(e).slice(0, 300) });
       }
+    }
+
+    if (path === "/debug-aon") {
+      // Probes Anime Online Ninja's DooPlay REST API + a page through the Deno
+      // relay, dumping raw response shapes so the aon: parsers can be written
+      // against real data. Needs the Deno proxy's allowlist to include
+      // animeonline.ninja (deno/fetch.ts).
+      //   /debug-aon                → glossary + genres + search(naruto)
+      //   /debug-aon?q=one+piece    → search only
+      //   /debug-aon?player=123     → dooplayer/v1/post/{id}
+      //   /debug-aon?url=/anime/…/  → raw text of any AON path (HTML/JSON)
+      const q = url.searchParams.get("q");
+      const player = url.searchParams.get("player");
+      const raw = url.searchParams.get("url");
+      const out: Record<string, unknown> = {};
+      const grab = async (label: string, p: string, json = true) => {
+        const t = Date.now();
+        try {
+          const txt = await fetchAon(p, env);
+          out[label] = {
+            ms: Date.now() - t,
+            len: txt.length,
+            data: json ? JSON.parse(txt) : txt.slice(0, 4000),
+          };
+        } catch (e) {
+          out[label] = { ms: Date.now() - t, error: String(e).slice(0, 200), snippet: undefined };
+          // on JSON parse failure, keep a text snippet to eyeball
+          try { out[label] = { ...(out[label] as object), snippet: (await fetchAon(p, env)).slice(0, 1500) }; } catch { }
+        }
+      };
+      if (raw) { await grab("url", raw, false); return json(out); }
+      if (player) { await grab("player", `/wp-json/dooplayer/v1/post/${encodeURIComponent(player)}`); return json(out); }
+      if (q) { await grab("search", `/wp-json/dooplay/search?keyword=${encodeURIComponent(q)}`); return json(out); }
+      await Promise.all([
+        grab("glossary", `/wp-json/dooplay/glossary`),
+        grab("genres", `/wp-json/wp/v2/genres?per_page=5&_fields=id,name,slug,count`),
+        grab("search", `/wp-json/dooplay/search?keyword=naruto`),
+      ]);
+      return json(out);
     }
 
     if (path === "/debug-savefiles") {
