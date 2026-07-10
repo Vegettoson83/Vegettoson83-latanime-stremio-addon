@@ -62,17 +62,23 @@ const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
 
 // ─── ANIME ONLINE NINJA ──────────────────────────────────────────────────────
-// A DooPlay WordPress site behind a Cloudflare IP-reputation challenge:
-// datacenter IPs (the Worker) get "Just a moment", clean IPs (the Deno relay)
-// pass — so every AON call is relayed through FETCH_PROXY_URL. Its public REST
-// API gives structured JSON instead of HTML scraping:
+// A DooPlay WordPress site behind a Cloudflare *managed JS challenge* ("Just a
+// moment…", cType:'managed') applied site-wide — every path, down to
+// robots.txt, returns the interstitial with HTTP 403. This is NOT the
+// IP-reputation gate the phase-1 groundwork assumed: the Deno relay does NOT
+// clear it (verified — its clean IP gets the same 403 challenge as the Worker).
+// A managed JS+Turnstile challenge can only be cleared by a real browser, so
+// AON fetches escalate to Cloudflare Browser Rendering (renderPage) when the
+// relay comes back challenged. Requires CF_ACCOUNT_ID + CF_API_TOKEN; without
+// them AON is unreachable and fetchAon throws a labelled error.
+// The public REST API gives structured JSON instead of HTML scraping:
 //   • GET /wp-json/dooplay/glossary            — full A–Z catalog listing
 //   • GET /wp-json/dooplay/search?keyword=…    — search
 //   • GET /wp-json/dooplayer/v1/post/{id}      — resolves a player option to its
 //     embed URL (the "reproductor" endpoint) → reuse the host extractors below
 //   • GET /wp-json/wp/v2/genres | dtyear | …   — taxonomies for filters
 // Episode lists + per-episode player-option ids still come from the anime/
-// episode page HTML (custom post types aren't REST-exposed), also via Deno.
+// episode page HTML (custom post types aren't REST-exposed).
 const AON_BASE = "https://ww3.animeonline.ninja";
 
 // ─── ANIMEFÉNIX ──────────────────────────────────────────────────────────────
@@ -152,7 +158,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.10.1",
+  version: "4.10.2",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -263,20 +269,66 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
   }
 }
 
-// Relay an Anime Online Ninja URL (API JSON or page HTML) through the Deno
-// proxy — the Worker's own egress is Cloudflare-challenged. Returns raw text;
-// callers JSON.parse API responses. No 500-byte floor (search hits can be
-// small) and no direct-fetch race (the direct leg is always challenged).
+// A response is Cloudflare's managed-challenge interstitial, not real content.
+function isCfChallenge(body: string): boolean {
+  return /<title>Just a moment|_cf_chl_opt|__cf_chl_|challenge-platform|cf-browser-verification/i.test(body);
+}
+
+// Cloudflare Browser Rendering navigates a JSON endpoint with Chrome, which
+// shows the raw body inside its JSON viewer (`<pre>…</pre>`); pull that back
+// out. For an HTML page the rendered DOM is already what callers want, so fall
+// through to the whole document.
+function unwrapRenderedText(html: string): string {
+  const pre = html.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+  const raw = pre ? pre[1] : html;
+  return raw
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&nbsp;/g, " ");
+}
+
+// Fetch an Anime Online Ninja URL (API JSON or page HTML). The relay is tried
+// first (cheap), but AON serves a managed JS challenge site-wide that the relay
+// cannot clear, so a challenged response escalates to Browser Rendering — the
+// only server-side path that solves it. Returns raw text; callers JSON.parse
+// API responses. No 500-byte floor (search hits can be small).
 async function fetchAon(pathOrUrl: string, env?: Env, timeoutMs = 12000): Promise<string> {
   const target = pathOrUrl.startsWith("http") ? pathOrUrl : `${AON_BASE}${pathOrUrl}`;
+
+  // 1) Deno relay — a stable non-Cloudflare egress. Kept as the cheap first
+  //    leg in case AON ever drops the challenge; today it comes back challenged.
+  let relayBody: string | null = null;
   const proxyBase = env?.FETCH_PROXY_URL?.trim();
-  if (!proxyBase) throw new Error("AON: FETCH_PROXY_URL not set");
-  const r = await fetch(`${proxyBase}?url=${encodeURIComponent(target)}`, {
-    headers: { "User-Agent": CHROME_UA },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!r.ok) throw new Error(`AON proxy HTTP ${r.status}`);
-  return r.text();
+  if (proxyBase) {
+    try {
+      const r = await fetch(`${proxyBase}?url=${encodeURIComponent(target)}`, {
+        headers: { "User-Agent": CHROME_UA },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const body = await r.text();
+      if (r.ok && !isCfChallenge(body)) return body;
+      relayBody = body;
+    } catch { /* fall through to Browser Rendering */ }
+  }
+
+  // 2) Managed challenge (or relay unavailable) — clear it with a real browser.
+  //    "networkidle0" so the interstitial's JS finishes solving and navigates to
+  //    the real content before we read the DOM; "domcontentloaded" would capture
+  //    the "Just a moment…" page itself (isCfChallenge would then reject it).
+  if (env && browserRenderingReady(env)) {
+    const rendered = await renderPage(target, env, {
+      referer: `${AON_BASE}/`,
+      wait: "networkidle0",
+      timeoutMs: Math.max(timeoutMs, 22000),
+    });
+    if (rendered && !isCfChallenge(rendered)) return unwrapRenderedText(rendered);
+  }
+
+  if (relayBody && isCfChallenge(relayBody)) {
+    throw new Error(
+      "AON: Cloudflare managed challenge not cleared — set CF_ACCOUNT_ID/CF_API_TOKEN so fetchAon can escalate to Browser Rendering",
+    );
+  }
+  throw new Error("AON: FETCH_PROXY_URL not set and Browser Rendering unavailable");
 }
 
 async function fetchTmdb(animeName: string, tmdbKey: string) {
@@ -1143,9 +1195,10 @@ export default {
 
     if (path === "/debug-aon") {
       // Probes Anime Online Ninja's DooPlay REST API + a page through the Deno
-      // relay, dumping raw response shapes so the aon: parsers can be written
-      // against real data. Needs the Deno proxy's allowlist to include
-      // animeonline.ninja (deno/fetch.ts).
+      // relay + Browser Rendering, dumping raw response shapes so the aon:
+      // parsers can be written against real data. AON's managed JS challenge
+      // means fetchAon only succeeds when CF_ACCOUNT_ID/CF_API_TOKEN are set
+      // (Browser Rendering); the Deno relay alone returns the 403 challenge.
       //   /debug-aon                → glossary + genres + search(naruto)
       //   /debug-aon?q=one+piece    → search only
       //   /debug-aon?player=123     → dooplayer/v1/post/{id}
