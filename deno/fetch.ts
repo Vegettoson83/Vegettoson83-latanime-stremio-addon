@@ -55,7 +55,12 @@ async function handleFetch(target: string): Promise<Response> {
   } catch {
     return jsonError("invalid url", 400);
   }
-  if (u.protocol !== "https:" || !/(^|\.)latanime\.org$/i.test(u.hostname)) {
+  // Allowlist: latanime.org (HTML relay) and animeonline.ninja (DooPlay
+  // WordPress site — its public REST API + pages). Both block Cloudflare
+  // Worker egress; animeonline.ninja specifically gates datacenter IPs behind
+  // a Cloudflare "Just a moment" challenge that Deno's clean IP passes, so the
+  // Worker relays every AON call through here.
+  if (u.protocol !== "https:" || !/(^|\.)(latanime\.org|animeonline\.ninja)$/i.test(u.hostname)) {
     return jsonError("host not allowed", 403);
   }
   try {
