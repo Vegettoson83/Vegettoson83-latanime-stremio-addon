@@ -1103,9 +1103,18 @@ export default {
       const testUrl = url.searchParams.get("url");
       if (!testUrl) return json({ error: "Missing ?url=" });
       const t0 = Date.now();
-      const html = await renderPage(testUrl, env, { referer: url.searchParams.get("ref") || "https://latanime.org/" });
+      const wait = (url.searchParams.get("wait") as "load" | "domcontentloaded" | "networkidle0" | null) || undefined;
+      const html = await renderPage(testUrl, env, { referer: url.searchParams.get("ref") || "https://latanime.org/", wait });
       if (html == null) return json({ error: "render returned null — CF_ACCOUNT_ID/CF_API_TOKEN unset or render failed", ms: Date.now() - t0 });
-      return json({ testUrl, htmlLen: html.length, media: findMediaUrl(html), ms: Date.now() - t0 });
+      return json({
+        testUrl,
+        wait: wait || "networkidle0",
+        htmlLen: html.length,
+        isChallenge: isCfChallenge(html),
+        media: findMediaUrl(html),
+        snippet: html.slice(0, 600),
+        ms: Date.now() - t0,
+      });
     }
 
     if (path === "/debug-host") {
