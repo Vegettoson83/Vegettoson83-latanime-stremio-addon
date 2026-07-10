@@ -26,7 +26,7 @@ FETCH_PROXY_URL = "https://vegettoson83-latanime-stremi.vegettoson83.deno.net/fe
 # token as a secret:  wrangler secret put CF_API_TOKEN
 # Token needs the "Browser Rendering: Edit" permission. Leave blank to keep
 # extraction fully manual (no browser, no cost).
-CF_ACCOUNT_ID = ""
+CF_ACCOUNT_ID = "d955dcf5145dca9d036b7f70caae0f86"
 
 [[kv_namespaces]]
 binding     = "STREAM_CACHE"
