@@ -612,20 +612,25 @@ function browserRenderingReady(env: Env): boolean {
   return !!(env.CF_ACCOUNT_ID || "").trim() && !!(env.CF_API_TOKEN || "").trim();
 }
 
-async function renderPage(url: string, env: Env, opts: { referer?: string; wait?: "load" | "domcontentloaded" | "networkidle0"; timeoutMs?: number } = {}): Promise<string | null> {
+async function renderPage(url: string, env: Env, opts: { referer?: string; wait?: "load" | "domcontentloaded" | "networkidle0"; timeoutMs?: number; dwellMs?: number } = {}): Promise<string | null> {
   const acct = (env.CF_ACCOUNT_ID || "").trim();
   const token = (env.CF_API_TOKEN || "").trim();
   if (!acct || !token) return null;
   const timeoutMs = opts.timeoutMs ?? 20000;
   try {
+    const body: Record<string, unknown> = {
+      url,
+      setExtraHTTPHeaders: { Referer: opts.referer ?? "https://latanime.org/" },
+      gotoOptions: { waitUntil: opts.wait ?? "networkidle0", timeout: Math.max(6000, timeoutMs - 3000) },
+    };
+    // Extra dwell after navigation so a Cloudflare managed challenge has time to
+    // run its JS, POST the Turnstile token and redirect to the real content
+    // (networkidle0 fires on the interstitial itself, before it self-solves).
+    if (opts.dwellMs && opts.dwellMs > 0) body.waitForTimeout = Math.min(opts.dwellMs, 25000);
     const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acct}/browser-rendering/content`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-      body: JSON.stringify({
-        url,
-        setExtraHTTPHeaders: { Referer: opts.referer ?? "https://latanime.org/" },
-        gotoOptions: { waitUntil: opts.wait ?? "networkidle0", timeout: Math.max(6000, timeoutMs - 3000) },
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!r.ok) return null;
@@ -1104,7 +1109,8 @@ export default {
       if (!testUrl) return json({ error: "Missing ?url=" });
       const t0 = Date.now();
       const wait = (url.searchParams.get("wait") as "load" | "domcontentloaded" | "networkidle0" | null) || undefined;
-      const html = await renderPage(testUrl, env, { referer: url.searchParams.get("ref") || "https://latanime.org/", wait });
+      const dwellMs = Number(url.searchParams.get("dwell")) || undefined;
+      const html = await renderPage(testUrl, env, { referer: url.searchParams.get("ref") || "https://latanime.org/", wait, dwellMs, timeoutMs: dwellMs ? 28000 : undefined });
       if (html == null) return json({ error: "render returned null — CF_ACCOUNT_ID/CF_API_TOKEN unset or render failed", ms: Date.now() - t0 });
       return json({
         testUrl,
