@@ -158,7 +158,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.10.3",
+  version: "4.10.4",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -888,6 +888,22 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     if (/mi+xdrop/.test(embed.url)) {
       continue;
     }
+    // StreamWish mints IP-bound HLS tokens — the premilkyway CDN 403s a fetch
+    // from any IP other than the one that resolved the /e/ embed (verified:
+    // same-IP extract+play = 200, cross-IP = 403). Same class as savefiles, so
+    // resolve AND serve it entirely on Deno's one stable IP; the Worker only
+    // points Stremio at ${denoBase}/streamwish. Never extract it Worker-side —
+    // that produces a dead stream. Without a Deno base it falls through to an
+    // externalUrl (the user's own client resolves it from their IP).
+    if (/streamwish|embedwish|wishfast|sfastwish|swishsrv|streamwis/i.test(embed.url)) {
+      if (denoBase) {
+        tasks.push(Promise.resolve({
+          url: `${denoBase}/streamwish?url=${encodeURIComponent(embed.url)}`,
+          name: embed.name, isHls: true, proxied: true,
+        }));
+      }
+      continue;
+    }
     tasks.push((async () => {
       if (embed.url.includes("hexload.com")) {
         const url = await extractHexload(embed.url);
@@ -896,10 +912,6 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       if (embed.url.includes("mp4upload.com")) {
         const url = await extractMp4upload(embed.url);
         return url ? { url, name: embed.name, isHls: false } : null;
-      }
-      if (/streamwish|embedwish|wishfast|sfastwish|swishsrv|streamwis/i.test(embed.url)) {
-        const url = await extractStreamwish(embed.url);
-        return url ? { url, name: embed.name, isHls: true, referer: embed.url } : null;
       }
       // No manual extractor for this host (JS-challenge/SPA players like voe,
       // dsvplay, bysekoze). Render it with Browser Rendering if configured
@@ -1291,17 +1303,18 @@ export default {
     }
 
     if (path === "/debug-streamwish") {
-      // Verify extractStreamwish from the Worker's own egress.
+      // Verify StreamWish unpacking. NOTE: the recovered m3u8 is IP-bound, so
+      // this Worker-side streamUrl only plays from the extracting IP — real
+      // playback goes through the Deno resolver (denoUrl) that keeps one IP for
+      // extraction + segments. This endpoint just confirms the unpack works.
       //   /debug-streamwish?url=https://streamwish.top/e/XXXX
       const testUrl = url.searchParams.get("url");
       if (!testUrl) return json({ error: "Missing ?url= (a streamwish /e/ or /f/ embed)" });
       const t0 = Date.now();
       const streamUrl = await extractStreamwish(testUrl);
-      const workerBase = new URL(request.url).origin;
-      const proxyUrl = streamUrl
-        ? `${workerBase}/proxy/m3u8?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent(testUrl)}`
-        : null;
-      return json({ testUrl, streamUrl, proxyUrl, workerBase, ms: Date.now() - t0 });
+      const denoBase = (env.FETCH_PROXY_URL || "").trim().replace(/\/fetch\/?$/, "").replace(/\/$/, "");
+      const denoUrl = denoBase ? `${denoBase}/streamwish?url=${encodeURIComponent(testUrl)}` : null;
+      return json({ testUrl, unpackedM3u8: streamUrl, denoUrl, ipBound: true, ms: Date.now() - t0 });
     }
 
     if (path === "/debug-mixdrop") {
