@@ -1290,6 +1290,20 @@ export default {
       return json({ code, streamUrl, proxyUrl, ms: Date.now() - t0 });
     }
 
+    if (path === "/debug-streamwish") {
+      // Verify extractStreamwish from the Worker's own egress.
+      //   /debug-streamwish?url=https://streamwish.top/e/XXXX
+      const testUrl = url.searchParams.get("url");
+      if (!testUrl) return json({ error: "Missing ?url= (a streamwish /e/ or /f/ embed)" });
+      const t0 = Date.now();
+      const streamUrl = await extractStreamwish(testUrl);
+      const workerBase = new URL(request.url).origin;
+      const proxyUrl = streamUrl
+        ? `${workerBase}/proxy/m3u8?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent(testUrl)}`
+        : null;
+      return json({ testUrl, streamUrl, proxyUrl, workerBase, ms: Date.now() - t0 });
+    }
+
     if (path === "/debug-mixdrop") {
       const testUrl = url.searchParams.get("url");
       if (!testUrl) return json({ error: "Missing ?url=" });
