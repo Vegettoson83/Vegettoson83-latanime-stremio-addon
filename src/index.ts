@@ -158,7 +158,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.10.2",
+  version: "4.10.3",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -599,6 +599,34 @@ async function extractMixdrop(embedUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
+// StreamWish (and its rotating aliases — streamwish.to/.top/.com, embedwish,
+// wishfast, sfastwish, …) ships its HLS master inside the same p.a.c.k.e.r
+// block. The recovered config holds links={"hls2":"…/master.m3u8?…"} (and a
+// `file:` fallback). The token is time-windowed, not IP- or referer-locked
+// (verified: the master plays with no referer from a fresh IP), so the worker
+// serves it through the normal /proxy/m3u8 path. Used by every source that
+// embeds StreamWish (latanime, animefenix, Anime Online Ninja).
+async function extractStreamwish(embedUrl: string): Promise<string | null> {
+  try {
+    // Normalise the file/download page to the /e/ embed that carries the packer.
+    const embed = embedUrl.replace(/\/(?:f|d|v)\/([a-z0-9]+)/i, "/e/$1");
+    const origin = (() => { try { return new URL(embed).origin; } catch { return "https://streamwish.top"; } })();
+    const r = await fetch(embed, {
+      headers: { "User-Agent": CHROME_UA, "Referer": `${origin}/` },
+      redirect: "follow",
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) return null;
+    const html = await r.text();
+    const unpacked = unpackPacker(html) || html;
+    const m =
+      unpacked.match(/"hls\d*"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
+      unpacked.match(/file\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
+      unpacked.match(/https?:\/\/[^"'\\ ]+\.m3u8[^"'\\ ]*/);
+    return m ? (m[1] || m[0]) : null;
+  } catch { return null; }
+}
+
 
 // ─── CLOUDFLARE BROWSER RENDERING (optional) ───────────────────────────────
 // Renders a page with a real browser on Cloudflare's edge via the REST API —
@@ -868,6 +896,10 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       if (embed.url.includes("mp4upload.com")) {
         const url = await extractMp4upload(embed.url);
         return url ? { url, name: embed.name, isHls: false } : null;
+      }
+      if (/streamwish|embedwish|wishfast|sfastwish|swishsrv|streamwis/i.test(embed.url)) {
+        const url = await extractStreamwish(embed.url);
+        return url ? { url, name: embed.name, isHls: true, referer: embed.url } : null;
       }
       // No manual extractor for this host (JS-challenge/SPA players like voe,
       // dsvplay, bysekoze). Render it with Browser Rendering if configured
@@ -1165,6 +1197,7 @@ export default {
             if (e.url.includes("mp4upload.com")) return tryX(`embed:${e.name}`, () => extractMp4upload(e.url));
             if (e.url.includes("savefiles.com") || e.url.includes("streamhls.to")) return tryX(`embed:${e.name}`, () => extractSavefiles(e.url));
             if (/mi+xdrop/.test(e.url)) return tryX(`embed:${e.name}`, () => extractMixdrop(e.url));
+            if (/streamwish|embedwish|wishfast|sfastwish|swishsrv|streamwis/i.test(e.url)) return tryX(`embed:${e.name}`, () => extractStreamwish(e.url));
             return tryX(`render:${e.name}`, async () => {
               const h = await renderPage(e.url, env, { referer: e.url });
               return h ? (findMediaUrl(h)?.url ?? null) : null;
