@@ -56,8 +56,12 @@ async function handleFetch(target: string): Promise<Response> {
     return jsonError("invalid url", 400);
   }
   // Allowlist: latanime.org (HTML relay), animeonline.ninja (DooPlay REST +
-  // pages) and animefenix2.tv (second scrape source). All three block or
-  // throttle Cloudflare Worker egress; this relays them from Deno's IP.
+  // pages) and animefenix2.tv (second scrape source). latanime/animefenix block
+  // or throttle Cloudflare Worker egress but pass from Deno's clean IP.
+  // animeonline.ninja is different: it runs a site-wide managed JS challenge
+  // that this relay CANNOT clear (Deno gets the same 403 "Just a moment"), so
+  // the Worker escalates AON to Browser Rendering; the relay stays allowlisted
+  // only as the cheap first attempt in case AON ever drops the challenge.
   if (u.protocol !== "https:" || !/(^|\.)(latanime\.org|animeonline\.ninja|animefenix2\.tv)$/i.test(u.hostname)) {
     return jsonError("host not allowed", 403);
   }
@@ -82,9 +86,78 @@ async function handleFetch(target: string): Promise<Response> {
   }
 }
 
-// ─── savefiles / streamhls HLS ──────────────────────────────────────────────
+// ─── savefiles / streamhls / streamwish HLS ─────────────────────────────────
+// premilkyway.com is StreamWish's HLS CDN (rotates over time — update when
+// StreamWish moves CDN, same as any volatile host). Its playlist/segment tokens
+// are IP-bound, so they must be fetched from this same Deno IP that resolved the
+// embed — the Worker cannot proxy them (its egress IP differs → 403).
 function hlsHostAllowed(host: string): boolean {
-  return /(^|\.)(savefiles\.com|streamhls\.to)$/i.test(host);
+  return /(^|\.)(savefiles\.com|streamhls\.to|premilkyway\.com)$/i.test(host);
+}
+
+const STREAMWISH_REFERER = "https://streamwish.top/";
+
+// Dean Edwards p.a.c.k.e.r unpacker (ported from the Worker) — StreamWish ships
+// its HLS master inside an eval(function(p,a,c,k,e,d){…}) block.
+function unpackPacker(source: string): string | null {
+  const m = source.match(/}\s*\(\s*'(.*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'(.*?)'\.split\('\|'\)/s);
+  if (!m) return null;
+  const base = parseInt(m[2], 10);
+  const count = parseInt(m[3], 10);
+  const words = m[4].split("|");
+  const payload = m[1].replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+  const encode = (n: number): string =>
+    (n < base ? "" : encode(Math.floor(n / base))) +
+    ((n = n % base) > 35 ? String.fromCharCode(n + 29) : n.toString(36));
+  const dict: Record<string, string> = {};
+  for (let i = count - 1; i >= 0; i--) dict[encode(i)] = words[i] || dict[encode(i)] || encode(i);
+  return payload.replace(/\b\w+\b/g, (w) => dict[w] || w);
+}
+
+// Resolve a StreamWish /e/ embed to its HLS master (token bound to this Deno IP).
+async function resolveStreamwish(embedUrl: string): Promise<string | null> {
+  const embed = embedUrl.replace(/\/(?:f|d|v)\/([a-z0-9]+)/i, "/e/$1");
+  const origin = (() => { try { return new URL(embed).origin; } catch { return "https://streamwish.top"; } })();
+  try {
+    const r = await fetch(embed, {
+      headers: { "User-Agent": CHROME_UA, "Referer": `${origin}/` },
+      redirect: "follow",
+      signal: AbortSignal.timeout(11000),
+    });
+    if (!r.ok) return null;
+    const html = await r.text();
+    const unpacked = unpackPacker(html) || html;
+    const m =
+      unpacked.match(/"hls\d*"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
+      unpacked.match(/file\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
+      unpacked.match(/https?:\/\/[^"'\\ ]+\.m3u8[^"'\\ ]*/);
+    return m ? (m[1] || m[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
+// GET /streamwish?url=<embed> → resolve + serve the rewritten master playlist,
+// every variant/segment re-fetched through /hls on this same Deno IP.
+async function handleStreamwish(embedUrl: string, selfBase: string): Promise<Response> {
+  let ok = false;
+  try { ok = /streamwish|embedwish|wishfast|sfastwish|swishsrv|streamwis/i.test(new URL(embedUrl).hostname); } catch { /* invalid */ }
+  if (!ok) return jsonError("host not allowed", 403);
+  const master = await resolveStreamwish(embedUrl);
+  if (!master) return jsonError("could not resolve streamwish embed", 502);
+  try {
+    const r = await fetch(master, {
+      headers: { "User-Agent": CHROME_UA, "Referer": STREAMWISH_REFERER, "Origin": "https://streamwish.top" },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!r.ok) return jsonError(`upstream ${r.status}`, 502);
+    const text = await r.text();
+    return cors(rewriteM3u8(text, master, selfBase, STREAMWISH_REFERER), {
+      headers: { "Content-Type": "application/vnd.apple.mpegurl", "Cache-Control": "no-cache" },
+    });
+  } catch (e) {
+    return jsonError(String(e), 502);
+  }
 }
 
 // Extract the master m3u8 for a file code (same POST the Worker used to do,
@@ -200,13 +273,16 @@ async function handler(req: Request): Promise<Response> {
   if (url.pathname === "/savefiles") {
     return handleSavefiles((url.searchParams.get("code") || "").trim(), selfBase);
   }
+  if (url.pathname === "/streamwish") {
+    return handleStreamwish((url.searchParams.get("url") || "").trim(), selfBase);
+  }
   if (url.pathname === "/hls") {
     return handleHls(url.searchParams.get("u") || "", url.searchParams.get("r") || "", selfBase);
   }
   // /fetch (or anything with ?url=) — latanime HTML relay
   const target = url.searchParams.get("url");
   if (!target) {
-    return cors(JSON.stringify({ ok: true, usage: "/fetch?url=… | /savefiles?code=… | /hls?u=…&r=…" }), {
+    return cors(JSON.stringify({ ok: true, usage: "/fetch?url=… | /savefiles?code=… | /streamwish?url=… | /hls?u=…&r=…" }), {
       headers: { "Content-Type": "application/json" },
     });
   }

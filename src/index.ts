@@ -62,17 +62,23 @@ const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
 
 // ─── ANIME ONLINE NINJA ──────────────────────────────────────────────────────
-// A DooPlay WordPress site behind a Cloudflare IP-reputation challenge:
-// datacenter IPs (the Worker) get "Just a moment", clean IPs (the Deno relay)
-// pass — so every AON call is relayed through FETCH_PROXY_URL. Its public REST
-// API gives structured JSON instead of HTML scraping:
+// A DooPlay WordPress site behind a Cloudflare *managed JS challenge* ("Just a
+// moment…", cType:'managed') applied site-wide — every path, down to
+// robots.txt, returns the interstitial with HTTP 403. This is NOT the
+// IP-reputation gate the phase-1 groundwork assumed: the Deno relay does NOT
+// clear it (verified — its clean IP gets the same 403 challenge as the Worker).
+// A managed JS+Turnstile challenge can only be cleared by a real browser, so
+// AON fetches escalate to Cloudflare Browser Rendering (renderPage) when the
+// relay comes back challenged. Requires CF_ACCOUNT_ID + CF_API_TOKEN; without
+// them AON is unreachable and fetchAon throws a labelled error.
+// The public REST API gives structured JSON instead of HTML scraping:
 //   • GET /wp-json/dooplay/glossary            — full A–Z catalog listing
 //   • GET /wp-json/dooplay/search?keyword=…    — search
 //   • GET /wp-json/dooplayer/v1/post/{id}      — resolves a player option to its
 //     embed URL (the "reproductor" endpoint) → reuse the host extractors below
 //   • GET /wp-json/wp/v2/genres | dtyear | …   — taxonomies for filters
 // Episode lists + per-episode player-option ids still come from the anime/
-// episode page HTML (custom post types aren't REST-exposed), also via Deno.
+// episode page HTML (custom post types aren't REST-exposed).
 const AON_BASE = "https://ww3.animeonline.ninja";
 
 // ─── ANIMEFÉNIX ──────────────────────────────────────────────────────────────
@@ -152,7 +158,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.10.1",
+  version: "4.10.4",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -263,20 +269,66 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
   }
 }
 
-// Relay an Anime Online Ninja URL (API JSON or page HTML) through the Deno
-// proxy — the Worker's own egress is Cloudflare-challenged. Returns raw text;
-// callers JSON.parse API responses. No 500-byte floor (search hits can be
-// small) and no direct-fetch race (the direct leg is always challenged).
+// A response is Cloudflare's managed-challenge interstitial, not real content.
+function isCfChallenge(body: string): boolean {
+  return /<title>Just a moment|_cf_chl_opt|__cf_chl_|challenge-platform|cf-browser-verification/i.test(body);
+}
+
+// Cloudflare Browser Rendering navigates a JSON endpoint with Chrome, which
+// shows the raw body inside its JSON viewer (`<pre>…</pre>`); pull that back
+// out. For an HTML page the rendered DOM is already what callers want, so fall
+// through to the whole document.
+function unwrapRenderedText(html: string): string {
+  const pre = html.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+  const raw = pre ? pre[1] : html;
+  return raw
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&nbsp;/g, " ");
+}
+
+// Fetch an Anime Online Ninja URL (API JSON or page HTML). The relay is tried
+// first (cheap), but AON serves a managed JS challenge site-wide that the relay
+// cannot clear, so a challenged response escalates to Browser Rendering — the
+// only server-side path that solves it. Returns raw text; callers JSON.parse
+// API responses. No 500-byte floor (search hits can be small).
 async function fetchAon(pathOrUrl: string, env?: Env, timeoutMs = 12000): Promise<string> {
   const target = pathOrUrl.startsWith("http") ? pathOrUrl : `${AON_BASE}${pathOrUrl}`;
+
+  // 1) Deno relay — a stable non-Cloudflare egress. Kept as the cheap first
+  //    leg in case AON ever drops the challenge; today it comes back challenged.
+  let relayBody: string | null = null;
   const proxyBase = env?.FETCH_PROXY_URL?.trim();
-  if (!proxyBase) throw new Error("AON: FETCH_PROXY_URL not set");
-  const r = await fetch(`${proxyBase}?url=${encodeURIComponent(target)}`, {
-    headers: { "User-Agent": CHROME_UA },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!r.ok) throw new Error(`AON proxy HTTP ${r.status}`);
-  return r.text();
+  if (proxyBase) {
+    try {
+      const r = await fetch(`${proxyBase}?url=${encodeURIComponent(target)}`, {
+        headers: { "User-Agent": CHROME_UA },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const body = await r.text();
+      if (r.ok && !isCfChallenge(body)) return body;
+      relayBody = body;
+    } catch { /* fall through to Browser Rendering */ }
+  }
+
+  // 2) Managed challenge (or relay unavailable) — clear it with a real browser.
+  //    "networkidle0" so the interstitial's JS finishes solving and navigates to
+  //    the real content before we read the DOM; "domcontentloaded" would capture
+  //    the "Just a moment…" page itself (isCfChallenge would then reject it).
+  if (env && browserRenderingReady(env)) {
+    const rendered = await renderPage(target, env, {
+      referer: `${AON_BASE}/`,
+      wait: "networkidle0",
+      timeoutMs: Math.max(timeoutMs, 22000),
+    });
+    if (rendered && !isCfChallenge(rendered)) return unwrapRenderedText(rendered);
+  }
+
+  if (relayBody && isCfChallenge(relayBody)) {
+    throw new Error(
+      "AON: Cloudflare managed challenge not cleared — set CF_ACCOUNT_ID/CF_API_TOKEN so fetchAon can escalate to Browser Rendering",
+    );
+  }
+  throw new Error("AON: FETCH_PROXY_URL not set and Browser Rendering unavailable");
 }
 
 async function fetchTmdb(animeName: string, tmdbKey: string) {
@@ -547,6 +599,34 @@ async function extractMixdrop(embedUrl: string): Promise<string | null> {
   } catch { return null; }
 }
 
+// StreamWish (and its rotating aliases — streamwish.to/.top/.com, embedwish,
+// wishfast, sfastwish, …) ships its HLS master inside the same p.a.c.k.e.r
+// block. The recovered config holds links={"hls2":"…/master.m3u8?…"} (and a
+// `file:` fallback). The token is time-windowed, not IP- or referer-locked
+// (verified: the master plays with no referer from a fresh IP), so the worker
+// serves it through the normal /proxy/m3u8 path. Used by every source that
+// embeds StreamWish (latanime, animefenix, Anime Online Ninja).
+async function extractStreamwish(embedUrl: string): Promise<string | null> {
+  try {
+    // Normalise the file/download page to the /e/ embed that carries the packer.
+    const embed = embedUrl.replace(/\/(?:f|d|v)\/([a-z0-9]+)/i, "/e/$1");
+    const origin = (() => { try { return new URL(embed).origin; } catch { return "https://streamwish.top"; } })();
+    const r = await fetch(embed, {
+      headers: { "User-Agent": CHROME_UA, "Referer": `${origin}/` },
+      redirect: "follow",
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) return null;
+    const html = await r.text();
+    const unpacked = unpackPacker(html) || html;
+    const m =
+      unpacked.match(/"hls\d*"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
+      unpacked.match(/file\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ||
+      unpacked.match(/https?:\/\/[^"'\\ ]+\.m3u8[^"'\\ ]*/);
+    return m ? (m[1] || m[0]) : null;
+  } catch { return null; }
+}
+
 
 // ─── CLOUDFLARE BROWSER RENDERING (optional) ───────────────────────────────
 // Renders a page with a real browser on Cloudflare's edge via the REST API —
@@ -560,20 +640,25 @@ function browserRenderingReady(env: Env): boolean {
   return !!(env.CF_ACCOUNT_ID || "").trim() && !!(env.CF_API_TOKEN || "").trim();
 }
 
-async function renderPage(url: string, env: Env, opts: { referer?: string; wait?: "load" | "domcontentloaded" | "networkidle0"; timeoutMs?: number } = {}): Promise<string | null> {
+async function renderPage(url: string, env: Env, opts: { referer?: string; wait?: "load" | "domcontentloaded" | "networkidle0"; timeoutMs?: number; dwellMs?: number } = {}): Promise<string | null> {
   const acct = (env.CF_ACCOUNT_ID || "").trim();
   const token = (env.CF_API_TOKEN || "").trim();
   if (!acct || !token) return null;
   const timeoutMs = opts.timeoutMs ?? 20000;
   try {
+    const body: Record<string, unknown> = {
+      url,
+      setExtraHTTPHeaders: { Referer: opts.referer ?? "https://latanime.org/" },
+      gotoOptions: { waitUntil: opts.wait ?? "networkidle0", timeout: Math.max(6000, timeoutMs - 3000) },
+    };
+    // Extra dwell after navigation so a Cloudflare managed challenge has time to
+    // run its JS, POST the Turnstile token and redirect to the real content
+    // (networkidle0 fires on the interstitial itself, before it self-solves).
+    if (opts.dwellMs && opts.dwellMs > 0) body.waitForTimeout = Math.min(opts.dwellMs, 25000);
     const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acct}/browser-rendering/content`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-      body: JSON.stringify({
-        url,
-        setExtraHTTPHeaders: { Referer: opts.referer ?? "https://latanime.org/" },
-        gotoOptions: { waitUntil: opts.wait ?? "networkidle0", timeout: Math.max(6000, timeoutMs - 3000) },
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!r.ok) return null;
@@ -801,6 +886,22 @@ async function getStreams(rawId: string, env: Env, request: Request) {
       continue;
     }
     if (/mi+xdrop/.test(embed.url)) {
+      continue;
+    }
+    // StreamWish mints IP-bound HLS tokens — the premilkyway CDN 403s a fetch
+    // from any IP other than the one that resolved the /e/ embed (verified:
+    // same-IP extract+play = 200, cross-IP = 403). Same class as savefiles, so
+    // resolve AND serve it entirely on Deno's one stable IP; the Worker only
+    // points Stremio at ${denoBase}/streamwish. Never extract it Worker-side —
+    // that produces a dead stream. Without a Deno base it falls through to an
+    // externalUrl (the user's own client resolves it from their IP).
+    if (/streamwish|embedwish|wishfast|sfastwish|swishsrv|streamwis/i.test(embed.url)) {
+      if (denoBase) {
+        tasks.push(Promise.resolve({
+          url: `${denoBase}/streamwish?url=${encodeURIComponent(embed.url)}`,
+          name: embed.name, isHls: true, proxied: true,
+        }));
+      }
       continue;
     }
     tasks.push((async () => {
@@ -1051,9 +1152,19 @@ export default {
       const testUrl = url.searchParams.get("url");
       if (!testUrl) return json({ error: "Missing ?url=" });
       const t0 = Date.now();
-      const html = await renderPage(testUrl, env, { referer: url.searchParams.get("ref") || "https://latanime.org/" });
+      const wait = (url.searchParams.get("wait") as "load" | "domcontentloaded" | "networkidle0" | null) || undefined;
+      const dwellMs = Number(url.searchParams.get("dwell")) || undefined;
+      const html = await renderPage(testUrl, env, { referer: url.searchParams.get("ref") || "https://latanime.org/", wait, dwellMs, timeoutMs: dwellMs ? 28000 : undefined });
       if (html == null) return json({ error: "render returned null — CF_ACCOUNT_ID/CF_API_TOKEN unset or render failed", ms: Date.now() - t0 });
-      return json({ testUrl, htmlLen: html.length, media: findMediaUrl(html), ms: Date.now() - t0 });
+      return json({
+        testUrl,
+        wait: wait || "networkidle0",
+        htmlLen: html.length,
+        isChallenge: isCfChallenge(html),
+        media: findMediaUrl(html),
+        snippet: html.slice(0, 600),
+        ms: Date.now() - t0,
+      });
     }
 
     if (path === "/debug-host") {
@@ -1098,6 +1209,7 @@ export default {
             if (e.url.includes("mp4upload.com")) return tryX(`embed:${e.name}`, () => extractMp4upload(e.url));
             if (e.url.includes("savefiles.com") || e.url.includes("streamhls.to")) return tryX(`embed:${e.name}`, () => extractSavefiles(e.url));
             if (/mi+xdrop/.test(e.url)) return tryX(`embed:${e.name}`, () => extractMixdrop(e.url));
+            if (/streamwish|embedwish|wishfast|sfastwish|swishsrv|streamwis/i.test(e.url)) return tryX(`embed:${e.name}`, () => extractStreamwish(e.url));
             return tryX(`render:${e.name}`, async () => {
               const h = await renderPage(e.url, env, { referer: e.url });
               return h ? (findMediaUrl(h)?.url ?? null) : null;
@@ -1143,9 +1255,10 @@ export default {
 
     if (path === "/debug-aon") {
       // Probes Anime Online Ninja's DooPlay REST API + a page through the Deno
-      // relay, dumping raw response shapes so the aon: parsers can be written
-      // against real data. Needs the Deno proxy's allowlist to include
-      // animeonline.ninja (deno/fetch.ts).
+      // relay + Browser Rendering, dumping raw response shapes so the aon:
+      // parsers can be written against real data. AON's managed JS challenge
+      // means fetchAon only succeeds when CF_ACCOUNT_ID/CF_API_TOKEN are set
+      // (Browser Rendering); the Deno relay alone returns the 403 challenge.
       //   /debug-aon                → glossary + genres + search(naruto)
       //   /debug-aon?q=one+piece    → search only
       //   /debug-aon?player=123     → dooplayer/v1/post/{id}
@@ -1187,6 +1300,21 @@ export default {
       const workerBase = new URL(request.url).origin;
       const proxyUrl = streamUrl ? `${workerBase}/proxy/m3u8?url=${encodeURIComponent(streamUrl)}&ref=${encodeURIComponent("https://streamhls.to/")}` : null;
       return json({ code, streamUrl, proxyUrl, ms: Date.now() - t0 });
+    }
+
+    if (path === "/debug-streamwish") {
+      // Verify StreamWish unpacking. NOTE: the recovered m3u8 is IP-bound, so
+      // this Worker-side streamUrl only plays from the extracting IP — real
+      // playback goes through the Deno resolver (denoUrl) that keeps one IP for
+      // extraction + segments. This endpoint just confirms the unpack works.
+      //   /debug-streamwish?url=https://streamwish.top/e/XXXX
+      const testUrl = url.searchParams.get("url");
+      if (!testUrl) return json({ error: "Missing ?url= (a streamwish /e/ or /f/ embed)" });
+      const t0 = Date.now();
+      const streamUrl = await extractStreamwish(testUrl);
+      const denoBase = (env.FETCH_PROXY_URL || "").trim().replace(/\/fetch\/?$/, "").replace(/\/$/, "");
+      const denoUrl = denoBase ? `${denoBase}/streamwish?url=${encodeURIComponent(testUrl)}` : null;
+      return json({ testUrl, unpackedM3u8: streamUrl, denoUrl, ipBound: true, ms: Date.now() - t0 });
     }
 
     if (path === "/debug-mixdrop") {
