@@ -45,6 +45,17 @@ spec-compliant (https://github.com/Stremio/stremio-addon-sdk/tree/master/docs):
   direct egress, and for player hosts that need JS. Unset ⇒ fully manual; a
   host still unresolved is surfaced as an `externalUrl` (opens in the user's
   own client).
+- **Anime Online Ninja is residential-IP-bound end to end**: its Cloudflare zone
+  gates on IP reputation + a managed JS challenge that NO datacenter egress
+  clears — not the Deno relay's clean IP, not Cloudflare's own Browser Rendering
+  (both verified stuck on the "Just a moment…" interstitial). The only client AON
+  admits is a real browser on a residential IP, so the `aon:` source is fetched
+  through the **companion** (`companion/aon-resolver.mjs`) — a small server the
+  user runs on their own machine that drives a headless browser, holds
+  cf_clearance, and answers `${AON_COMPANION_URL}/aon?url=…`. `fetchAon` forwards
+  to it first (gated on `AON_COMPANION_URL`; unset ⇒ AON is unreachable and every
+  `aon:` request returns empty). Never re-add a Worker/Deno/Browser-Rendering AON
+  fetch as the primary path — they cannot clear the challenge.
 
 ## Volatile layer (expected churn)
 

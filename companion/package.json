@@ -1,0 +1,13 @@
+{
+  "name": "aon-resolver",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Residential-IP companion that clears AnimeOnline Ninja's Cloudflare challenge for the latanime Stremio addon",
+  "scripts": {
+    "start": "node aon-resolver.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}

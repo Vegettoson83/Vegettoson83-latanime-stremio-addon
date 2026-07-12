@@ -112,6 +112,11 @@ interface Env {
   // download links) are rendered on Cloudflare's edge. Unset = manual only.
   CF_ACCOUNT_ID: string;
   CF_API_TOKEN: string;
+  // Optional residential companion (companion/aon-resolver) base URL. AON's
+  // Cloudflare zone blocks every datacenter egress we have; the companion runs
+  // a real browser on the user's residential IP and clears the challenge. When
+  // set, fetchAon forwards AON fetches to `${AON_COMPANION_URL}/aon?url=…`.
+  AON_COMPANION_URL: string;
 }
 
 function json(data: unknown, status = 200) {
@@ -158,7 +163,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.11.1",
+  version: "4.12.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -297,6 +302,28 @@ function unwrapRenderedText(html: string): string {
 // API responses. No 500-byte floor (search hits can be small).
 async function fetchAon(pathOrUrl: string, env?: Env, timeoutMs = 12000): Promise<string> {
   const target = pathOrUrl.startsWith("http") ? pathOrUrl : `${AON_BASE}${pathOrUrl}`;
+
+  // 0) Residential companion (companion/aon-resolver). AON gates on IP
+  //    reputation + a JS challenge that no datacenter egress clears — not the
+  //    relay's clean IP, not Cloudflare's own rendering browser (verified: both
+  //    stay stuck on the interstitial). The only client AON lets through is a
+  //    real browser on a *residential* IP, so when the user runs the companion
+  //    (a headless browser on their own machine that holds cf_clearance) we
+  //    forward the fetch there and it comes back cleared. Gated on
+  //    AON_COMPANION_URL — unset ⇒ this leg is skipped and AON stays best-effort
+  //    via the (currently blocked) relay/render path below.
+  const companion = env?.AON_COMPANION_URL?.trim().replace(/\/$/, "");
+  if (companion) {
+    try {
+      const r = await fetch(`${companion}/aon?url=${encodeURIComponent(target)}`, {
+        signal: AbortSignal.timeout(Math.max(timeoutMs, 25000)),
+      });
+      if (r.ok) {
+        const body = await r.text();
+        if (body && !isCfChallenge(body)) return body;
+      }
+    } catch { /* companion offline/unreachable — fall through */ }
+  }
 
   // 1) Deno relay — a stable non-Cloudflare egress. Kept as the cheap first
   //    leg in case AON ever drops the challenge; today it comes back challenged.
@@ -1363,6 +1390,7 @@ export default {
         kvBinding: env.STREAM_CACHE ? "set" : "not set",
         fetchProxy: (env.FETCH_PROXY_URL || "").trim() || "not set",
         browserRendering: browserRenderingReady(env) ? "enabled" : "disabled (manual only)",
+        aonCompanion: (env.AON_COMPANION_URL || "").trim() || "not set",
       });
     }
 
