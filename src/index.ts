@@ -158,7 +158,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.11.0",
+  version: "4.11.1",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -315,21 +315,28 @@ async function fetchAon(pathOrUrl: string, env?: Env, timeoutMs = 12000): Promis
   }
 
   // 2) Managed challenge (or relay unavailable) — clear it with a real browser.
-  //    "networkidle0" so the interstitial's JS finishes solving and navigates to
-  //    the real content before we read the DOM; "domcontentloaded" would capture
-  //    the "Just a moment…" page itself (isCfChallenge would then reject it).
+  //    The interstitial idles before it self-solves, so waitUntil alone captures
+  //    "Just a moment…". Instead wait for a selector that only exists once the
+  //    challenge has redirected to real content: for the JSON REST endpoints
+  //    that's Chrome's JSON-viewer <pre>; for HTML pages it's a WordPress asset
+  //    link / theme footer the interstitial never carries.
   if (env && browserRenderingReady(env)) {
+    const isApi = /\/wp-json\//i.test(target);
     const rendered = await renderPage(target, env, {
       referer: `${AON_BASE}/`,
-      wait: "networkidle0",
-      timeoutMs: Math.max(timeoutMs, 22000),
+      wait: "domcontentloaded",
+      waitForSelector: isApi ? "pre" : "link[href*='wp-content'], footer, #footer, #playeroptionsul",
+      timeoutMs: Math.max(timeoutMs, 25000),
     });
     if (rendered && !isCfChallenge(rendered)) return unwrapRenderedText(rendered);
+    if (rendered) throw new Error("AON: Browser Rendering ran but the Cloudflare challenge did not clear (still interstitial)");
   }
 
   if (relayBody && isCfChallenge(relayBody)) {
     throw new Error(
-      "AON: Cloudflare managed challenge not cleared — set CF_ACCOUNT_ID/CF_API_TOKEN so fetchAon can escalate to Browser Rendering",
+      browserRenderingReady(env!)
+        ? "AON: relay challenged and Browser Rendering did not return usable content"
+        : "AON: Cloudflare managed challenge not cleared — set CF_ACCOUNT_ID/CF_API_TOKEN so fetchAon can escalate to Browser Rendering",
     );
   }
   throw new Error("AON: FETCH_PROXY_URL not set and Browser Rendering unavailable");
@@ -646,7 +653,7 @@ function browserRenderingReady(env: Env): boolean {
   return !!(env.CF_ACCOUNT_ID || "").trim() && !!(env.CF_API_TOKEN || "").trim();
 }
 
-async function renderPage(url: string, env: Env, opts: { referer?: string; wait?: "load" | "domcontentloaded" | "networkidle0"; timeoutMs?: number; dwellMs?: number } = {}): Promise<string | null> {
+async function renderPage(url: string, env: Env, opts: { referer?: string; wait?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2"; timeoutMs?: number; waitForSelector?: string } = {}): Promise<string | null> {
   const acct = (env.CF_ACCOUNT_ID || "").trim();
   const token = (env.CF_API_TOKEN || "").trim();
   if (!acct || !token) return null;
@@ -657,10 +664,16 @@ async function renderPage(url: string, env: Env, opts: { referer?: string; wait?
       setExtraHTTPHeaders: { Referer: opts.referer ?? "https://latanime.org/" },
       gotoOptions: { waitUntil: opts.wait ?? "networkidle0", timeout: Math.max(6000, timeoutMs - 3000) },
     };
-    // Extra dwell after navigation so a Cloudflare managed challenge has time to
-    // run its JS, POST the Turnstile token and redirect to the real content
-    // (networkidle0 fires on the interstitial itself, before it self-solves).
-    if (opts.dwellMs && opts.dwellMs > 0) body.waitForTimeout = Math.min(opts.dwellMs, 25000);
+    // Wait for a real-content selector to appear before capturing. This is how a
+    // Cloudflare *managed* challenge is cleared server-side: waitUntil fires on
+    // the "Just a moment…" interstitial itself (its network idles while the
+    // challenge JS counts down), so we instead hold the page open until an
+    // element that only exists AFTER the challenge redirects is present. The
+    // (previously used) top-level `waitForTimeout` is NOT a /content parameter —
+    // it 400s the request — whereas `waitForSelector` is supported.
+    if (opts.waitForSelector) {
+      body.waitForSelector = { selector: opts.waitForSelector, timeout: Math.min(16000, Math.max(4000, timeoutMs - 4000)) };
+    }
     const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acct}/browser-rendering/content`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
@@ -1357,9 +1370,9 @@ export default {
       const testUrl = url.searchParams.get("url");
       if (!testUrl) return json({ error: "Missing ?url=" });
       const t0 = Date.now();
-      const wait = (url.searchParams.get("wait") as "load" | "domcontentloaded" | "networkidle0" | null) || undefined;
-      const dwellMs = Number(url.searchParams.get("dwell")) || undefined;
-      const html = await renderPage(testUrl, env, { referer: url.searchParams.get("ref") || "https://latanime.org/", wait, dwellMs, timeoutMs: dwellMs ? 28000 : undefined });
+      const wait = (url.searchParams.get("wait") as "load" | "domcontentloaded" | "networkidle0" | "networkidle2" | null) || undefined;
+      const selector = url.searchParams.get("selector") || undefined;
+      const html = await renderPage(testUrl, env, { referer: url.searchParams.get("ref") || "https://latanime.org/", wait, waitForSelector: selector, timeoutMs: selector ? 28000 : undefined });
       if (html == null) return json({ error: "render returned null — CF_ACCOUNT_ID/CF_API_TOKEN unset or render failed", ms: Date.now() - t0 });
       return json({
         testUrl,
