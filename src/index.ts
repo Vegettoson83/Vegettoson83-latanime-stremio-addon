@@ -158,7 +158,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.10.4",
+  version: "4.11.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -170,8 +170,12 @@ const MANIFEST = {
     { type: "series", id: "latanime-directory", name: "Latanime — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }, { name: "genre", isRequired: false, options: Object.keys(DIR_FILTERS) }] },
     { type: "series", id: "latanime-peliculas", name: "Latanime — Películas", extra: [{ name: "skip", isRequired: false }] },
     { type: "series", id: "animefenix-directory", name: "AnimeFénix — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
+    // AON is search-only (isRequired) on purpose: every AON fetch is a metered
+    // Browser Render, so we never want a home grid polling it — it surfaces only
+    // when the user searches, and results/streams are cached hard afterwards.
+    { type: "series", id: "aon-search", name: "Anime Online Ninja", extra: [{ name: "search", isRequired: true }] },
   ],
-  idPrefixes: ["latanime:", "af:"],
+  idPrefixes: ["latanime:", "af:", "aon:"],
 };
 
 // ─── PROXY LOAD BALANCER ──────────────────────────────────────────────────────
@@ -431,6 +435,7 @@ async function searchAnimes(query: string, env?: Env) {
 
 async function getCatalog(catalogId: string, extra: Record<string, string>, env?: Env) {
   if (catalogId.startsWith("animefenix-")) return getAfCatalog(catalogId, extra, env);
+  if (catalogId === "aon-search") return getAonCatalog(extra, env);
   if (extra.search?.trim()) return { metas: (await searchAnimes(extra.search.trim(), env)).map(toMetaPreview) };
   if (catalogId === "latanime-airing") return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`, env)).map(toMetaPreview) };
   const page = Math.floor(parseInt(extra.skip || "0", 10) / 30) + 1;
@@ -452,6 +457,7 @@ async function getCatalog(catalogId: string, extra: Record<string, string>, env?
 
 async function getMeta(id: string, tmdbKey: string, env?: Env) {
   if (id.startsWith("af:")) return getAfMeta(id, tmdbKey, env);
+  if (id.startsWith("aon:")) return getAonMeta(id, tmdbKey, env);
   const slug = id.replace("latanime:", "");
   const html = await fetchHtml(`${BASE_URL}/anime/${slug}`, env);
   const titleM = html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i) || html.match(/<title>(.*?)\s*[—\-|].*?<\/title>/i);
@@ -800,6 +806,7 @@ function parseEpisodeEmbeds(html: string) {
 
 async function getStreams(rawId: string, env: Env, request: Request) {
   if (rawId.startsWith("af:")) return getAfStreams(rawId, env, request);
+  if (rawId.startsWith("aon:")) return getAonStreams(rawId, env, request);
   const parts = rawId.replace("latanime:", "").split(":");
   if (parts.length < 2) return { streams: [] };
   const [slug, epNum] = parts;
@@ -1126,6 +1133,204 @@ async function getAfStreams(rawId: string, env: Env, request: Request) {
     }
     // IP-bound or JS-gated host → externalUrl, playable in the user's own client
     streams.push({ externalUrl: embed, name: "AnimeFénix 🌐", title: `🌐 ${host} — AnimeFénix` });
+  }
+  return { streams };
+}
+
+// ─── ANIME ONLINE NINJA (aon:) ───────────────────────────────────────────────
+// AON is a DooPlay site behind a site-wide Cloudflare managed challenge, so
+// every fetch here goes through fetchAon (Deno relay → Browser Rendering). That
+// makes each hit a metered ~20s render, so the design is render-frugal:
+//   • catalog is search-only (no idle home-grid renders — see MANIFEST),
+//   • a stream request spends exactly ONE render (the episode page, whose own JS
+//     injects the default player's iframe during the render); no second render
+//     on the cold path or the 30s Worker wall blows. Extra player options would
+//     need per-option dooplayer/v1/post renders — deliberately left for later.
+// The id carries the real page path (base64url) so we never guess DooPlay's
+// custom-post-type slug: search/episode links hand us the true permalinks and
+// we round-trip them. IDs are ASCII slug paths, so plain btoa/atob suffice.
+function aonEncodePath(pathname: string): string {
+  return btoa(pathname).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function aonDecodePath(token: string): string {
+  try { return atob(token.replace(/-/g, "+").replace(/_/g, "/")); } catch { return ""; }
+}
+
+// Walk arbitrary DooPlay search/glossary JSON collecting anime entries. Shapes
+// vary across DooPlay versions (array vs numeric-keyed object), so recurse and
+// pick any node carrying a title + an animeonline.ninja permalink that isn't an
+// episode/genre listing. Poster comes from img/image/thumbnail when present.
+function parseAonCards(jsonText: string): { id: string; name: string; poster: string }[] {
+  let data: unknown;
+  try { data = JSON.parse(jsonText); } catch { return []; }
+  const out: { id: string; name: string; poster: string }[] = [];
+  const seen = new Set<string>();
+  const visit = (node: any) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) { for (const v of node) visit(v); return; }
+    const url = typeof node.url === "string" ? node.url : "";
+    const title = typeof node.title === "string" ? node.title
+      : typeof node.name === "string" ? node.name : "";
+    if (url && title && /animeonline\.ninja/i.test(url) && !/\/(episodio|genero)\//i.test(url)) {
+      let pathname = "";
+      try { pathname = new URL(url).pathname; } catch { /* skip */ }
+      // Skip single-segment index pages (/inicio/, /online/, /temporada/ …)
+      if (pathname && pathname.replace(/^\/|\/$/g, "").includes("/")) {
+        const id = `aon:${aonEncodePath(pathname)}`;
+        if (!seen.has(id)) {
+          seen.add(id);
+          const raw = typeof node.img === "string" ? node.img
+            : typeof node.image === "string" ? node.image
+            : typeof node.thumbnail === "string" ? node.thumbnail : "";
+          const poster = raw.startsWith("http") ? raw : raw ? `${AON_BASE}${raw}` : "";
+          out.push({ id, name: decodeEntities(title).trim(), poster });
+        }
+      }
+    }
+    for (const k in node) if (node[k] && typeof node[k] === "object") visit(node[k]);
+  };
+  visit(data);
+  return out.slice(0, 60);
+}
+
+async function getAonCatalog(extra: Record<string, string>, env?: Env) {
+  const q = (extra.search || "").trim();
+  if (!q) return { metas: [] };
+  try {
+    const txt = await fetchAon(`/wp-json/dooplay/search?keyword=${encodeURIComponent(q)}`, env, 22000);
+    return { metas: parseAonCards(txt).map(toMetaPreview) };
+  } catch { return { metas: [] }; }
+}
+
+async function getAonMeta(id: string, tmdbKey: string, env?: Env) {
+  const path = aonDecodePath(id.slice("aon:".length));
+  if (!path) return { meta: null };
+  let html: string;
+  try { html = await fetchAon(path, env, 24000); } catch { return { meta: null }; }
+
+  const name = decodeEntities(
+    html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i)?.[1]
+    || html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1]?.replace(/<[^>]+>/g, "")
+    || html.match(/<title>([\s\S]*?)<\/title>/i)?.[1]
+    || path,
+  ).replace(/\s*[-|]\s*(Ver\s+Anime.*|Anime\s*Online.*|VerAnime.*)$/i, "").replace(/^Ver\s+/i, "").trim();
+  const poster = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i)?.[1] || "";
+  const description = decodeEntities(
+    html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/i)?.[1] || "",
+  ).trim();
+
+  // DooPlay lists episodes as /episodio/{slug}/ anchors (newest first). The
+  // episode number is the trailing number in the slug; fall back to encounter
+  // order if a slug carries none.
+  const episodes: { id: string; number: number }[] = [];
+  const seen = new Set<string>();
+  for (const m of html.matchAll(/href=["'](https?:\/\/[^"']*\/episodio\/([^"'/]+)\/?)["']/gi)) {
+    const slug = m[2];
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    let pathname = "";
+    try { pathname = new URL(m[1]).pathname; } catch { continue; }
+    if (!pathname) continue;
+    const numM = slug.match(/(\d+(?:\.\d+)?)(?!.*\d)/);
+    const number = numM ? parseFloat(numM[1]) : seen.size;
+    episodes.push({ id: `aon:${aonEncodePath(pathname)}`, number });
+  }
+  episodes.sort((a, b) => a.number - b.number);
+
+  const tmdb = await fetchTmdb(name, tmdbKey);
+  return {
+    meta: {
+      id, type: "series", name,
+      poster: tmdb?.poster || poster,
+      background: tmdb?.background || poster,
+      description: tmdb?.description || description,
+      posterShape: "poster",
+      releaseInfo: tmdb?.year || "",
+      videos: episodes.map((ep) => ({ id: ep.id, title: `Episodio ${ep.number}`, season: 1, episode: ep.number })),
+    },
+  };
+}
+
+// Pull embed URLs out of a rendered AON episode page. The render runs the page's
+// JS, so the default player option's <iframe> is already injected; some options
+// also ship the embed as base64 in a data-* attribute. AON-internal, ad and
+// blank frames are dropped.
+function parseAonEmbeds(html: string): { url: string; name: string }[] {
+  const embeds: { url: string; name: string }[] = [];
+  const seen = new Set<string>();
+  const push = (raw: string, name: string) => {
+    let url = raw.trim();
+    if (url.startsWith("//")) url = `https:${url}`;
+    if (!/^https?:\/\//i.test(url)) return;
+    if (/animeonline\.ninja|about:blank|google\.|disqus|gstatic|doubleclick/i.test(url)) return;
+    if (seen.has(url)) return;
+    seen.add(url);
+    embeds.push({ url, name });
+  };
+  for (const m of html.matchAll(/<iframe[^>]+src=["']([^"']+)["']/gi)) push(m[1], "Reproductor");
+  for (const m of html.matchAll(/data-(?:player|embed|src)=["']([A-Za-z0-9+/=]{16,})["']/gi)) {
+    try {
+      const d = atob(m[1]);
+      if (/^https?:\/\//i.test(d) || d.startsWith("//")) push(d, "Reproductor");
+    } catch { /* not base64 */ }
+  }
+  return embeds;
+}
+
+// Resolve streams for one AON episode. Exactly one render (the episode page);
+// every host from there is resolved without a second render — StreamWish and
+// savefiles are IP-bound HLS served through the Deno single-IP resolver (same
+// hosts as latanime), mp4upload/hexload/pixeldrain extract cheaply, and anything
+// JS-gated (voe, mixdrop, …) is surfaced as an externalUrl the user's own client
+// resolves. Never resolve StreamWish/savefiles Worker-side — the token is
+// IP-locked and would yield a dead stream.
+async function getAonStreams(rawId: string, env: Env, request: Request) {
+  const path = aonDecodePath(rawId.slice("aon:".length));
+  if (!path) return { streams: [] };
+  let html: string;
+  try { html = await fetchAon(path, env, 24000); } catch { return { streams: [] }; }
+
+  const embeds = parseAonEmbeds(html);
+  if (embeds.length === 0) return { streams: [] };
+
+  const denoBase = (env.FETCH_PROXY_URL || "").trim().replace(/\/fetch\/?$/, "").replace(/\/$/, "");
+  const streams: any[] = [];
+  const seenUrl = new Set<string>();
+  const add = (s: any) => {
+    const key = s.url || s.externalUrl;
+    if (key && !seenUrl.has(key)) { seenUrl.add(key); streams.push(s); }
+  };
+
+  for (const embed of embeds) {
+    const host = embed.url.match(/https?:\/\/(?:www\.)?([a-z0-9-]+)\./i)?.[1] || "host";
+    const ext = () => add({ externalUrl: embed.url, name: "AnimeOnline Ninja 🌐", title: `🌐 ${host} — AON` });
+
+    if (/streamwish|embedwish|wishfast|sfastwish|swishsrv|streamwis/i.test(embed.url)) {
+      if (denoBase) add({ url: `${denoBase}/streamwish?url=${encodeURIComponent(embed.url)}`, name: "AnimeOnline Ninja HLS", title: "▶ streamwish — AON", behaviorHints: { notWebReady: false, filename: "aon.m3u8", bingeGroup: "aon-streamwish" } });
+      else ext();
+      continue;
+    }
+    if (/savefiles\.com|streamhls\.to/i.test(embed.url)) {
+      const code = embed.url.split(/savefiles\.com\/|streamhls\.to\//).pop()?.replace(/^e\//, "").split(/[/?]/)[0]?.trim();
+      if (denoBase && code && code.length > 3) add({ url: `${denoBase}/savefiles?code=${encodeURIComponent(code)}`, name: "AnimeOnline Ninja HLS", title: "▶ savefiles — AON", behaviorHints: { notWebReady: false, filename: "aon.m3u8", bingeGroup: "aon-savefiles" } });
+      else ext();
+      continue;
+    }
+    if (embed.url.includes("mp4upload.com")) {
+      const u = await extractMp4upload(embed.url);
+      if (u) { add({ url: u, name: "AnimeOnline Ninja MP4", title: "▶ mp4upload — AON", behaviorHints: { notWebReady: false, filename: "aon.mp4", bingeGroup: "aon-mp4upload" } }); continue; }
+    }
+    if (embed.url.includes("hexload.com")) {
+      const u = await extractHexload(embed.url);
+      if (u) { add({ url: u, name: "AnimeOnline Ninja MP4", title: "▶ hexload — AON", behaviorHints: { notWebReady: false, filename: "aon.mp4", bingeGroup: "aon-hexload" } }); continue; }
+    }
+    if (embed.url.includes("pixeldrain.com")) {
+      const idM = embed.url.match(/pixeldrain\.com\/(?:u|l)\/([a-zA-Z0-9]+)/);
+      if (idM) { add({ url: `https://pixeldrain.com/api/file/${idM[1]}`, name: "AnimeOnline Ninja MP4", title: "▶ pixeldrain — AON", behaviorHints: { notWebReady: false, filename: "aon.mp4" } }); continue; }
+    }
+    // mixdrop, voe and other IP-bound / JS-gated hosts → externalUrl (rendering
+    // them here would spend a second render and blow the Worker wall budget).
+    ext();
   }
   return { streams };
 }
