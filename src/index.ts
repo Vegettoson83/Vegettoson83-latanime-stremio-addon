@@ -112,6 +112,11 @@ interface Env {
   // download links) are rendered on Cloudflare's edge. Unset = manual only.
   CF_ACCOUNT_ID: string;
   CF_API_TOKEN: string;
+  // Optional residential companion (companion/aon-resolver) base URL. AON's
+  // Cloudflare zone blocks every datacenter egress we have; the companion runs
+  // a real browser on the user's residential IP and clears the challenge. When
+  // set, fetchAon forwards AON fetches to `${AON_COMPANION_URL}/aon?url=…`.
+  AON_COMPANION_URL: string;
 }
 
 function json(data: unknown, status = 200) {
@@ -158,7 +163,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.11.1",
+  version: "4.13.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -174,8 +179,9 @@ const MANIFEST = {
     // Browser Render, so we never want a home grid polling it — it surfaces only
     // when the user searches, and results/streams are cached hard afterwards.
     { type: "series", id: "aon-search", name: "Anime Online Ninja", extra: [{ name: "search", isRequired: true }] },
+    { type: "series", id: "animeav1-directory", name: "AnimeAv1 — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
   ],
-  idPrefixes: ["latanime:", "af:", "aon:"],
+  idPrefixes: ["latanime:", "af:", "aon:", "av1:"],
 };
 
 // ─── PROXY LOAD BALANCER ──────────────────────────────────────────────────────
@@ -297,6 +303,28 @@ function unwrapRenderedText(html: string): string {
 // API responses. No 500-byte floor (search hits can be small).
 async function fetchAon(pathOrUrl: string, env?: Env, timeoutMs = 12000): Promise<string> {
   const target = pathOrUrl.startsWith("http") ? pathOrUrl : `${AON_BASE}${pathOrUrl}`;
+
+  // 0) Residential companion (companion/aon-resolver). AON gates on IP
+  //    reputation + a JS challenge that no datacenter egress clears — not the
+  //    relay's clean IP, not Cloudflare's own rendering browser (verified: both
+  //    stay stuck on the interstitial). The only client AON lets through is a
+  //    real browser on a *residential* IP, so when the user runs the companion
+  //    (a headless browser on their own machine that holds cf_clearance) we
+  //    forward the fetch there and it comes back cleared. Gated on
+  //    AON_COMPANION_URL — unset ⇒ this leg is skipped and AON stays best-effort
+  //    via the (currently blocked) relay/render path below.
+  const companion = env?.AON_COMPANION_URL?.trim().replace(/\/$/, "");
+  if (companion) {
+    try {
+      const r = await fetch(`${companion}/aon?url=${encodeURIComponent(target)}`, {
+        signal: AbortSignal.timeout(Math.max(timeoutMs, 25000)),
+      });
+      if (r.ok) {
+        const body = await r.text();
+        if (body && !isCfChallenge(body)) return body;
+      }
+    } catch { /* companion offline/unreachable — fall through */ }
+  }
 
   // 1) Deno relay — a stable non-Cloudflare egress. Kept as the cheap first
   //    leg in case AON ever drops the challenge; today it comes back challenged.
@@ -443,6 +471,7 @@ async function searchAnimes(query: string, env?: Env) {
 async function getCatalog(catalogId: string, extra: Record<string, string>, env?: Env) {
   if (catalogId.startsWith("animefenix-")) return getAfCatalog(catalogId, extra, env);
   if (catalogId === "aon-search") return getAonCatalog(extra, env);
+  if (catalogId.startsWith("animeav1")) return getAv1Catalog(extra, env);
   if (extra.search?.trim()) return { metas: (await searchAnimes(extra.search.trim(), env)).map(toMetaPreview) };
   if (catalogId === "latanime-airing") return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`, env)).map(toMetaPreview) };
   const page = Math.floor(parseInt(extra.skip || "0", 10) / 30) + 1;
@@ -465,6 +494,7 @@ async function getCatalog(catalogId: string, extra: Record<string, string>, env?
 async function getMeta(id: string, tmdbKey: string, env?: Env) {
   if (id.startsWith("af:")) return getAfMeta(id, tmdbKey, env);
   if (id.startsWith("aon:")) return getAonMeta(id, tmdbKey, env);
+  if (id.startsWith("av1:")) return getAv1Meta(id, tmdbKey, env);
   const slug = id.replace("latanime:", "");
   const html = await fetchHtml(`${BASE_URL}/anime/${slug}`, env);
   const titleM = html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i) || html.match(/<title>(.*?)\s*[—\-|].*?<\/title>/i);
@@ -820,6 +850,7 @@ function parseEpisodeEmbeds(html: string) {
 async function getStreams(rawId: string, env: Env, request: Request) {
   if (rawId.startsWith("af:")) return getAfStreams(rawId, env, request);
   if (rawId.startsWith("aon:")) return getAonStreams(rawId, env, request);
+  if (rawId.startsWith("av1:")) return getAv1Streams(rawId, env, request);
   const parts = rawId.replace("latanime:", "").split(":");
   if (parts.length < 2) return { streams: [] };
   const [slug, epNum] = parts;
@@ -1348,6 +1379,146 @@ async function getAonStreams(rawId: string, env: Env, request: Request) {
   return { streams };
 }
 
+// ─── ANIMEAV1 (av1:) ─────────────────────────────────────────────────────────
+// animeav1.com — a Spanish/Latino anime site. Unlike AON it's Cloudflare-fronted
+// with NO challenge, so it's reachable server-side (verified: direct 200) and
+// scraped like AnimeFénix. Structure (SSR HTML with an inlined JS payload):
+//   • /catalogo?page={n}   — directory grid; cards are
+//     <a href="/media/{slug}"><span class="sr-only">Ver {Title}</span></a>
+//   • /catalogo?search={q} — search (same card shape)
+//   • /media/{slug}        — series: name in <title> ("Ver … Online Sub Español
+//     … - AnimeAV1"), synopsis:"…" in the payload, cover on
+//     cdn.animeav1.com/covers/{id}.jpg, episodes as /media/{slug}/{n} links
+//   • /media/{slug}/{n}    — episode: servers inlined as
+//     embeds:{SUB:[{server,url}],DUB:[…]} (HLS=zilla, Mega, UPNShare, MP4Upload)
+// ID scheme: av1:{slug} series, av1:{slug}:{ep} streams. Only MP4Upload yields a
+// cross-IP-playable MP4 (reuse extractMp4upload); zilla is a JS SPA player and
+// Mega/UPNShare/1fichier are IP/JS-gated → externalUrl (the user's own client).
+// SUB and Latino DUB are surfaced as separate streams.
+const AV1_BASE = "https://animeav1.com";
+
+// Direct fetch raced against the Deno relay (same pattern as fetchAf) — the
+// relay allowlists animeav1.com too, covering the case where Worker egress is
+// blocked the way latanime's is.
+async function fetchAv1(url: string, env?: Env, timeoutMs = 12000): Promise<string> {
+  const proxyBase = env?.FETCH_PROXY_URL?.trim();
+  const pull = async (name: string, r: Promise<Response>) => {
+    const res = await r;
+    if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`);
+    const txt = await res.text();
+    if (txt.length < 500) throw new Error(`${name}: too short (${txt.length}b)`);
+    return txt;
+  };
+  const racers: Promise<string>[] = [
+    pull("direct", fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
+  ];
+  if (proxyBase) {
+    racers.push(pull("relay", fetch(`${proxyBase}?url=${encodeURIComponent(url)}`, {
+      headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(timeoutMs),
+    })));
+  }
+  return Promise.any(racers);
+}
+
+function parseAv1Cards(html: string) {
+  const results: { id: string; name: string; poster: string }[] = [];
+  const seen = new Set<string>();
+  for (const m of html.matchAll(/href="\/media\/([a-z0-9-]+)"[^>]*>\s*<span class="sr-only">Ver ([^<]+)<\/span>/gi)) {
+    const slug = m[1];
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    results.push({ id: `av1:${slug}`, name: decodeEntities(m[2]).trim() || slug, poster: "" });
+  }
+  return results.slice(0, 100);
+}
+
+async function getAv1Catalog(extra: Record<string, string>, env?: Env) {
+  const q = (extra.search || "").trim();
+  if (q) {
+    return { metas: parseAv1Cards(await fetchAv1(`${AV1_BASE}/catalogo?search=${encodeURIComponent(q)}`, env)).map(toMetaPreview) };
+  }
+  const page = Math.floor(parseInt(extra.skip || "0", 10) / 30) + 1;
+  return { metas: parseAv1Cards(await fetchAv1(`${AV1_BASE}/catalogo?page=${page}`, env)).map(toMetaPreview) };
+}
+
+async function getAv1Meta(id: string, tmdbKey: string, env?: Env) {
+  const slug = id.replace("av1:", "");
+  const html = await fetchAv1(`${AV1_BASE}/media/${slug}`, env);
+  const name = decodeEntities(html.match(/<title>([\s\S]*?)<\/title>/i)?.[1] || slug)
+    .replace(/^\s*Ver\s+/i, "")
+    .replace(/\s+Online\s+Sub\s+Español[\s\S]*$/i, "")
+    .replace(/\s*-\s*AnimeAV1\s*$/i, "")
+    .trim() || slug;
+  const cover = html.match(/https:\/\/cdn\.animeav1\.com\/covers\/\d+\.[a-z]+/i)?.[0] || "";
+  const backdrop = html.match(/https:\/\/cdn\.animeav1\.com\/backdrops\/\d+\.[a-z]+/i)?.[0] || "";
+  const synopsis = decodeEntities(html.match(/synopsis:"([^"]+)"/i)?.[1] || "").trim();
+
+  const episodes: number[] = [];
+  const seen = new Set<number>();
+  const slugRe = slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  for (const m of html.matchAll(new RegExp(`/media/${slugRe}/(\\d+(?:\\.\\d+)?)(?![0-9])`, "gi"))) {
+    const n = parseFloat(m[1]);
+    if (!seen.has(n)) { seen.add(n); episodes.push(n); }
+  }
+  episodes.sort((a, b) => a - b);
+
+  const tmdb = await fetchTmdb(name, tmdbKey);
+  return {
+    meta: {
+      id, type: "series", name,
+      poster: tmdb?.poster || cover,
+      background: tmdb?.background || backdrop || cover,
+      description: tmdb?.description || synopsis,
+      posterShape: "poster",
+      releaseInfo: tmdb?.year || "",
+      videos: episodes.map((n) => ({ id: `av1:${slug}:${n}`, title: `Episodio ${n}`, season: 1, episode: n })),
+    },
+  };
+}
+
+// Pull {server,url} pairs out of the episode payload's embeds:{SUB:[…],DUB:[…]}
+// block (scoped away from the separate downloads:{…} block). Tags each with its
+// audio track so SUB and Latino DUB show as distinct streams.
+function parseAv1Embeds(html: string): { server: string; url: string; audio: string }[] {
+  const out: { server: string; url: string; audio: string }[] = [];
+  const block = html.match(/embeds:\{([\s\S]*?)\},\s*downloads:/i)?.[1]
+    ?? html.match(/embeds:\{([\s\S]*?)\}\s*[,}]/i)?.[1] ?? "";
+  for (const [audio, tag] of [["Sub", "SUB"], ["Latino", "DUB"]] as const) {
+    const arr = block.match(new RegExp(`${tag}:\\[([\\s\\S]*?)\\]`, "i"))?.[1] ?? "";
+    for (const m of arr.matchAll(/\{server:"([^"]*)",url:"([^"]*)"\}/gi)) {
+      out.push({ server: m[1], url: m[2], audio });
+    }
+  }
+  return out;
+}
+
+async function getAv1Streams(rawId: string, env: Env, request: Request) {
+  const parts = rawId.replace("av1:", "").split(":");
+  if (parts.length < 2) return { streams: [] };
+  const [slug, ep] = parts;
+  const html = await fetchAv1(`${AV1_BASE}/media/${slug}/${ep}`, env);
+  const embeds = parseAv1Embeds(html);
+  if (embeds.length === 0) return { streams: [] };
+
+  const streams: any[] = [];
+  const seenUrl = new Set<string>();
+  const add = (s: any) => { const k = s.url || s.externalUrl; if (k && !seenUrl.has(k)) { seenUrl.add(k); streams.push(s); } };
+
+  for (const { server, url, audio } of embeds) {
+    if (url.includes("mp4upload.com")) {
+      const mp4 = await extractMp4upload(url);
+      if (mp4) {
+        add({ url: mp4, name: "AnimeAv1 MP4", title: `▶ mp4upload — AnimeAv1 (${audio})`, behaviorHints: { notWebReady: false, filename: `${slug}-e${ep}.mp4`, bingeGroup: `av1-mp4upload-${audio.toLowerCase()}` } });
+        continue;
+      }
+    }
+    // zilla HLS (JS SPA player), Mega, UPNShare, 1fichier → IP/JS-gated, so hand
+    // the embed to the user's own client as an externalUrl.
+    add({ externalUrl: url, name: "AnimeAv1 🌐", title: `🌐 ${server} — AnimeAv1 (${audio})` });
+  }
+  return { streams };
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -1363,6 +1534,7 @@ export default {
         kvBinding: env.STREAM_CACHE ? "set" : "not set",
         fetchProxy: (env.FETCH_PROXY_URL || "").trim() || "not set",
         browserRendering: browserRenderingReady(env) ? "enabled" : "disabled (manual only)",
+        aonCompanion: (env.AON_COMPANION_URL || "").trim() || "not set",
       });
     }
 

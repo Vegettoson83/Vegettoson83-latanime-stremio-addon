@@ -56,13 +56,14 @@ async function handleFetch(target: string): Promise<Response> {
     return jsonError("invalid url", 400);
   }
   // Allowlist: latanime.org (HTML relay), animeonline.ninja (DooPlay REST +
-  // pages) and animefenix2.tv (second scrape source). latanime/animefenix block
-  // or throttle Cloudflare Worker egress but pass from Deno's clean IP.
+  // pages), animefenix2.tv and animeav1.com (second/third scrape sources).
+  // latanime/animefenix/animeav1 block or throttle Cloudflare Worker egress but
+  // pass from Deno's clean IP.
   // animeonline.ninja is different: it runs a site-wide managed JS challenge
   // that this relay CANNOT clear (Deno gets the same 403 "Just a moment"), so
   // the Worker escalates AON to Browser Rendering; the relay stays allowlisted
   // only as the cheap first attempt in case AON ever drops the challenge.
-  if (u.protocol !== "https:" || !/(^|\.)(latanime\.org|animeonline\.ninja|animefenix2\.tv)$/i.test(u.hostname)) {
+  if (u.protocol !== "https:" || !/(^|\.)(latanime\.org|animeonline\.ninja|animefenix2\.tv|animeav1\.com)$/i.test(u.hostname)) {
     return jsonError("host not allowed", 403);
   }
   try {
