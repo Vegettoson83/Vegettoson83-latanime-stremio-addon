@@ -63,7 +63,7 @@ async function handleFetch(target: string): Promise<Response> {
   // that this relay CANNOT clear (Deno gets the same 403 "Just a moment"), so
   // the Worker escalates AON to Browser Rendering; the relay stays allowlisted
   // only as the cheap first attempt in case AON ever drops the challenge.
-  if (u.protocol !== "https:" || !/(^|\.)(latanime\.org|animeonline\.ninja|animefenix2\.tv|animeav1\.com|doramaslat\.com)$/i.test(u.hostname)) {
+  if (u.protocol !== "https:" || !/(^|\.)(latanime\.org|animeonline\.ninja|animefenix2\.tv|animeav1\.com|doramaslat\.com|doramedplay\.net)$/i.test(u.hostname)) {
     return jsonError("host not allowed", 403);
   }
   try {
