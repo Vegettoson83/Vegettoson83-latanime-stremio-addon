@@ -163,7 +163,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.13.0",
+  version: "4.14.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -180,8 +180,9 @@ const MANIFEST = {
     // when the user searches, and results/streams are cached hard afterwards.
     { type: "series", id: "aon-search", name: "Anime Online Ninja", extra: [{ name: "search", isRequired: true }] },
     { type: "series", id: "animeav1-directory", name: "AnimeAv1 — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
+    { type: "series", id: "doramaslat-directory", name: "Doramas Latino — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
   ],
-  idPrefixes: ["latanime:", "af:", "aon:", "av1:"],
+  idPrefixes: ["latanime:", "af:", "aon:", "av1:", "dorama:"],
 };
 
 // ─── PROXY LOAD BALANCER ──────────────────────────────────────────────────────
@@ -472,6 +473,7 @@ async function getCatalog(catalogId: string, extra: Record<string, string>, env?
   if (catalogId.startsWith("animefenix-")) return getAfCatalog(catalogId, extra, env);
   if (catalogId === "aon-search") return getAonCatalog(extra, env);
   if (catalogId.startsWith("animeav1")) return getAv1Catalog(extra, env);
+  if (catalogId.startsWith("doramaslat")) return getDoramaCatalog(extra, env);
   if (extra.search?.trim()) return { metas: (await searchAnimes(extra.search.trim(), env)).map(toMetaPreview) };
   if (catalogId === "latanime-airing") return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`, env)).map(toMetaPreview) };
   const page = Math.floor(parseInt(extra.skip || "0", 10) / 30) + 1;
@@ -495,6 +497,7 @@ async function getMeta(id: string, tmdbKey: string, env?: Env) {
   if (id.startsWith("af:")) return getAfMeta(id, tmdbKey, env);
   if (id.startsWith("aon:")) return getAonMeta(id, tmdbKey, env);
   if (id.startsWith("av1:")) return getAv1Meta(id, tmdbKey, env);
+  if (id.startsWith("dorama:")) return getDoramaMeta(id, tmdbKey, env);
   const slug = id.replace("latanime:", "");
   const html = await fetchHtml(`${BASE_URL}/anime/${slug}`, env);
   const titleM = html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i) || html.match(/<title>(.*?)\s*[—\-|].*?<\/title>/i);
@@ -851,6 +854,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   if (rawId.startsWith("af:")) return getAfStreams(rawId, env, request);
   if (rawId.startsWith("aon:")) return getAonStreams(rawId, env, request);
   if (rawId.startsWith("av1:")) return getAv1Streams(rawId, env, request);
+  if (rawId.startsWith("dorama:")) return getDoramaStreams(rawId, env, request);
   const parts = rawId.replace("latanime:", "").split(":");
   if (parts.length < 2) return { streams: [] };
   const [slug, epNum] = parts;
@@ -1515,6 +1519,189 @@ async function getAv1Streams(rawId: string, env: Env, request: Request) {
     // zilla HLS (JS SPA player), Mega, UPNShare, 1fichier → IP/JS-gated, so hand
     // the embed to the user's own client as an externalUrl.
     add({ externalUrl: url, name: "AnimeAv1 🌐", title: `🌐 ${server} — AnimeAv1 (${audio})` });
+  }
+  return { streams };
+}
+
+// ─── DORAMAS LATINO (dorama:) ────────────────────────────────────────────────
+// doramaslat.com — a Latino-dubbed Korean/Asian drama site on stock DooPlay
+// WordPress. Same engine as Anime Online Ninja, but Cloudflare-fronted with NO
+// challenge, so it's reachable server-side and scraped from PUBLIC HTML + the
+// public DooPlay AJAX — no lifted tokens or client impersonation. Structure:
+//   • /?s={q}                       — WordPress search (avoids the nonce'd REST)
+//   • /tvshows/ , /tvshows/page/{n} — archive grid (cards → /tvshows/{slug})
+//   • /tvshows/{slug}/              — series: <title>, og:image, synopsis, and
+//     episodes as /episodes/{slug}-{season}x{episode} links
+//   • /episodes/{slug}-{s}x{e}/     — episode: <li class="dooplay_player_option"
+//     data-type data-post data-nume>; resolve each via admin-ajax:
+//       POST /wp-admin/admin-ajax.php  action=doo_player_ajax&post&nume&type
+//       → {embed_url:"<iframe src=…>"}  (ok.ru, streamwish family, mp4upload…)
+// ID scheme: dorama:{slug} series, dorama:{slug}:{s}x{e} streams.
+const DORAMA_BASE = "https://doramaslat.com";
+
+async function fetchDorama(url: string, env?: Env, timeoutMs = 12000): Promise<string> {
+  const proxyBase = env?.FETCH_PROXY_URL?.trim();
+  const pull = async (name: string, r: Promise<Response>) => {
+    const res = await r;
+    if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`);
+    const txt = await res.text();
+    if (txt.length < 400) throw new Error(`${name}: too short (${txt.length}b)`);
+    return txt;
+  };
+  const racers: Promise<string>[] = [
+    pull("direct", fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
+  ];
+  if (proxyBase) {
+    racers.push(pull("relay", fetch(`${proxyBase}?url=${encodeURIComponent(url)}`, {
+      headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(timeoutMs),
+    })));
+  }
+  return Promise.any(racers);
+}
+
+// Titles read "{Name} – (En Emision) Doramas Latino – DORAMAS LATINO"; the real
+// name is the first segment before the site's " – "/" | " decorations.
+function cleanDoramaTitle(s: string): string {
+  return decodeEntities(s).split(/\s+[–—|]\s+/)[0].replace(/\s+/g, " ").trim();
+}
+
+function parseDoramaCards(html: string) {
+  const results: { id: string; name: string; poster: string }[] = [];
+  const seen = new Set<string>();
+  const push = (slug: string, rawPoster: string, rawName: string) => {
+    if (!slug || seen.has(slug)) return;
+    seen.add(slug);
+    const poster = rawPoster.startsWith("http") ? rawPoster : rawPoster ? `${DORAMA_BASE}${rawPoster}` : "";
+    results.push({ id: `dorama:${slug}`, name: cleanDoramaTitle(rawName) || slug, poster });
+  };
+  // Archive cards: <div class="poster"><img src alt>…<a href="…/tvshows/{slug}/">
+  for (const m of html.matchAll(/<img[^>]+(?:data-src|src)="([^"]+)"[^>]*alt="([^"]*)"[\s\S]{0,220}?\/tvshows\/([a-z0-9-]+)\//gi)) {
+    push(m[3], m[1], m[2]);
+  }
+  // Search cards: <a href="…/tvshows/{slug}/">…<img src alt>
+  for (const m of html.matchAll(/\/tvshows\/([a-z0-9-]+)\/"[^>]*>[\s\S]{0,80}?<img[^>]+(?:data-src|src)="([^"]+)"[^>]*alt="([^"]*)"/gi)) {
+    push(m[1], m[2], m[3]);
+  }
+  return results.slice(0, 100);
+}
+
+async function getDoramaCatalog(extra: Record<string, string>, env?: Env) {
+  const q = (extra.search || "").trim();
+  if (q) {
+    return { metas: parseDoramaCards(await fetchDorama(`${DORAMA_BASE}/?s=${encodeURIComponent(q)}`, env)).map(toMetaPreview) };
+  }
+  const page = Math.floor(parseInt(extra.skip || "0", 10) / 45) + 1;
+  const path = page > 1 ? `${DORAMA_BASE}/tvshows/page/${page}/` : `${DORAMA_BASE}/tvshows/`;
+  return { metas: parseDoramaCards(await fetchDorama(path, env)).map(toMetaPreview) };
+}
+
+async function getDoramaMeta(id: string, tmdbKey: string, env?: Env) {
+  const slug = id.replace("dorama:", "");
+  const html = await fetchDorama(`${DORAMA_BASE}/tvshows/${slug}/`, env);
+  const name = cleanDoramaTitle(
+    html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i)?.[1]
+    || html.match(/<title>([\s\S]*?)<\/title>/i)?.[1] || slug,
+  ) || slug;
+  // Series pages carry no og:image; the hero poster is the first .poster <img>.
+  const poster = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i)?.[1]
+    || html.match(/<div class="poster">\s*<img[^>]+(?:data-src|src)="([^"]+)"/i)?.[1] || "";
+  const description = decodeEntities(
+    html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/i)?.[1]
+    || html.match(/<div[^>]+itemprop="description"[^>]*>([\s\S]*?)<\/div>/i)?.[1] || "",
+  ).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+
+  // Episodes carry their OWN slug (e.g. agente-kim-reactivado-1x6), distinct from
+  // the /tvshows/ slug, so read the real /episodes/… links off the page.
+  const episodes: { slug: string; s: number; e: number }[] = [];
+  const seen = new Set<string>();
+  for (const m of html.matchAll(/\/episodes\/([a-z0-9-]+-(\d+)x(\d+))\/?/gi)) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    episodes.push({ slug: m[1], s: parseInt(m[2], 10), e: parseInt(m[3], 10) });
+  }
+  episodes.sort((a, b) => a.s - b.s || a.e - b.e);
+
+  const tmdb = await fetchTmdb(name, tmdbKey);
+  return {
+    meta: {
+      id, type: "series", name,
+      poster: tmdb?.poster || poster,
+      background: tmdb?.background || poster,
+      description: tmdb?.description || description,
+      posterShape: "poster",
+      releaseInfo: tmdb?.year || "",
+      videos: episodes.map((ep) => ({ id: `dorama:${ep.slug}`, title: `T${ep.s} · Episodio ${ep.e}`, season: ep.s, episode: ep.e })),
+    },
+  };
+}
+
+// DooPlay player options carry (type, post, nume); the embed iframe is resolved
+// through the public doo_player_ajax admin-ajax action. Returns the embed URL.
+async function resolveDoramaEmbed(post: string, nume: string, type: string, env?: Env): Promise<string | null> {
+  try {
+    const r = await fetch(`${DORAMA_BASE}/wp-admin/admin-ajax.php`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": `${DORAMA_BASE}/`,
+        "User-Agent": CHROME_UA,
+      },
+      body: `action=doo_player_ajax&post=${encodeURIComponent(post)}&nume=${encodeURIComponent(nume)}&type=${encodeURIComponent(type)}`,
+      signal: AbortSignal.timeout(9000),
+    });
+    if (!r.ok) return null;
+    const data: any = await r.json();
+    const embed = typeof data?.embed_url === "string" ? data.embed_url : "";
+    if (!embed) return null;
+    // embed_url is either a raw URL or an <iframe src="…"> string.
+    let src = embed.match(/<iframe[^>]+src=["']([^"']+)["']/i)?.[1] || embed.trim();
+    src = src.replace(/\\\//g, "/");
+    if (src.startsWith("//")) src = `https:${src}`;
+    return /^https?:\/\//i.test(src) ? src : null;
+  } catch { return null; }
+}
+
+async function getDoramaStreams(rawId: string, env: Env, request: Request) {
+  // id is dorama:{episodeSlug} where episodeSlug already ends in -{s}x{e}
+  const epSlug = rawId.replace("dorama:", "");
+  if (!/-\d+x\d+$/.test(epSlug)) return { streams: [] };
+  const html = await fetchDorama(`${DORAMA_BASE}/episodes/${epSlug}/`, env);
+
+  // Player options — attribute order varies, so pull each <li ...player_option...>
+  // block then read its data-* individually. Quotes may be ' or ".
+  const options: { post: string; nume: string; type: string }[] = [];
+  for (const li of html.matchAll(/<li[^>]*dooplay_player_option[^>]*>/gi)) {
+    const tag = li[0];
+    const post = tag.match(/data-post=["']([^"']+)["']/i)?.[1];
+    const nume = tag.match(/data-nume=["']([^"']+)["']/i)?.[1];
+    const type = tag.match(/data-type=["']([^"']+)["']/i)?.[1] || "tv";
+    if (post && nume) options.push({ post, nume, type });
+  }
+  if (options.length === 0) return { streams: [] };
+
+  const denoBase = (env.FETCH_PROXY_URL || "").trim().replace(/\/fetch\/?$/, "").replace(/\/$/, "");
+  const streams: any[] = [];
+  const seenUrl = new Set<string>();
+  const add = (s: any) => { const k = s.url || s.externalUrl; if (k && !seenUrl.has(k)) { seenUrl.add(k); streams.push(s); } };
+
+  const embeds = await Promise.all(options.map((o) => resolveDoramaEmbed(o.post, o.nume, o.type, env)));
+  for (const embed of embeds) {
+    if (!embed) continue;
+    const host = embed.match(/https?:\/\/(?:www\.)?([a-z0-9-]+)\./i)?.[1] || "host";
+    const ext = () => add({ externalUrl: embed, name: "Doramas Latino 🌐", title: `🌐 ${host} — Doramas Latino` });
+
+    if (/streamwish|embedwish|wishfast|sfastwish|swishsrv|streamaly|streamis/i.test(embed)) {
+      if (denoBase) add({ url: `${denoBase}/streamwish?url=${encodeURIComponent(embed)}`, name: "Doramas Latino HLS", title: "▶ streamwish — Doramas Latino", behaviorHints: { notWebReady: false, filename: `${epSlug}.m3u8`, bingeGroup: "dorama-streamwish" } });
+      else ext();
+      continue;
+    }
+    if (embed.includes("mp4upload.com")) {
+      const u = await extractMp4upload(embed);
+      if (u) { add({ url: u, name: "Doramas Latino MP4", title: "▶ mp4upload — Doramas Latino", behaviorHints: { notWebReady: false, filename: `${epSlug}.mp4`, bingeGroup: "dorama-mp4upload" } }); continue; }
+    }
+    // ok.ru, mega, mixdrop and other IP/JS-gated hosts → externalUrl (user's client)
+    ext();
   }
   return { streams };
 }
