@@ -163,7 +163,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.0",
+  version: "4.15.1",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -1571,13 +1571,15 @@ async function fetchDorama(url: string, env?: Env, timeoutMs = 12000): Promise<s
   return Promise.any(racers);
 }
 
-// Titles read "{Name} – (En Emision) Doramas Latino" or "{Name} subtitulado | …";
-// the real name is the first segment before the site's " – "/" | " decorations,
-// with a trailing audio-tag word stripped.
+// Titles are decorated per site: doramaslat "{Name} – (En Emision) Doramas
+// Latino – …", doramedplay "Ver {Name} subtitulado online HD {tagline}". Recover
+// {Name}: drop a leading "Ver ", cut at the first " – "/" | " separator, then cut
+// at the first audio/quality keyword ("subtitulado", "online", "sub esp/spa", …).
 function cleanDoramaTitle(s: string): string {
-  return decodeEntities(s).split(/\s+[–—|]\s+/)[0]
-    .replace(/\s+(subtitulad[oa]|doblad[oa]|latino|castellano|sub\s+espa[nñ]ol)\s*$/i, "")
-    .replace(/\s+/g, " ").trim();
+  let t = decodeEntities(s).replace(/^\s*Ver\s+/i, "");
+  t = t.split(/\s+[–—|]\s+/)[0];
+  t = t.split(/\s+(?:subtitulad[oa]|doblad[oa]|online|en\s+hd|sub\s+(?:esp|sp)\w*|castellano|latino)\b/i)[0];
+  return t.replace(/\s*\((?:en\s+emisi[oó]n|finalizado)\)\s*$/i, "").replace(/\s+/g, " ").trim();
 }
 
 function parseDoramaCards(html: string, src: DoramaSource) {
