@@ -30,7 +30,9 @@ spec-compliant (https://github.com/Stremio/stremio-addon-sdk/tree/master/docs):
   budget. New network calls need an explicit `AbortSignal.timeout`.
 - **Fallback circuit breaker**: `fetchHtml`'s non-race fallbacks (Browser
   Rendering, free CORS proxies) are gated by a KV breaker (`ph:v1` key, 3
-  consecutive fails ⇒ skip for 5 min). The Phase-1 race is never gated, and
+  consecutive fails ⇒ skip for 5 min). A 429/503 with a `Retry-After` header
+  parks that path for exactly the stated duration instead (capped at 1h) —
+  honoring the server's explicit backoff. The Phase-1 race is never gated, and
   the happy path performs zero KV ops — health is only touched after the race
   has lost. `/debug-fetch` probes every path with timings + breaker state.
 - **Keep-warm cron**: a `*/10 * * * *` trigger (`[triggers]` in wrangler.toml,

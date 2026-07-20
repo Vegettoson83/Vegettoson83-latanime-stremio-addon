@@ -169,8 +169,11 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 // lapses. The happy path does zero KV ops — health is only read/written after
 // the Phase-1 race has already lost, which is rare.
 
-type PathHealth = Record<string, { fails: number; lastFail: number }>;
-const BREAKER = { key: "ph:v1", trip: 3, cooldownMs: 5 * 60 * 1000, ttl: 24 * 60 * 60 };
+// retryUntil, when set, is a hard "don't touch this path until" wall from the
+// server's own Retry-After header (429/503) — honored regardless of fail count,
+// so we obey an explicit backoff instead of hammering into a stated cooldown.
+type PathHealth = Record<string, { fails: number; lastFail: number; retryUntil?: number }>;
+const BREAKER = { key: "ph:v1", trip: 3, cooldownMs: 5 * 60 * 1000, ttl: 24 * 60 * 60, maxRetryAfterMs: 60 * 60 * 1000 };
 
 async function healthLoad(kv: KVNamespace | undefined): Promise<PathHealth> {
   return ((await cacheGet(BREAKER.key, kv)) as PathHealth) || {};
@@ -178,17 +181,31 @@ async function healthLoad(kv: KVNamespace | undefined): Promise<PathHealth> {
 
 function healthOpen(h: PathHealth, name: string): boolean {
   const s = h[name];
-  return !!s && s.fails >= BREAKER.trip && Date.now() - s.lastFail < BREAKER.cooldownMs;
+  if (!s) return false;
+  if (s.retryUntil && Date.now() < s.retryUntil) return true;
+  return s.fails >= BREAKER.trip && Date.now() - s.lastFail < BREAKER.cooldownMs;
 }
 
-function healthMark(h: PathHealth, name: string, ok: boolean) {
-  if (ok) delete h[name];
-  else h[name] = { fails: (h[name]?.fails || 0) + 1, lastFail: Date.now() };
+function healthMark(h: PathHealth, name: string, ok: boolean, retryAfterMs?: number) {
+  if (ok) { delete h[name]; return; }
+  h[name] = { fails: (h[name]?.fails || 0) + 1, lastFail: Date.now() };
+  if (retryAfterMs && retryAfterMs > 0) h[name].retryUntil = Date.now() + Math.min(retryAfterMs, BREAKER.maxRetryAfterMs);
+}
+
+// Parse a Retry-After header (RFC 7231: delta-seconds or an HTTP-date) into ms,
+// or null when absent/unparseable. Only meaningful on 429/503 responses.
+function retryAfterMs(r: Response): number | null {
+  const ra = r.headers.get("retry-after");
+  if (!ra) return null;
+  const t = ra.trim();
+  if (/^\d+$/.test(t)) return parseInt(t, 10) * 1000;
+  const when = Date.parse(t);
+  return isNaN(when) ? null : Math.max(0, when - Date.now());
 }
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.16.0",
+  version: "4.16.1",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -241,7 +258,17 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
   const tryFetch = async (name: string, fetcher: () => Promise<Response>): Promise<string> => {
     if (controller.signal.aborted) throw new Error(`${name}: global timeout`);
     const r = await fetcher();
-    if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
+    if (!r.ok) {
+      const err = new Error(`${name}: HTTP ${r.status}`) as Error & { retryAfterMs?: number };
+      // Honor an explicit server backoff (429/503 Retry-After) so the breaker
+      // parks this path for exactly as long as the server asked, not the flat
+      // default cooldown.
+      if (r.status === 429 || r.status === 503) {
+        const ms = retryAfterMs(r);
+        if (ms != null) err.retryAfterMs = ms;
+      }
+      throw err;
+    }
     const html = await r.text();
     if (html.length < 500) throw new Error(`${name}: too short (${html.length}b)`);
     if (name !== "direct") console.log(`[fetchHtml] ${name} for ${url}`);
@@ -319,7 +346,7 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
         await persistHealth();
         return html;
       } catch (e) {
-        healthMark(health, name, false);
+        healthMark(health, name, false, (e as { retryAfterMs?: number })?.retryAfterMs);
         console.log(`[fetchHtml] ${name} failed: ${e}`);
       }
     }
