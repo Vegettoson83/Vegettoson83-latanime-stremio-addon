@@ -28,6 +28,12 @@ FETCH_PROXY_URL = "https://vegettoson83-latanime-stremi.vegettoson83.deno.net/fe
 # extraction fully manual (no browser, no cost).
 CF_ACCOUNT_ID = "d955dcf5145dca9d036b7f70caae0f86"
 
+# Keep-warm cron: refreshes the home-board catalog cache and keeps the Deno
+# relay isolate hot (see the `scheduled` handler in src/index.ts). Applied by
+# Workers Builds on deploy like every other setting here.
+[triggers]
+crons = ["*/10 * * * *"]
+
 [[kv_namespaces]]
 binding     = "STREAM_CACHE"
 id          = "19b6cbbb876343ffa950e8a72959b7f3"
