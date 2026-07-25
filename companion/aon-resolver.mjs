@@ -32,6 +32,22 @@ const AON_HOST = /(^|\.)animeonline\.ninja$/i; // allowlist — this proxy is AO
 const UA = process.env.AON_UA ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const NAV_TIMEOUT = Number(process.env.AON_NAV_TIMEOUT || 30000);
+// Where the Chromium binary lives. On a normal PC leave unset — Playwright uses
+// the one it downloaded. On Termux (Android/Bionic) Playwright's downloaded
+// Chromium won't run, so `pkg install chromium` and point here:
+//   AON_CHROMIUM_PATH=$PREFIX/bin/chromium-browser
+const CHROMIUM_PATH = process.env.AON_CHROMIUM_PATH?.trim() || undefined;
+// Headful mode: launch a visible window instead of headless. Set AON_HEADFUL=1
+// with a display (Termux:X11, or a desktop) to solve a stubborn challenge
+// on-screen once; the persistent context then reuses that clearance headlessly.
+const HEADFUL = process.env.AON_HEADFUL === "1";
+// Keep-warm: re-navigate to AON this often so the cf_clearance the persistent
+// context holds never goes cold. 0 disables it. Default 20 min sits under the
+// typical cf_clearance lifetime (~30 min–hours), so a real request never pays
+// the 5–15s challenge-solve — the browser has already solved it in the
+// background. Set AON_WARM_URL to change the page it warms (default: AON root).
+const WARM_MS = Number(process.env.AON_WARM_MS ?? 20 * 60 * 1000);
+const WARM_URL = process.env.AON_WARM_URL || "https://ww3.animeonline.ninja/";
 
 function isChallenge(body) {
   return /<title>Just a moment|_cf_chl_opt|__cf_chl_|challenge-platform|cf-browser-verification/i.test(body);
@@ -42,6 +58,12 @@ function allowed(target) {
 }
 
 // ── Browser backend (preferred): a persistent context that keeps cf_clearance ──
+// The context is cached and reused so the challenge is solved once. If the
+// browser process ever dies (crash, OOM, machine sleep), the cached handles go
+// stale; we listen for 'disconnected' and null them out so the next call
+// transparently relaunches instead of failing every request until a manual
+// restart.
+let browser = null;
 let browserCtx = null;
 let playwright = null;
 async function getContext() {
@@ -51,7 +73,12 @@ async function getContext() {
     catch { playwright = false; }
   }
   if (!playwright) return null;
-  const browser = await playwright.launch({ headless: true });
+  browser = await playwright.launch({ headless: !HEADFUL, executablePath: CHROMIUM_PATH });
+  browser.on("disconnected", () => {
+    if (browserCtx) console.warn("[aon] browser disconnected — will relaunch on next request");
+    browser = null;
+    browserCtx = null;
+  });
   browserCtx = await browser.newContext({ userAgent: UA, locale: "es-MX" });
   return browserCtx;
 }
@@ -97,7 +124,15 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(status, { "Content-Type": type, "Access-Control-Allow-Origin": "*" }).end(body);
 
   if (url.pathname === "/health") {
-    return send(200, JSON.stringify({ ok: true, backend: browserCtx ? "browser" : (playwright === false ? "cookie-fetch" : "browser(lazy)"), ua: UA }), "application/json");
+    return send(200, JSON.stringify({
+      ok: true,
+      backend: browserCtx ? "browser" : (playwright === false ? "cookie-fetch" : "browser(lazy)"),
+      ua: UA,
+      keepWarmMs: WARM_MS,
+      warming,
+      headful: HEADFUL,
+      chromiumPath: CHROMIUM_PATH || "(playwright default)",
+    }), "application/json");
   }
   if (url.pathname !== "/aon") return send(404, "not found");
 
@@ -119,9 +154,32 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// ── Keep-warm: hold cf_clearance fresh in the background ───────────────────────
+// Re-navigates the persistent context to AON on a timer so the challenge is
+// (re)solved before a real request ever needs it. Serialized via `warming` so a
+// slow solve can't stack overlapping navigations. Silent no-op when Playwright
+// isn't installed (cookie-fetch mode has no context to warm).
+let warming = false;
+async function warm(reason) {
+  if (warming) return;
+  warming = true;
+  try {
+    const body = await fetchViaBrowser(WARM_URL);
+    if (body == null) return; // no browser backend — nothing to warm
+    console.log(`[aon] warm (${reason}): ${isChallenge(body) ? "challenge still up" : `cleared, ${body.length}b`}`);
+  } catch (e) {
+    console.warn(`[aon] warm (${reason}) failed: ${e}`);
+  } finally {
+    warming = false;
+  }
+}
+
 server.listen(PORT, () => {
   console.log(`AON residential resolver on http://localhost:${PORT}`);
   console.log(`  health: http://localhost:${PORT}/health`);
   console.log(`  fetch : http://localhost:${PORT}/aon?url=https://ww3.animeonline.ninja/`);
   console.log(`Expose with a tunnel, then set the Worker var AON_COMPANION_URL to the public URL.`);
+  // Warm on startup so the first real request skips the solve, then on a timer.
+  warm("startup");
+  if (WARM_MS > 0) setInterval(() => warm("timer"), WARM_MS).unref();
 });

@@ -28,6 +28,17 @@ spec-compliant (https://github.com/Stremio/stremio-addon-sdk/tree/master/docs):
   Map previously grew unbounded and caused 1101 crashes. TTLs live in `TTL`.
 - **Time budget**: Worker wall time is 30s; `fetchHtml` holds a hard 25s
   budget. New network calls need an explicit `AbortSignal.timeout`.
+- **Fallback circuit breaker**: `fetchHtml`'s non-race fallbacks (Browser
+  Rendering, free CORS proxies) are gated by a KV breaker (`ph:v1` key, 3
+  consecutive fails ⇒ skip for 5 min). A 429/503 with a `Retry-After` header
+  parks that path for exactly the stated duration instead (capped at 1h) —
+  honoring the server's explicit backoff. The Phase-1 race is never gated, and
+  the happy path performs zero KV ops — health is only touched after the race
+  has lost. `/debug-fetch` probes every path with timings + breaker state.
+- **Keep-warm cron**: a `*/10 * * * *` trigger (`[triggers]` in wrangler.toml,
+  `scheduled` handler) re-scrapes `latanime-latest` into KV and, via
+  `fetchHtml`, keeps the Deno relay isolate warm. Note it costs ~144 KV
+  writes/day — keep that in mind before adding more warmed keys.
 - **latanime fetch path**: latanime.org is behind Cloudflare and blocks
   Worker egress at the network level, so direct `fetch` from the Worker is
   unreliable. `fetchHtml` **races** direct against `FETCH_PROXY_URL` (the

@@ -161,9 +161,51 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
   }
 }
 
+// ─── FETCH-PATH HEALTH — KV circuit breaker for fetchHtml fallbacks ──────────
+// The Phase-1 race is self-healing (a dead leg just loses the race), but the
+// fallbacks are not: Browser Rendering bills per render, and the free CORS
+// proxies each burn up to 8s sequentially when they're down. Track consecutive
+// failures per fallback path in KV and skip a tripped path until its cooldown
+// lapses. The happy path does zero KV ops — health is only read/written after
+// the Phase-1 race has already lost, which is rare.
+
+// retryUntil, when set, is a hard "don't touch this path until" wall from the
+// server's own Retry-After header (429/503) — honored regardless of fail count,
+// so we obey an explicit backoff instead of hammering into a stated cooldown.
+type PathHealth = Record<string, { fails: number; lastFail: number; retryUntil?: number }>;
+const BREAKER = { key: "ph:v1", trip: 3, cooldownMs: 5 * 60 * 1000, ttl: 24 * 60 * 60, maxRetryAfterMs: 60 * 60 * 1000 };
+
+async function healthLoad(kv: KVNamespace | undefined): Promise<PathHealth> {
+  return ((await cacheGet(BREAKER.key, kv)) as PathHealth) || {};
+}
+
+function healthOpen(h: PathHealth, name: string): boolean {
+  const s = h[name];
+  if (!s) return false;
+  if (s.retryUntil && Date.now() < s.retryUntil) return true;
+  return s.fails >= BREAKER.trip && Date.now() - s.lastFail < BREAKER.cooldownMs;
+}
+
+function healthMark(h: PathHealth, name: string, ok: boolean, retryAfterMs?: number) {
+  if (ok) { delete h[name]; return; }
+  h[name] = { fails: (h[name]?.fails || 0) + 1, lastFail: Date.now() };
+  if (retryAfterMs && retryAfterMs > 0) h[name].retryUntil = Date.now() + Math.min(retryAfterMs, BREAKER.maxRetryAfterMs);
+}
+
+// Parse a Retry-After header (RFC 7231: delta-seconds or an HTTP-date) into ms,
+// or null when absent/unparseable. Only meaningful on 429/503 responses.
+function retryAfterMs(r: Response): number | null {
+  const ra = r.headers.get("retry-after");
+  if (!ra) return null;
+  const t = ra.trim();
+  if (/^\d+$/.test(t)) return parseInt(t, 10) * 1000;
+  const when = Date.parse(t);
+  return isNaN(when) ? null : Math.max(0, when - Date.now());
+}
+
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.1",
+  version: "4.16.1",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -216,7 +258,17 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
   const tryFetch = async (name: string, fetcher: () => Promise<Response>): Promise<string> => {
     if (controller.signal.aborted) throw new Error(`${name}: global timeout`);
     const r = await fetcher();
-    if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
+    if (!r.ok) {
+      const err = new Error(`${name}: HTTP ${r.status}`) as Error & { retryAfterMs?: number };
+      // Honor an explicit server backoff (429/503 Retry-After) so the breaker
+      // parks this path for exactly as long as the server asked, not the flat
+      // default cooldown.
+      if (r.status === 429 || r.status === 503) {
+        const ms = retryAfterMs(r);
+        if (ms != null) err.retryAfterMs = ms;
+      }
+      throw err;
+    }
     const html = await r.text();
     if (html.length < 500) throw new Error(`${name}: too short (${html.length}b)`);
     if (name !== "direct") console.log(`[fetchHtml] ${name} for ${url}`);
@@ -245,15 +297,35 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
       return html;
     } catch { /* every racer rejected — fall through */ }
 
+    // Fallbacks from here on are breaker-gated: a path that failed
+    // BREAKER.trip times in a row is skipped until its cooldown lapses, and
+    // outcomes are persisted only when the state actually changed.
+    const kv = env?.STREAM_CACHE;
+    const health = await healthLoad(kv);
+    const healthBefore = JSON.stringify(health);
+    const persistHealth = async () => {
+      if (JSON.stringify(health) !== healthBefore) await cacheSet(BREAKER.key, health, BREAKER.ttl, kv);
+    };
+
     // Phase 2: Cloudflare Browser Rendering — a real edge browser that clears
     // the Cloudflare challenge reliably. Only fires when configured; latanime
     // pages are server-rendered so "load" is enough (no JS wait needed).
-    if (env && browserRenderingReady(env) && !controller.signal.aborted) {
-      const html = await renderPage(url, env, { wait: "load", timeoutMs: 16000 });
-      if (html && html.length >= 500) {
-        clearTimeout(globalTimer);
-        console.log(`[fetchHtml] render for ${url}`);
-        return html;
+    if (env && browserRenderingReady(env) && !controller.signal.aborted && !healthOpen(health, "render")) {
+      try {
+        const html = await renderPage(url, env, { wait: "load", timeoutMs: 16000 });
+        const ok = !!html && html.length >= 500;
+        healthMark(health, "render", ok);
+        if (ok) {
+          clearTimeout(globalTimer);
+          await persistHealth();
+          console.log(`[fetchHtml] render for ${url}`);
+          return html!;
+        }
+      } catch (e) {
+        // A render throw used to abort fetchHtml before the CORS proxies ever
+        // ran; record the strike and keep falling through instead.
+        healthMark(health, "render", false);
+        console.log(`[fetchHtml] render failed: ${e}`);
       }
     }
 
@@ -264,17 +336,22 @@ async function fetchHtml(url: string, env?: Env): Promise<string> {
       ["corsproxy",  `https://corsproxy.io/?${encoded}`],
     ] as [string, string][]) {
       if (controller.signal.aborted) break;
+      if (healthOpen(health, name)) { console.log(`[fetchHtml] ${name} skipped (breaker open)`); continue; }
       try {
         const html = await tryFetch(name, () =>
           fetch(proxyUrl, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(8000) })
         );
         clearTimeout(globalTimer);
+        healthMark(health, name, true);
+        await persistHealth();
         return html;
       } catch (e) {
+        healthMark(health, name, false, (e as { retryAfterMs?: number })?.retryAfterMs);
         console.log(`[fetchHtml] ${name} failed: ${e}`);
       }
     }
 
+    await persistHealth();
     throw new Error(`All fetch strategies failed for ${url}`);
   } finally {
     clearTimeout(globalTimer);
@@ -1742,6 +1819,49 @@ export default {
       });
     }
 
+    if (path === "/debug-fetch") {
+      // Probes every fetchHtml path in parallel against one URL with per-path
+      // timing and outcome, plus the live circuit-breaker state — so a fetch
+      // failure is watched, not guessed. Browser Rendering is metered, so its
+      // leg only runs when explicitly asked for.
+      //   /debug-fetch                → latanime home through every path
+      //   /debug-fetch?url=…&render=1 → custom URL, include the render leg
+      const testUrl = url.searchParams.get("url") || `${BASE_URL}/`;
+      const enc = encodeURIComponent(testUrl);
+      const probe = async (fn: () => Promise<Response>) => {
+        const t = Date.now();
+        try {
+          const r = await fn();
+          const body = await r.text();
+          const challenge = isCfChallenge(body);
+          return { ok: r.ok && body.length >= 500 && !challenge, ms: Date.now() - t, status: r.status, len: body.length, ...(challenge ? { challenge } : {}) };
+        } catch (e) {
+          return { ok: false, ms: Date.now() - t, error: String(e).slice(0, 200) };
+        }
+      };
+      const proxyBase = (env.FETCH_PROXY_URL || "").trim();
+      const probes: Record<string, Promise<unknown>> = {
+        direct: probe(() => fetch(testUrl, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
+        fetchproxy: proxyBase
+          ? probe(() => fetch(`${proxyBase}?url=${enc}`, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(12000) }))
+          : Promise.resolve({ ok: false, error: "FETCH_PROXY_URL not set" }),
+        allorigins: probe(() => fetch(`https://api.allorigins.win/raw?url=${enc}`, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(8000) })),
+        codetabs: probe(() => fetch(`https://api.codetabs.com/v1/proxy?quest=${enc}`, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(8000) })),
+        corsproxy: probe(() => fetch(`https://corsproxy.io/?${enc}`, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(8000) })),
+      };
+      if (url.searchParams.get("render") === "1") {
+        probes.render = (async () => {
+          const t = Date.now();
+          try {
+            const h = await renderPage(testUrl, env, { wait: "load", timeoutMs: 16000 });
+            return { ok: !!h && h.length >= 500 && !isCfChallenge(h), ms: Date.now() - t, len: h?.length ?? 0 };
+          } catch (e) { return { ok: false, ms: Date.now() - t, error: String(e).slice(0, 200) }; }
+        })();
+      }
+      const entries = await Promise.all(Object.entries(probes).map(async ([k, p]) => [k, await p] as const));
+      return json({ testUrl, paths: Object.fromEntries(entries), breaker: await healthLoad(env.STREAM_CACHE) });
+    }
+
     if (path === "/debug-render") {
       const testUrl = url.searchParams.get("url");
       if (!testUrl) return json({ error: "Missing ?url=" });
@@ -2022,5 +2142,22 @@ export default {
     }
 
     return new Response("Not found", { status: 404, headers: CORS });
+  },
+
+  // Keep-warm cron ([triggers] in wrangler.toml, every 10 min — same as
+  // TTL.catalog): re-scrapes the home board row into KV so users always land
+  // on a warm cache, and — because getCatalog goes through fetchHtml — every
+  // tick also keeps the Deno relay isolate hot with a pooled connection to
+  // latanime, so the first real click never pays a relay cold start.
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    try {
+      const result = await getCatalog("latanime-latest", {}, env);
+      if (result.metas.length > 0) {
+        await cacheSet("catalog:latanime-latest:::", result, TTL.catalog, env.STREAM_CACHE);
+        console.log(`[cron] warmed latanime-latest (${result.metas.length} metas)`);
+      }
+    } catch (e) {
+      console.log(`[cron] warm failed: ${e}`);
+    }
   },
 };
