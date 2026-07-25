@@ -56,6 +56,29 @@ spec-compliant (https://github.com/Stremio/stremio-addon-sdk/tree/master/docs):
   to it first (gated on `AON_COMPANION_URL`; unset ⇒ AON is unreachable and every
   `aon:` request returns empty). Never re-add a Worker/Deno/Browser-Rendering AON
   fetch as the primary path — they cannot clear the challenge.
+- **The companion also resolves browser-gated players** (`/embed?url=…`), and it
+  is the last rung of the extraction ladder for every source. Most embed hosts
+  are the same class of problem as AON, verified 2026-07 from datacenter IPs:
+  dsvplay = Cloudflare managed challenge, voe = DDoS-Guard, bysekoze = SPA whose
+  API demands a proof-of-work *plus* a real browser fingerprint (canvas/audio/
+  WebGL hashes + ECDSA attestation), mixdrop = no longer packs `MDCore.wurl` and
+  binds delivery to the viewer's IP. Instead of a manual extractor per host,
+  `/embed` drives the real browser at the page and **sniffs the network for the
+  media URL the player itself requests** — host-agnostic, so it survives markup
+  changes. Adding a host is normally one entry in `EMBED_HOSTS`.
+  Because the URL is minted on the user's residential IP and Stremio plays from
+  that same IP, it is handed over **directly** with the Referer carried in
+  `behaviorHints.proxyHeaders` (which requires `notWebReady: true`) — Stremio's
+  local streaming server replays the exact request. Never route a companion URL
+  through the Worker or Deno proxies: that substitutes a datacenter IP and 403s.
+  Worker side this is `resolveViaCompanion` / `companionResolveMany` /
+  `companionStream`, KV-cached under `ce:`; probe it with `/debug-embed?url=`.
+  Resolves are batched in parallel under a per-source wall-clock budget (tighter
+  for `aon:`, which has already spent a render on the episode page); whatever
+  misses the budget stays warm in the companion's own cache and lands on the
+  next request. Mega is the one permanent `externalUrl` — its files are
+  end-to-end encrypted under a key in the URL *fragment*, decoded to a `blob:`
+  in-page, so no media URL exists to hand Stremio.
 
 ## Volatile layer (expected churn)
 
@@ -67,16 +90,19 @@ old variant behind:
   scraping. `data-player` is base64 of the provider URL (decode-first, see
   comment in `parseEpisodeEmbeds`).
 - Per-host extractors (`extractMp4upload`, `extractHexload`,
-  `resolveMediafire`). Add a new host by writing another manual extractor, not
-  by reaching for a browser.
+  `resolveMediafire`). Prefer a manual extractor when the host yields to plain
+  HTTP — it's the cheapest and fastest path. Reach for the companion's `/embed`
+  only when the host actually gates on being a browser on a home connection.
 - **IP-bound hosts** (savefiles/streamhls, mixdrop) mint signed URLs locked to
   the extractor's IP, so a Worker-side extraction 403s when Stremio (a
   different IP) plays it. savefiles HLS is resolved and proxied entirely by the
   Deno service (`/savefiles`, `/hls` in `deno/fetch.ts`) so extraction and every
   segment fetch share Deno's one stable IP; the Worker just points Stremio at
-  `${denoBase}/savefiles?code=…`. mixdrop stays an `externalUrl` (user's own IP
-  resolves it). Never re-add a Worker-side savefiles/mixdrop extractor — it
-  produces a dead stream.
+  `${denoBase}/savefiles?code=…`. mixdrop is resolved by the companion instead —
+  same IP mints and plays it, so no proxy is needed at all. Never re-add a
+  Worker-side savefiles/mixdrop extractor — it produces a dead stream.
+  (`extractMixdrop` survives only as a `/debug-mixdrop` probe, and as of 2026-07
+  it returns null: mixdrop dropped the packer block it parses.)
 - `unpackPacker` reverses Dean Edwards `eval(function(p,a,c,k,e,d){…})`
   packing — reuse it for any host that ships its config that way.
 - `decodeVoe` reverses VOE's `<script type="application/json">` obfuscation
@@ -84,8 +110,9 @@ old variant behind:
   `findMediaUrl` only sees the blob via Browser-Rendering output; the render
   resolve is cached per embed (`resolveViaRender`, `rr:` KV keys, `TTL.render`).
 - `/debug-extract?id=slug:episode` runs every extractor with timings, and
-  `/debug-mixdrop?url=` / `/debug-host?url=` probe a single embed — use them
-  to diagnose extraction failures on the deployed worker.
+  `/debug-mixdrop?url=` / `/debug-host?url=` / `/debug-embed?url=` probe a
+  single embed (the last one through the companion, `&fresh=1` to skip the KV
+  cache) — use them to diagnose extraction failures on the deployed worker.
 
 ## Rules
 
