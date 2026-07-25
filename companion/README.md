@@ -72,6 +72,19 @@ The cookie expires (~30 min–hours) and must be re-pasted; the Playwright backe
 refreshes it automatically, so the browser mode is recommended for anything but a
 quick test.
 
+## Self-healing (browser mode)
+
+The Playwright backend keeps itself ready without intervention:
+
+- **Crash recovery** — if the headless browser dies (crash, OOM, the machine
+  sleeping), the resolver notices the disconnect and relaunches it on the next
+  request instead of failing every call until you restart.
+- **Keep-warm** — it re-navigates to AON in the background every `AON_WARM_MS`
+  (default 20 min, under the typical `cf_clearance` lifetime), so the challenge
+  is re-solved *before* a real request needs it. Playback never waits on the
+  5–15s solve. Set `AON_WARM_MS=0` to disable, or `AON_WARM_URL` to warm a
+  specific page. `/health` reports `keepWarmMs` and whether a warm is in flight.
+
 ## Notes
 
 - The resolver is **AON-only** (hostname allowlist) — it won't proxy anything
