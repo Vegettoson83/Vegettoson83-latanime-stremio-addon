@@ -115,7 +115,10 @@ interface Env {
   // Optional residential companion (companion/aon-resolver) base URL. AON's
   // Cloudflare zone blocks every datacenter egress we have; the companion runs
   // a real browser on the user's residential IP and clears the challenge. When
-  // set, fetchAon forwards AON fetches to `${AON_COMPANION_URL}/aon?url=…`.
+  // set, fetchAon forwards AON fetches to `${AON_COMPANION_URL}/aon?url=…`, and
+  // every browser-gated player (dsvplay, voe, bysekoze, mixdrop, … — the hosts
+  // that used to be externalUrl-only) resolves via `${…}/embed?url=…`. Unset ⇒
+  // AON is unreachable and those players stay externalUrl.
   AON_COMPANION_URL: string;
 }
 
@@ -142,6 +145,13 @@ const TTL = {
   // re-rendered (and re-billed) on every request.
   render:    60 * 60,       // 60 min — resolved browser-render result
   renderMiss: 15 * 60,      // 15 min — a host that failed to render
+  // Companion-resolved embeds. Same reasoning as render, but shorter: these
+  // URLs are minted by the player itself and are the most aggressively signed
+  // of the lot (voe/mixdrop tokens are minutes-to-an-hour). A miss caches
+  // briefly so a host that is simply down doesn't re-drive the browser on
+  // every request, but short enough that a transient failure self-heals.
+  companion:     25 * 60,   // 25 min — resolved companion media URL
+  companionMiss:  5 * 60,   // 5 min  — an embed the companion couldn't resolve
 };
 
 async function cacheGet(key: string, kv: KVNamespace | undefined): Promise<unknown> {
@@ -163,7 +173,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.1",
+  version: "4.16.0",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -783,6 +793,96 @@ async function resolveViaRender(
   return media;
 }
 
+// ─── RESIDENTIAL COMPANION EMBED RESOLVER ──────────────────────────────────
+// The last and strongest rung of the extraction ladder, and the only one that
+// clears the hosts below — verified 2026-07 from datacenter IPs (Worker, Deno
+// relay, Cloudflare Browser Rendering all fail):
+//   • dsvplay  — Cloudflare managed challenge      • voe — DDoS-Guard challenge
+//   • bysekoze — SPA whose API demands a proof-of-work plus a real browser
+//                fingerprint (canvas/audio/WebGL hashes + ECDSA attestation)
+//   • mixdrop  — no longer packs MDCore.wurl; delivery URL is bound to the
+//                viewer's IP
+// Those aren't scraping problems, they're "prove you are a browser on a home
+// connection" problems — so we ask the one component that is exactly that. The
+// companion drives its browser at the embed and reports the media URL the
+// player itself requested, which is why it doesn't care how the host obfuscates.
+//
+// The resulting URL is signed for the companion's residential IP — the same IP
+// Stremio plays from — so it is handed over DIRECTLY. Never route it through
+// the worker or Deno proxies: that would swap in a datacenter IP and 403,
+// exactly the way a worker-side savefiles extraction does.
+type CompanionMedia = { url: string; isHls: boolean; referer: string; ua?: string };
+
+function companionBase(env: Env): string {
+  return (env.AON_COMPANION_URL || "").trim().replace(/\/$/, "");
+}
+
+// One embed → its media URL, cached in KV (hit and miss both) so a resolve that
+// cost a browser navigation is spent once per token lifetime, not per request.
+async function resolveViaCompanion(embedUrl: string, env: Env, timeoutMs: number): Promise<CompanionMedia | null> {
+  const base = companionBase(env);
+  if (!base) return null;
+  const key = `ce:${embedUrl}`;
+  const cached = await cacheGet(key, env.STREAM_CACHE) as (CompanionMedia & { miss?: boolean }) | null;
+  if (cached) return cached.miss ? null : cached;
+  try {
+    const r = await fetch(`${base}/embed?url=${encodeURIComponent(embedUrl)}`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!r.ok) {
+      // 503 = companion has no browser backend at all. That's a setup problem,
+      // not a dead host, so don't cache it as a miss and burn the retry.
+      if (r.status !== 503) await cacheSet(key, { miss: true }, TTL.companionMiss, env.STREAM_CACHE);
+      return null;
+    }
+    const media = await r.json() as CompanionMedia;
+    if (!media?.url || !/^https?:/i.test(media.url)) return null;
+    await cacheSet(key, media, TTL.companion, env.STREAM_CACHE);
+    return media;
+  } catch {
+    // Timed out or the companion is offline. The resolve is still running over
+    // there and lands in its own cache, so the next request usually hits warm —
+    // deliberately NOT cached as a miss.
+    return null;
+  }
+}
+
+// Resolve a batch of embeds in parallel under one shared wall-clock budget.
+// Worker wall time is 30s and a cold browser resolve is ~5-20s, so a first play
+// may only land the fastest hosts; the rest are cached by the companion and
+// appear on the next request. Budget is per source because AON has already
+// spent a companion render on the episode page itself.
+async function companionResolveMany(
+  urls: string[], env: Env, budgetMs = 14000,
+): Promise<Map<string, CompanionMedia>> {
+  const out = new Map<string, CompanionMedia>();
+  if (!companionBase(env) || urls.length === 0) return out;
+  await Promise.all(urls.map(async (u) => {
+    const m = await resolveViaCompanion(u, env, budgetMs);
+    if (m) out.set(u, m);
+  }));
+  return out;
+}
+
+// Build the Stremio stream for a companion-resolved embed. proxyHeaders is the
+// whole trick: it makes Stremio's *local* streaming server fetch the media with
+// the Referer/UA the companion used, from the user's own IP — reproducing the
+// request that minted the URL without proxying a single byte through us. It
+// only takes effect alongside notWebReady, hence the pairing.
+function companionStream(m: CompanionMedia, name: string, title: string, filename: string, bingeGroup: string) {
+  return {
+    url: m.url,
+    name,
+    title,
+    behaviorHints: {
+      notWebReady: true,
+      filename: `${filename}.${m.isHls ? "m3u8" : "mp4"}`,
+      bingeGroup,
+      proxyHeaders: { request: { Referer: m.referer, ...(m.ua ? { "User-Agent": m.ua } : {}) } },
+    },
+  };
+}
+
 // ─── MEDIAFIRE RESOLVER ────────────────────────────────────────────────────
 // GET mediafire.com/file/{key}/{name}/file → the CDN URL used to be inline in
 // the HTML (download{n}.mediafire.com → 206, video/mp4, Accept-Ranges). As of
@@ -1020,18 +1120,33 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     }
   }
 
-  for (const embed of embedUrls) {
-    if (!extractedNames.has(embed.name)) {
-      const label = `🌐 ${embed.name} — Latino`;
-      // Embed pages are HTML, not video — externalUrl is the spec-correct
-      // field, and unlike notWebReady url streams it stays visible on
-      // Stremio Web even when every extractor above failed.
-      streams.push({
-        externalUrl: embed.url,
-        name: "Latanime 🌐",
-        title: label,
-      });
+  // Everything still unresolved is a browser-gated host (dsvplay, voe,
+  // bysekoze, mixdrop, …). Hand the batch to the residential companion — it is
+  // the only rung that clears them — and fall back to externalUrl per embed.
+  const pending = embedUrls.filter((e) => !extractedNames.has(e.name));
+  const viaCompanion = await companionResolveMany(pending.map((e) => e.url), env);
+
+  for (const embed of pending) {
+    const media = viaCompanion.get(embed.url);
+    if (media) {
+      streams.push(companionStream(
+        media,
+        `Latanime ${media.isHls ? "HLS" : "MP4"}`,
+        `▶ ${embed.name} — Latino`,
+        `${slug}-e${epNum}`,
+        `latanime-${embed.name}`,
+      ));
+      continue;
     }
+    const label = `🌐 ${embed.name} — Latino`;
+    // Embed pages are HTML, not video — externalUrl is the spec-correct
+    // field, and unlike notWebReady url streams it stays visible on
+    // Stremio Web even when every extractor above failed.
+    streams.push({
+      externalUrl: embed.url,
+      name: "Latanime 🌐",
+      title: label,
+    });
   }
 
   return { streams };
@@ -1146,9 +1261,10 @@ async function getAfMeta(id: string, tmdbKey: string, env?: Env) {
   };
 }
 
-// Streamtape / uqload mint IP-bound signed URLs and voe is JS-gated, so those
-// stay externalUrl (the user's own client resolves them). mp4upload yields a
-// plain, cross-IP-playable MP4 — the one host worth extracting inline here.
+// mp4upload yields a plain, cross-IP-playable MP4 — the one host worth
+// extracting inline here. Streamtape / uqload mint IP-bound signed URLs and voe
+// is JS-gated, so those go to the residential companion (which resolves them on
+// the IP that will play them), and only fall back to externalUrl without one.
 async function getAfStreams(rawId: string, env: Env, request: Request) {
   const parts = rawId.replace("af:", "").split(":");
   if (parts.length < 2) return { streams: [] };
@@ -1170,8 +1286,8 @@ async function getAfStreams(rawId: string, env: Env, request: Request) {
   if (embeds.length === 0) return { streams: [] };
 
   const streams: any[] = [];
+  const pending: string[] = [];
   for (const embed of embeds) {
-    const host = (embed.match(/https?:\/\/(?:www\.)?([a-z0-9-]+\.[a-z.]+)/i)?.[1] || "host").split(".")[0];
     if (embed.includes("mp4upload.com")) {
       const url = await extractMp4upload(embed);
       if (url) {
@@ -1183,7 +1299,25 @@ async function getAfStreams(rawId: string, env: Env, request: Request) {
         continue;
       }
     }
-    // IP-bound or JS-gated host → externalUrl, playable in the user's own client
+    pending.push(embed);
+  }
+
+  const viaCompanion = await companionResolveMany(pending, env);
+  for (const embed of pending) {
+    const host = (embed.match(/https?:\/\/(?:www\.)?([a-z0-9-]+\.[a-z.]+)/i)?.[1] || "host").split(".")[0];
+    const media = viaCompanion.get(embed);
+    if (media) {
+      streams.push(companionStream(
+        media,
+        `AnimeFénix ${media.isHls ? "HLS" : "MP4"}`,
+        `▶ ${host} — AnimeFénix`,
+        `${slug}-e${ep}`,
+        `animefenix-${host}`,
+      ));
+      continue;
+    }
+    // No companion configured (or it couldn't resolve) → externalUrl, playable
+    // in the user's own client.
     streams.push({ externalUrl: embed, name: "AnimeFénix 🌐", title: `🌐 ${host} — AnimeFénix` });
   }
   return { streams };
@@ -1332,10 +1466,13 @@ function parseAonEmbeds(html: string): { url: string; name: string }[] {
 // Resolve streams for one AON episode. Exactly one render (the episode page);
 // every host from there is resolved without a second render — StreamWish and
 // savefiles are IP-bound HLS served through the Deno single-IP resolver (same
-// hosts as latanime), mp4upload/hexload/pixeldrain extract cheaply, and anything
-// JS-gated (voe, mixdrop, …) is surfaced as an externalUrl the user's own client
-// resolves. Never resolve StreamWish/savefiles Worker-side — the token is
-// IP-locked and would yield a dead stream.
+// hosts as latanime), and mp4upload/hexload/pixeldrain extract cheaply. Anything
+// JS-gated (voe, mixdrop, …) goes to the residential companion on a deliberately
+// tight budget: fetching the episode page has already spent most of the Worker's
+// 30s wall here, so leftovers land in the companion's cache and surface on the
+// next request rather than timing the whole response out. Never resolve
+// StreamWish/savefiles Worker-side — the token is IP-locked and would yield a
+// dead stream.
 async function getAonStreams(rawId: string, env: Env, request: Request) {
   const path = aonDecodePath(rawId.slice("aon:".length));
   if (!path) return { streams: [] };
@@ -1353,9 +1490,12 @@ async function getAonStreams(rawId: string, env: Env, request: Request) {
     if (key && !seenUrl.has(key)) { seenUrl.add(key); streams.push(s); }
   };
 
+  // Hosts with no cheap extractor; batched to the companion after the loop.
+  const pending: { url: string; host: string }[] = [];
+
   for (const embed of embeds) {
     const host = embed.url.match(/https?:\/\/(?:www\.)?([a-z0-9-]+)\./i)?.[1] || "host";
-    const ext = () => add({ externalUrl: embed.url, name: "AnimeOnline Ninja 🌐", title: `🌐 ${host} — AON` });
+    const ext = () => { pending.push({ url: embed.url, host }); };
 
     if (/streamwish|embedwish|wishfast|sfastwish|swishsrv|streamwis/i.test(embed.url)) {
       if (denoBase) add({ url: `${denoBase}/streamwish?url=${encodeURIComponent(embed.url)}`, name: "AnimeOnline Ninja HLS", title: "▶ streamwish — AON", behaviorHints: { notWebReady: false, filename: "aon.m3u8", bingeGroup: "aon-streamwish" } });
@@ -1380,9 +1520,24 @@ async function getAonStreams(rawId: string, env: Env, request: Request) {
       const idM = embed.url.match(/pixeldrain\.com\/(?:u|l)\/([a-zA-Z0-9]+)/);
       if (idM) { add({ url: `https://pixeldrain.com/api/file/${idM[1]}`, name: "AnimeOnline Ninja MP4", title: "▶ pixeldrain — AON", behaviorHints: { notWebReady: false, filename: "aon.mp4" } }); continue; }
     }
-    // mixdrop, voe and other IP-bound / JS-gated hosts → externalUrl (rendering
-    // them here would spend a second render and blow the Worker wall budget).
+    // mixdrop, voe and other IP-bound / JS-gated hosts → companion below.
     ext();
+  }
+
+  const viaCompanion = await companionResolveMany(pending.map((p) => p.url), env, 9000);
+  for (const { url: embedUrl, host } of pending) {
+    const media = viaCompanion.get(embedUrl);
+    if (media) {
+      add(companionStream(
+        media,
+        `AnimeOnline Ninja ${media.isHls ? "HLS" : "MP4"}`,
+        `▶ ${host} — AON`,
+        "aon",
+        `aon-${host}`,
+      ));
+      continue;
+    }
+    add({ externalUrl: embedUrl, name: "AnimeOnline Ninja 🌐", title: `🌐 ${host} — AON` });
   }
   return { streams };
 }
@@ -1401,7 +1556,10 @@ async function getAonStreams(rawId: string, env: Env, request: Request) {
 //     embeds:{SUB:[{server,url}],DUB:[…]} (HLS=zilla, Mega, UPNShare, MP4Upload)
 // ID scheme: av1:{slug} series, av1:{slug}:{ep} streams. Only MP4Upload yields a
 // cross-IP-playable MP4 (reuse extractMp4upload); zilla is a JS SPA player and
-// Mega/UPNShare/1fichier are IP/JS-gated → externalUrl (the user's own client).
+// UPNShare is IP-gated, so both go to the residential companion. Mega stays
+// externalUrl no matter what: its files are end-to-end encrypted under a key
+// carried in the URL *fragment*, which is never sent to a server and is decoded
+// to a blob: inside the page — there is no media URL to hand Stremio.
 // SUB and Latino DUB are surfaced as separate streams.
 const AV1_BASE = "https://animeav1.com";
 
@@ -1512,7 +1670,9 @@ async function getAv1Streams(rawId: string, env: Env, request: Request) {
   const seenUrl = new Set<string>();
   const add = (s: any) => { const k = s.url || s.externalUrl; if (k && !seenUrl.has(k)) { seenUrl.add(k); streams.push(s); } };
 
-  for (const { server, url, audio } of embeds) {
+  const pending: { server: string; url: string; audio: string }[] = [];
+  for (const embed of embeds) {
+    const { server, url, audio } = embed;
     if (url.includes("mp4upload.com")) {
       const mp4 = await extractMp4upload(url);
       if (mp4) {
@@ -1520,8 +1680,24 @@ async function getAv1Streams(rawId: string, env: Env, request: Request) {
         continue;
       }
     }
-    // zilla HLS (JS SPA player), Mega, UPNShare, 1fichier → IP/JS-gated, so hand
-    // the embed to the user's own client as an externalUrl.
+    pending.push(embed);
+  }
+
+  // zilla (JS SPA player) and UPNShare are IP/JS-gated → companion. Mega can't
+  // be resolved by anything server-side (see the header note) and falls through.
+  const viaCompanion = await companionResolveMany(pending.map((p) => p.url), env);
+  for (const { server, url, audio } of pending) {
+    const media = viaCompanion.get(url);
+    if (media) {
+      add(companionStream(
+        media,
+        `AnimeAv1 ${media.isHls ? "HLS" : "MP4"}`,
+        `▶ ${server} — AnimeAv1 (${audio})`,
+        `${slug}-e${ep}`,
+        `av1-${server.toLowerCase()}-${audio.toLowerCase()}`,
+      ));
+      continue;
+    }
     add({ externalUrl: url, name: "AnimeAv1 🌐", title: `🌐 ${server} — AnimeAv1 (${audio})` });
   }
   return { streams };
@@ -1702,11 +1878,14 @@ async function getDoramaStreams(src: DoramaSource, rawId: string, env: Env, requ
   const seenUrl = new Set<string>();
   const add = (s: any) => { const k = s.url || s.externalUrl; if (k && !seenUrl.has(k)) { seenUrl.add(k); streams.push(s); } };
 
+  // Hosts with no cheap extractor; batched to the companion after the loop.
+  const pending: { url: string; host: string }[] = [];
+
   const embeds = await Promise.all(options.map((o) => resolveDoramaEmbed(src, o.post, o.nume, o.type, env)));
   for (const embed of embeds) {
     if (!embed) continue;
     const host = embed.match(/https?:\/\/(?:www\.)?([a-z0-9-]+)\./i)?.[1] || "host";
-    const ext = () => add({ externalUrl: embed, name: `${src.label} 🌐`, title: `🌐 ${host} — ${src.label}` });
+    const ext = () => { pending.push({ url: embed, host }); };
 
     if (/streamwish|embedwish|wishfast|sfastwish|swishsrv|streamaly|streamis/i.test(embed)) {
       if (denoBase) add({ url: `${denoBase}/streamwish?url=${encodeURIComponent(embed)}`, name: `${src.label} HLS`, title: `▶ streamwish — ${src.label}`, behaviorHints: { notWebReady: false, filename: `${epSlug}.m3u8`, bingeGroup: `${src.prefix}-streamwish` } });
@@ -1717,8 +1896,25 @@ async function getDoramaStreams(src: DoramaSource, rawId: string, env: Env, requ
       const u = await extractMp4upload(embed);
       if (u) { add({ url: u, name: `${src.label} MP4`, title: `▶ mp4upload — ${src.label}`, behaviorHints: { notWebReady: false, filename: `${epSlug}.mp4`, bingeGroup: `${src.prefix}-mp4upload` } }); continue; }
     }
-    // ok.ru, mega, mixdrop and other IP/JS-gated hosts → externalUrl (user's client)
+    // ok.ru, mixdrop and other IP/JS-gated hosts → companion below (mega is
+    // unresolvable server-side and ends up as an externalUrl there).
     ext();
+  }
+
+  const viaCompanion = await companionResolveMany(pending.map((p) => p.url), env);
+  for (const { url: embedUrl, host } of pending) {
+    const media = viaCompanion.get(embedUrl);
+    if (media) {
+      add(companionStream(
+        media,
+        `${src.label} ${media.isHls ? "HLS" : "MP4"}`,
+        `▶ ${host} — ${src.label}`,
+        epSlug,
+        `${src.prefix}-${host}`,
+      ));
+      continue;
+    }
+    add({ externalUrl: embedUrl, name: `${src.label} 🌐`, title: `🌐 ${host} — ${src.label}` });
   }
   return { streams };
 }
@@ -1917,6 +2113,21 @@ export default {
       const t0 = Date.now();
       const streamUrl = await extractMixdrop(testUrl);
       return json({ testUrl, streamUrl, ms: Date.now() - t0 });
+    }
+
+    if (path === "/debug-embed") {
+      // Probe the residential companion's embed resolver against one embed —
+      // the counterpart to /debug-host for hosts that need a real browser.
+      //   /debug-embed?url=https://voe.sx/e/XXXX
+      //   /debug-embed?url=…&fresh=1   → bypass the KV cache
+      const testUrl = url.searchParams.get("url");
+      if (!testUrl) return json({ error: "Missing ?url= (an embed page URL)" });
+      const base = companionBase(env);
+      if (!base) return json({ error: "AON_COMPANION_URL not set — companion resolving is disabled" });
+      if (url.searchParams.get("fresh") && env.STREAM_CACHE) await env.STREAM_CACHE.delete(`ce:${testUrl}`);
+      const t0 = Date.now();
+      const media = await resolveViaCompanion(testUrl, env, 26000);
+      return json({ testUrl, companion: base, media, ms: Date.now() - t0 });
     }
 
     if (path === "/cache-clear") {
