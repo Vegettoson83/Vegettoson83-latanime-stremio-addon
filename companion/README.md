@@ -56,6 +56,50 @@ Confirm with `https://<your-worker>/debug` → `aonCompanion` should show the UR
 Now search **Anime Online Ninja** in Stremio: the Worker forwards each fetch to
 your resolver, and streams resolve from your IP.
 
+## Run it on your phone (Termux)
+
+The companion is just a Node script + a real browser, so it can run on your
+Android phone — the most hyper-local residential IP you have. The catch:
+**Playwright's downloaded Chromium is built for glibc and will not run on
+Termux's Bionic libc.** Don't `playwright install chromium` on Termux and expect
+it to work. Two paths that do:
+
+**A) proot Ubuntu (most reliable)** — a glibc userland inside Termux, where the
+normal install works:
+
+```bash
+pkg install proot-distro
+proot-distro install ubuntu
+proot-distro login ubuntu
+# now inside Ubuntu:
+apt install -y nodejs npm
+cd companion && npm install && npx playwright install --with-deps chromium
+npm start
+```
+
+**B) Termux-native Chromium** — use the Chromium that *is* built for Termux and
+point the companion at it:
+
+```bash
+pkg install nodejs chromium
+cd companion && npm install
+AON_CHROMIUM_PATH=$PREFIX/bin/chromium-browser npm start
+```
+
+If a challenge won't clear headlessly, solve it on-screen once with
+[Termux:X11 ↗](https://github.com/termux/termux-x11) and `AON_HEADFUL=1` — a real
+Chromium window opens, you (or its own JS) clear the challenge, and the
+persistent context reuses that clearance headlessly afterward:
+
+```bash
+AON_HEADFUL=1 AON_CHROMIUM_PATH=$PREFIX/bin/chromium-browser npm start
+```
+
+Then point your TV's Stremio directly at the phone on your LAN
+(`http://<phone-ip>:8787/…`) — no tunnel needed when they share a network.
+(Note: this serves the `aon:` fetch path; a full all-sources addon on the phone
+is a larger port of the hosted Worker, not just this resolver.)
+
 ## Lightweight mode (no browser)
 
 If you don't want to install Playwright, the resolver falls back to plain

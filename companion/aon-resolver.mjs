@@ -32,6 +32,15 @@ const AON_HOST = /(^|\.)animeonline\.ninja$/i; // allowlist — this proxy is AO
 const UA = process.env.AON_UA ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const NAV_TIMEOUT = Number(process.env.AON_NAV_TIMEOUT || 30000);
+// Where the Chromium binary lives. On a normal PC leave unset — Playwright uses
+// the one it downloaded. On Termux (Android/Bionic) Playwright's downloaded
+// Chromium won't run, so `pkg install chromium` and point here:
+//   AON_CHROMIUM_PATH=$PREFIX/bin/chromium-browser
+const CHROMIUM_PATH = process.env.AON_CHROMIUM_PATH?.trim() || undefined;
+// Headful mode: launch a visible window instead of headless. Set AON_HEADFUL=1
+// with a display (Termux:X11, or a desktop) to solve a stubborn challenge
+// on-screen once; the persistent context then reuses that clearance headlessly.
+const HEADFUL = process.env.AON_HEADFUL === "1";
 // Keep-warm: re-navigate to AON this often so the cf_clearance the persistent
 // context holds never goes cold. 0 disables it. Default 20 min sits under the
 // typical cf_clearance lifetime (~30 min–hours), so a real request never pays
@@ -64,7 +73,7 @@ async function getContext() {
     catch { playwright = false; }
   }
   if (!playwright) return null;
-  browser = await playwright.launch({ headless: true });
+  browser = await playwright.launch({ headless: !HEADFUL, executablePath: CHROMIUM_PATH });
   browser.on("disconnected", () => {
     if (browserCtx) console.warn("[aon] browser disconnected — will relaunch on next request");
     browser = null;
@@ -121,6 +130,8 @@ const server = http.createServer(async (req, res) => {
       ua: UA,
       keepWarmMs: WARM_MS,
       warming,
+      headful: HEADFUL,
+      chromiumPath: CHROMIUM_PATH || "(playwright default)",
     }), "application/json");
   }
   if (url.pathname !== "/aon") return send(404, "not found");
