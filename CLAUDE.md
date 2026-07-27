@@ -17,8 +17,14 @@ spec-compliant (https://github.com/Stremio/stremio-addon-sdk/tree/master/docs):
 - **Routes**: `/manifest.json`, `/catalog/...`, `/meta/...`, `/stream/...`,
   plus `/proxy/m3u8` + `/proxy/seg` (HLS rewriting proxy) and `/debug*`
   endpoints. All JSON responses go through `json()` and carry CORS headers.
-- **ID scheme**: `latanime:{slug}` for series, `latanime:{slug}:{episode}` for
-  streams. `idPrefixes: ["latanime:"]` in the manifest depends on this.
+- **ID scheme**: one prefix per source — `latanime:`, `af:`, `aon:`, `av1:`,
+  `dorama:`, `dsub:`, `pp:` — with `{prefix}:{slug}` for a title and the episode
+  appended for a stream (`latanime:{slug}:{episode}`, `pp:serie:{slug}:{s}:{e}`).
+  `idPrefixes` in the manifest must list every prefix or Stremio never routes
+  those ids here.
+- **Manifest types**: `series` *and* `movie` — PelisPlus películas are the only
+  `movie` catalog. A meta's `type` has to match the catalog it came from, so
+  `toMetaPreview` (which hardcodes `series`) is re-stamped for películas.
 - **Stream objects carry `title` OR `description`, never both**: stremio-core
   (the Rust core behind current Android + Web) deserializes `title` as a serde
   alias of `description`, so an object with both fails as a duplicate field and
@@ -33,8 +39,10 @@ spec-compliant (https://github.com/Stremio/stremio-addon-sdk/tree/master/docs):
   unreliable. `fetchHtml` **races** direct against `FETCH_PROXY_URL` (the
   non-Cloudflare Deno Deploy proxy `deno/fetch.ts`, the reliable path) and
   takes the first valid HTML, then falls back to Browser Rendering (if
-  configured) → free CORS proxies (mostly dead). The proxy allowlists
-  latanime.org only — keep it that way.
+  configured) → free CORS proxies (mostly dead). The proxy allowlists only the
+  scrape sources it relays (latanime.org, animeonline.ninja, animefenix2.tv,
+  animeav1.com, the two dorama sites, tioplus.app) — keep it to that list; a new
+  source needs its host added to the regex in `deno/fetch.ts`, nothing wider.
 - **Extraction is manual-first**: direct HTTP fetch plus parsing/unpacking
   inside the Worker — no external headless-browser bridge (the Render bridge
   and `@cloudflare/puppeteer` import both caused outages/1101 crashes and are
@@ -83,7 +91,16 @@ old variant behind:
   (ported from StreamFlix's `decryptF7`). VOE DDoS-Guards server egress, so
   `findMediaUrl` only sees the blob via Browser-Rendering output; the render
   resolve is cached per embed (`resolveViaRender`, `rr:` KV keys, `TTL.render`).
-- `/debug-extract?id=slug:episode` runs every extractor with timings, and
+- **PelisPlus** (`pp:`, tioplus.app — where pelisplus.to redirects) hides each
+  player option behind a `data-server` blob. `/player/{btoa(blob)}` is the same
+  token the site's own JS builds, and that page redirects to the real host via
+  `window.location.href` — one cheap GET per option, no browser. Of the hosts it
+  hands back only **emturbovid** is extractable (`extractTurbovid`, from
+  `data-hash`): its master m3u8 is unsigned and CORS-open, so it plays from any
+  IP. vidhide/earnvids, upns, rpm, strp2p, luluvdo, waaw, streamtape are IP-bound
+  or JS-gated and stay `externalUrl` — don't "improve" them into url streams.
+- `/debug-extract?id=slug:episode` runs every extractor with timings,
+  `/debug-pelis?id=…` walks the PelisPlus catalog/meta/servers/streams, and
   `/debug-mixdrop?url=` / `/debug-host?url=` probe a single embed — use them
   to diagnose extraction failures on the deployed worker.
 
