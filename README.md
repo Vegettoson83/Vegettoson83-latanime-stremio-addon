@@ -1,6 +1,9 @@
 # Latanime Stremio Addon
 
-A Stremio addon for watching anime in Spanish (Latino/Castellano) from latanime.org, running as a Cloudflare Worker.
+A Stremio addon for watching anime, doramas, series and películas in Spanish
+(Latino/Castellano/subtitulado), running as a Cloudflare Worker. latanime.org is
+the original source; AnimeFénix, Anime Online Ninja, AnimeAv1, Doramas Latino,
+Doramas Sub and PelisPlus each add their own catalogs.
 
 ## Add to Stremio
 

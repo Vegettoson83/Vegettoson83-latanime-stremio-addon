@@ -93,6 +93,14 @@ const AON_BASE = "https://ww3.animeonline.ninja";
 // externalUrl so the user's own client resolves them, never a dead stream).
 const AF_BASE = "https://animefenix2.tv";
 
+// ─── PELISPLUS ───────────────────────────────────────────────────────────────
+// Where pelisplus.to now redirects (the site rebranded to TioPlus; its own
+// embed hosts are still pelisplus.*). Películas + series in Latino/Castellano/
+// subtitulado — the first non-anime *movie* source here, which is why the
+// manifest now declares the "movie" type. Cloudflare-fronted with NO challenge,
+// so it's reachable server-side and scraped like the dorama sources.
+const PP_BASE = "https://tioplus.app";
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "*",
@@ -163,12 +171,12 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.1",
+  version: "4.16.0",
   name: "Latanime",
-  description: "Anime Latino y Castellano desde latanime.org",
+  description: "Anime, doramas, series y películas en Latino y Castellano",
   logo: "https://latanime.org/img/logito.png",
   resources: ["catalog", "meta", "stream"],
-  types: ["series"],
+  types: ["series", "movie"],
   catalogs: [
     { type: "series", id: "latanime-latest", name: "Latanime — Recientes", extra: [{ name: "search", isRequired: false }] },
     { type: "series", id: "latanime-airing", name: "Latanime — En Emisión", extra: [] },
@@ -182,8 +190,10 @@ const MANIFEST = {
     { type: "series", id: "animeav1-directory", name: "AnimeAv1 — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
     { type: "series", id: "doramaslat-directory", name: "Doramas Latino — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
     { type: "series", id: "doramedplay-directory", name: "Doramas Sub — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
+    { type: "movie", id: "pelisplus-peliculas", name: "PelisPlus — Películas", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
+    { type: "series", id: "pelisplus-series", name: "PelisPlus — Series", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
   ],
-  idPrefixes: ["latanime:", "af:", "aon:", "av1:", "dorama:", "dsub:"],
+  idPrefixes: ["latanime:", "af:", "aon:", "av1:", "dorama:", "dsub:", "pp:"],
 };
 
 // ─── PROXY LOAD BALANCER ──────────────────────────────────────────────────────
@@ -372,7 +382,10 @@ async function fetchAon(pathOrUrl: string, env?: Env, timeoutMs = 12000): Promis
   throw new Error("AON: FETCH_PROXY_URL not set and Browser Rendering unavailable");
 }
 
-async function fetchTmdb(animeName: string, tmdbKey: string) {
+// `kind` picks the TMDB search endpoint — "tv" for every series source, "movie"
+// for PelisPlus películas (searching /search/tv for a film returns nothing or,
+// worse, an unrelated show).
+async function fetchTmdb(animeName: string, tmdbKey: string, kind: "tv" | "movie" = "tv") {
   if (!tmdbKey) return null;
   const cleanName = animeName
     .replace(/\s+(Latino|Castellano|Japones|Japonés|Sub\s+Español)$/i, "")
@@ -380,7 +393,7 @@ async function fetchTmdb(animeName: string, tmdbKey: string) {
     .trim();
   try {
     const r = await fetch(
-      `${TMDB_BASE}/search/tv?api_key=${tmdbKey}&query=${encodeURIComponent(cleanName)}&language=es-ES`,
+      `${TMDB_BASE}/search/${kind}?api_key=${tmdbKey}&query=${encodeURIComponent(cleanName)}&language=es-ES`,
       { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(6000) }
     );
     if (!r.ok) return null;
@@ -391,7 +404,7 @@ async function fetchTmdb(animeName: string, tmdbKey: string) {
       poster: hit.poster_path ? `${TMDB_IMG}${hit.poster_path}` : "",
       background: hit.backdrop_path ? `https://image.tmdb.org/t/p/w1280${hit.backdrop_path}` : "",
       description: hit.overview || "",
-      year: (hit.first_air_date || "").slice(0, 4),
+      year: (hit.first_air_date || hit.release_date || "").slice(0, 4),
     };
   } catch { return null; }
 }
@@ -476,6 +489,8 @@ async function getCatalog(catalogId: string, extra: Record<string, string>, env?
   if (catalogId.startsWith("animeav1")) return getAv1Catalog(extra, env);
   if (catalogId.startsWith("doramaslat")) return getDoramaCatalog(DORAMA_SOURCES.dorama, extra, env);
   if (catalogId.startsWith("doramedplay")) return getDoramaCatalog(DORAMA_SOURCES.dsub, extra, env);
+  if (catalogId === "pelisplus-peliculas") return getPelisCatalog("pelicula", extra, env);
+  if (catalogId === "pelisplus-series") return getPelisCatalog("serie", extra, env);
   if (extra.search?.trim()) return { metas: (await searchAnimes(extra.search.trim(), env)).map(toMetaPreview) };
   if (catalogId === "latanime-airing") return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`, env)).map(toMetaPreview) };
   const page = Math.floor(parseInt(extra.skip || "0", 10) / 30) + 1;
@@ -501,6 +516,7 @@ async function getMeta(id: string, tmdbKey: string, env?: Env) {
   if (id.startsWith("av1:")) return getAv1Meta(id, tmdbKey, env);
   if (id.startsWith("dorama:")) return getDoramaMeta(DORAMA_SOURCES.dorama, id, tmdbKey, env);
   if (id.startsWith("dsub:")) return getDoramaMeta(DORAMA_SOURCES.dsub, id, tmdbKey, env);
+  if (id.startsWith("pp:")) return getPelisMeta(id, tmdbKey, env);
   const slug = id.replace("latanime:", "");
   const html = await fetchHtml(`${BASE_URL}/anime/${slug}`, env);
   const titleM = html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i) || html.match(/<title>(.*?)\s*[—\-|].*?<\/title>/i);
@@ -859,6 +875,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   if (rawId.startsWith("av1:")) return getAv1Streams(rawId, env, request);
   if (rawId.startsWith("dorama:")) return getDoramaStreams(DORAMA_SOURCES.dorama, rawId, env, request);
   if (rawId.startsWith("dsub:")) return getDoramaStreams(DORAMA_SOURCES.dsub, rawId, env, request);
+  if (rawId.startsWith("pp:")) return getPelisStreams(rawId, env, request);
   const parts = rawId.replace("latanime:", "").split(":");
   if (parts.length < 2) return { streams: [] };
   const [slug, epNum] = parts;
@@ -1723,6 +1740,276 @@ async function getDoramaStreams(src: DoramaSource, rawId: string, env: Env, requ
   return { streams };
 }
 
+// ─── PELISPLUS (pp:) ─────────────────────────────────────────────────────────
+// Structure (Laravel, server-rendered — see PP_BASE above):
+//   • /peliculas/{n} , /series/{n}       — 24-card directory pages
+//   • /api/search/{q}                    — search; same card markup, mixed types
+//   • /pelicula/{slug} , /serie/{slug}   — detail. A series inlines EVERY season
+//     as `const seasonsJson = {"1":[{title,image,season,episode},…],…}`, so one
+//     fetch yields the whole episode list (no per-season paging).
+//   • /serie/{slug}/season/{s}/episode/{e} — episode page
+// Players: each audio track is a <button> label plus a <ul class='subselect'> of
+// <li data-server="{blob}"> options. The site's JS builds an iframe at
+// /player/{btoa(btoa(atob(blob)))} — which collapses to /player/{btoa(blob)} —
+// and that page redirects to the real host via `window.location.href = '…'`.
+// Resolving it is one cheap GET per option, so no browser is needed.
+// ID scheme: pp:pelicula:{slug} (movie), pp:serie:{slug} (series),
+// pp:serie:{slug}:{season}:{episode} (episode stream).
+type PelisKind = "pelicula" | "serie";
+
+// Direct fetch raced against the Deno relay (allowlisted for tioplus.app too),
+// same pattern as fetchDorama. No length floor: /player/ pages and thin search
+// results are legitimately small.
+async function fetchPelis(url: string, env?: Env, timeoutMs = 12000): Promise<string> {
+  const proxyBase = env?.FETCH_PROXY_URL?.trim();
+  const pull = async (name: string, r: Promise<Response>) => {
+    const res = await r;
+    if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`);
+    const txt = await res.text();
+    if (!txt) throw new Error(`${name}: empty`);
+    return txt;
+  };
+  const racers: Promise<string>[] = [
+    pull("direct", fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
+  ];
+  if (proxyBase) {
+    racers.push(pull("relay", fetch(`${proxyBase}?url=${encodeURIComponent(url)}`, {
+      headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(timeoutMs),
+    })));
+  }
+  return Promise.any(racers);
+}
+
+// Directory and search cards share one shape:
+//   <a class='itemA' href="…/{kind}/{slug}"> … <img alt='{Title}' data-src='{poster}'
+// Search mixes películas, series and animes, so filter by the path segment —
+// each catalog only ever shows its own kind. Episode cards on a series page use
+// single-quoted hrefs and never match here.
+function parsePelisCards(html: string, kind: PelisKind) {
+  const results: { id: string; name: string; poster: string }[] = [];
+  const seen = new Set<string>();
+  for (const m of html.matchAll(/<a class='itemA' href="[^"]*\/(pelicula|serie|anime)\/([a-z0-9-]+)"[\s\S]{0,600}?<img alt='([^']*)'[^>]*data-src='([^']*)'/gi)) {
+    if (m[1].toLowerCase() !== kind) continue;
+    const slug = m[2];
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    const poster = m[4].startsWith("http") ? m[4] : `${PP_BASE}${m[4]}`;
+    results.push({ id: `pp:${kind}:${slug}`, name: decodeEntities(m[3]).trim() || slug, poster });
+  }
+  return results.slice(0, 100);
+}
+
+async function getPelisCatalog(kind: PelisKind, extra: Record<string, string>, env?: Env) {
+  // toMetaPreview types everything as a series (every other source is one), so
+  // películas re-stamp the type — Stremio drops a meta whose type doesn't match
+  // the catalog it came from.
+  const type = kind === "pelicula" ? "movie" : "series";
+  const preview = (c: { id: string; name: string; poster: string }) => ({ ...toMetaPreview(c), type });
+  const q = (extra.search || "").trim();
+  if (q) {
+    return { metas: parsePelisCards(await fetchPelis(`${PP_BASE}/api/search/${encodeURIComponent(q)}`, env), kind).map(preview) };
+  }
+  const page = Math.floor(parseInt(extra.skip || "0", 10) / 24) + 1;
+  const path = kind === "pelicula" ? "peliculas" : "series";
+  return { metas: parsePelisCards(await fetchPelis(`${PP_BASE}/${path}/${page}`, env), kind).map(preview) };
+}
+
+async function getPelisMeta(id: string, tmdbKey: string, env?: Env) {
+  const [, kind, slug] = id.split(":");
+  if ((kind !== "pelicula" && kind !== "serie") || !slug) return { meta: null };
+  const html = await fetchPelis(`${PP_BASE}/${kind}/${slug}`, env);
+
+  // <h1 class="slugh1">Nombre (2026)</h1> — the year is part of the heading
+  const heading = decodeEntities(html.match(/<h1[^>]*class="slugh1"[^>]*>([\s\S]*?)<\/h1>/i)?.[1]?.replace(/<[^>]+>/g, "") || "").trim();
+  const name = heading.replace(/\s*\(\d{4}\)\s*$/, "").trim() || slug;
+  const year = heading.match(/\((\d{4})\)\s*$/)?.[1] || html.match(/\/year\/(\d{4})/)?.[1] || "";
+  // og:image is the backdrop; the page carries no poster (cards do), so TMDB
+  // supplies the poster and the backdrop is the fallback for both.
+  const backdrop = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i)?.[1] || "";
+  const description = decodeEntities(html.match(/<div class="description">\s*<p>([\s\S]*?)<\/p>/i)?.[1] || "")
+    .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  // Scope the genres to the detail block — the site's nav menu lists every
+  // genre it has, so an unscoped /genero/ sweep would tag everything with all.
+  const genres: string[] = [];
+  const genreBlock = html.match(/<span><b>G[eé]neros?<\/b><\/span>([\s\S]*?)<\/div>/i)?.[1] || "";
+  for (const g of genreBlock.matchAll(/\/genero\/[^"]*"[^>]*>([^<]+)<\/a>/gi)) {
+    const name = decodeEntities(g[1]).trim();
+    if (name) genres.push(name);
+  }
+
+  const videos: { id: string; title: string; season: number; episode: number; thumbnail?: string }[] = [];
+  if (kind === "serie") {
+    const raw = html.match(/const\s+seasonsJson\s*=\s*(\{[\s\S]*?\});/)?.[1];
+    if (raw) {
+      try {
+        const seasons = JSON.parse(raw) as Record<string, { title?: string; image?: string; season: number; episode: number }[]>;
+        for (const list of Object.values(seasons)) {
+          for (const ep of list) {
+            videos.push({
+              id: `pp:serie:${slug}:${ep.season}:${ep.episode}`,
+              title: `T${ep.season} · ${ep.title?.trim() || `Episodio ${ep.episode}`}`,
+              season: ep.season,
+              episode: ep.episode,
+              thumbnail: ep.image ? `${TMDB_IMG}${ep.image}` : undefined,
+            });
+          }
+        }
+      } catch { /* malformed payload — fall through to an episode-less meta */ }
+    }
+    videos.sort((a, b) => a.season - b.season || a.episode - b.episode);
+  }
+
+  const tmdb = await fetchTmdb(name, tmdbKey, kind === "pelicula" ? "movie" : "tv");
+  const meta: Record<string, unknown> = {
+    id, type: kind === "pelicula" ? "movie" : "series", name,
+    poster: tmdb?.poster || backdrop,
+    background: tmdb?.background || backdrop,
+    description: tmdb?.description || description,
+    posterShape: "poster",
+    releaseInfo: year || tmdb?.year || "",
+    genres: genres.slice(0, 10),
+  };
+  // A movie meta carries no videos — Stremio asks for its stream by the meta id.
+  if (kind === "serie") meta.videos = videos;
+  return { meta };
+}
+
+// One entry per (audio track, server) pair. The <button> holds the track label
+// ("Español Latino", "Subtitulado", …) and the <ul> that follows it holds that
+// track's options as "{Server} - Opción {n}".
+function parsePelisServers(html: string): { audio: string; server: string; token: string }[] {
+  const out: { audio: string; server: string; token: string }[] = [];
+  for (const group of html.matchAll(/<button[^>]*class='[^']*button'[^>]*>([\s\S]*?)<\/button>\s*<ul class='subselect'>([\s\S]*?)<\/ul>/gi)) {
+    const audio = decodeEntities(group[1].replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim() || "Español";
+    for (const li of group[2].matchAll(/data-server="([^"]+)"[^>]*>\s*<span>([^<]*)<\/span>/gi)) {
+      const server = decodeEntities(li[2]).split(/\s+-\s+/)[0].trim() || "Player";
+      out.push({ audio, server, token: li[1] });
+    }
+  }
+  return out;
+}
+
+// data-server blob → the real host URL behind it.
+async function resolvePelisPlayer(token: string, env?: Env): Promise<string | null> {
+  try {
+    const html = await fetchPelis(`${PP_BASE}/player/${btoa(token)}`, env, 9000);
+    const target = html.match(/window\.location\.href\s*=\s*['"]([^'"]+)['"]/i)?.[1]
+      || html.match(/<iframe[^>]+src=["']([^"']+)["']/i)?.[1] || "";
+    return /^https?:\/\//i.test(target) ? target : null;
+  } catch { return null; }
+}
+
+// emturbovid (the site's own "Plus" option, present on nearly every title) is
+// the one host here worth extracting: <div id="video_player" data-hash="…m3u8">
+// gives an unsigned HLS master, and both it and the variants/segments behind it
+// answer with Access-Control-Allow-Origin:* and need no referer — so a resolved
+// URL is handed to Stremio directly, no worker proxy and no IP binding. The rest
+// (vidhide/earnvids, upns, rpm, strp2p, luluvdo, waaw) mint IP-bound links or
+// gate on JS and stay externalUrl.
+// Retried once: the host stalls occasionally, and a null here is cached with the
+// rest of the stream response for TTL.stream — a transient miss would hide the
+// only playable stream for half an hour.
+async function fetchTurbovidMaster(embedUrl: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch(embedUrl, {
+        headers: { "User-Agent": CHROME_UA, "Referer": `${PP_BASE}/` },
+        redirect: "follow",
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!r.ok) continue;
+      const html = await r.text();
+      const m = html.match(/data-hash=["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i)?.[1]
+        || html.match(/https?:\/\/[^"'\s\\<>]+\.m3u8[^"'\s\\<>]*/)?.[0];
+      if (m) return m;
+    } catch { /* stalled or aborted — one more try */ }
+  }
+  return null;
+}
+
+// The master is NOT trustworthy: turbovid hands out variant playlists on
+// rotating CDN hostnames, and its older `/data/` generation still lists domains
+// that have since lapsed — they NXDOMAIN, so they're dead for every client, not
+// just for us (only the newer `/data3/` masters point at live turbosplayer
+// hosts). Returning the master unchecked therefore advertises a stream that
+// plays the first few bytes and then stalls. So resolve one level deeper: probe
+// the variants and return the highest-bandwidth one that actually answers, or
+// null so the option falls through to an externalUrl.
+async function extractTurbovid(embedUrl: string): Promise<string | null> {
+  const master = await fetchTurbovidMaster(embedUrl);
+  if (!master) return null;
+  let playlist: string;
+  try {
+    const r = await fetch(master, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    playlist = await r.text();
+  } catch { return null; }
+  // Already a media playlist — the fetch above is all the proof needed.
+  if (!playlist.includes("#EXT-X-STREAM-INF")) return playlist.includes("#EXTINF") ? master : null;
+
+  const base = master.substring(0, master.lastIndexOf("/") + 1);
+  const variants: { url: string; bandwidth: number }[] = [];
+  const lines = playlist.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith("#")) continue;
+    const bandwidth = parseInt(lines[i - 1]?.match(/BANDWIDTH=(\d+)/i)?.[1] || "0", 10);
+    variants.push({ url: line.startsWith("http") ? line : base + line, bandwidth });
+  }
+  const probes = await Promise.allSettled(variants.slice(0, 4).map(async (v) => {
+    const r = await fetch(v.url, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(6000) });
+    if (!r.ok) throw new Error(`variant HTTP ${r.status}`);
+    return v;
+  }));
+  const live = probes.flatMap((p) => (p.status === "fulfilled" ? [p.value] : []));
+  if (live.length === 0) return null;
+  return live.reduce((best, v) => (v.bandwidth > best.bandwidth ? v : best)).url;
+}
+
+async function getPelisStreams(rawId: string, env: Env, request: Request) {
+  // pp:{kind}:{slug} for a movie, pp:serie:{slug}:{season}:{episode} otherwise
+  const [, kind, slug, season, episode] = rawId.split(":");
+  if (!slug || (kind !== "pelicula" && kind !== "serie")) return { streams: [] };
+  if (kind === "serie" && (!season || !episode)) return { streams: [] };
+  const pageUrl = kind === "serie"
+    ? `${PP_BASE}/serie/${slug}/season/${season}/episode/${episode}`
+    : `${PP_BASE}/pelicula/${slug}`;
+
+  const html = await fetchPelis(pageUrl, env);
+  // Cap the options: each is a /player/ round-trip and the Worker wall is 30s.
+  const options = parsePelisServers(html).slice(0, 12);
+  if (options.length === 0) return { streams: [] };
+
+  const fileBase = kind === "serie" ? `${slug}-s${season}e${episode}` : slug;
+  const embeds = await Promise.all(options.map((o) => resolvePelisPlayer(o.token, env)));
+
+  const streams: any[] = [];
+  const seenUrl = new Set<string>();
+  const add = (s: any) => { const k = s.url || s.externalUrl; if (k && !seenUrl.has(k)) { seenUrl.add(k); streams.push(s); } };
+
+  for (let i = 0; i < options.length; i++) {
+    const embed = embeds[i];
+    if (!embed) continue;
+    const { audio, server } = options[i];
+    if (/turbovid/i.test(embed)) {
+      // Already validated and CORS-open — hand it over as-is rather than
+      // routing every segment through the Worker.
+      const m3u8 = await extractTurbovid(embed);
+      if (m3u8) {
+        add({
+          url: m3u8,
+          name: "PelisPlus HLS",
+          title: `▶ ${server} — PelisPlus (${audio})`,
+          behaviorHints: { notWebReady: false, filename: `${fileBase}.m3u8`, bingeGroup: `pelisplus-${server.toLowerCase()}` },
+        });
+        continue;
+      }
+    }
+    add({ externalUrl: embed, name: "PelisPlus 🌐", title: `🌐 ${server} — PelisPlus (${audio})` });
+  }
+  return { streams };
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -1885,6 +2172,41 @@ export default {
         grab("search", `/wp-json/dooplay/search?keyword=naruto`),
       ]);
       return json(out);
+    }
+
+    if (path === "/debug-pelis") {
+      // Exercises the PelisPlus scrapers end to end.
+      //   /debug-pelis                        → película + serie catalog samples
+      //   /debug-pelis?id=pelicula:matrix     → movie meta + its streams
+      //   /debug-pelis?id=serie:breaking-bad  → series meta (season/episode count)
+      //   /debug-pelis?id=serie:breaking-bad:1:1 → episode streams
+      const id = url.searchParams.get("id");
+      const t0 = Date.now();
+      try {
+        if (!id) {
+          const [pelis, series] = await Promise.all([
+            getPelisCatalog("pelicula", {}, env),
+            getPelisCatalog("serie", {}, env),
+          ]);
+          return json({ ms: Date.now() - t0, peliculas: pelis.metas.length, series: series.metas.length, sample: [...pelis.metas.slice(0, 3), ...series.metas.slice(0, 3)] });
+        }
+        const parts = id.split(":");
+        const wantsStreams = parts[0] === "pelicula" || parts.length >= 4;
+        const meta = parts.length >= 4 ? null : (await getPelisMeta(`pp:${parts[0]}:${parts[1]}`, tmdbKey, env)).meta as any;
+        const page = await fetchPelis(parts.length >= 4
+          ? `${PP_BASE}/serie/${parts[1]}/season/${parts[2]}/episode/${parts[3]}`
+          : `${PP_BASE}/${parts[0]}/${parts[1]}`, env);
+        const options = parsePelisServers(page);
+        return json({
+          id, ms: Date.now() - t0,
+          meta: meta ? { name: meta.name, poster: meta.poster, releaseInfo: meta.releaseInfo, genres: meta.genres, videos: (meta.videos || []).length } : undefined,
+          options: options.map((o) => `${o.audio} / ${o.server}`),
+          embeds: await Promise.all(options.slice(0, 12).map((o) => resolvePelisPlayer(o.token, env))),
+          streams: wantsStreams ? (await getPelisStreams(`pp:${id}`, env, request)).streams : undefined,
+        });
+      } catch (e) {
+        return json({ id, ms: Date.now() - t0, error: String(e).slice(0, 300) });
+      }
     }
 
     if (path === "/debug-savefiles") {
