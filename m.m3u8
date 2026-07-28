@@ -1,0 +1,8 @@
+#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-STREAM-INF:BANDWIDTH=52800,RESOLUTION=854x480,CODECS="avc1.64001e,mp4a.40.2"
+https://123456.vegettoson83.workers.dev/proxy/m3u8?url=https%3A%2F%2Fcdn113.dylancyp.com%2Fdata%2F5%2FE9%2F662eff6fb6ba2%2F662eff6fb6ba2480.m3u8&ref=https%3A%2F%2Femturbovid.com%2F
+#EXT-X-STREAM-INF:BANDWIDTH=105600,RESOLUTION=1280x720,CODECS="avc1.64001f,mp4a.40.2"
+https://123456.vegettoson83.workers.dev/proxy/m3u8?url=https%3A%2F%2Fcdn113.dylancyp.com%2Fdata%2FC%2FD9%2F662eff6fb6ba2%2F662eff6fb6ba2720.m3u8&ref=https%3A%2F%2Femturbovid.com%2F
+#EXT-X-STREAM-INF:BANDWIDTH=1205600,RESOLUTION=1920x1080,CODECS="avc1.640032,mp4a.40.2"
+https://123456.vegettoson83.workers.dev/proxy/m3u8?url=https%3A%2F%2Fcdn111.kingifau.com%2Fdata%2F8%2F44%2F662eff6fb6ba2%2F662eff6fb6ba21080.m3u8&ref=https%3A%2F%2Femturbovid.com%2F

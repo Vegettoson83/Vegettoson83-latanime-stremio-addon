@@ -96,9 +96,15 @@ old variant behind:
   token the site's own JS builds, and that page redirects to the real host via
   `window.location.href` — one cheap GET per option, no browser. Of the hosts it
   hands back only **emturbovid** is extractable (`extractTurbovid`, from
-  `data-hash`): its master m3u8 is unsigned and CORS-open, so it plays from any
-  IP. vidhide/earnvids, upns, rpm, strp2p, luluvdo, waaw, streamtape are IP-bound
-  or JS-gated and stay `externalUrl` — don't "improve" them into url streams.
+  `data-hash`): its playlists are unsigned, referer-free and CORS-open, so the
+  resolved URL goes to Stremio directly with no worker proxy. But the master is
+  **not trustworthy** — turbovid rotates variant CDN hostnames and its older
+  `/data/` generation still lists lapsed domains that NXDOMAIN (dead for every
+  client), so `extractTurbovid` probes the variants and returns the highest
+  live one, or null. Never hand back the master unvalidated; it looks fine and
+  then stalls. vidhide/earnvids, upns, rpm, strp2p, luluvdo, waaw, streamtape are
+  IP-bound or JS-gated and stay `externalUrl` — don't "improve" them into url
+  streams.
 - `/debug-extract?id=slug:episode` runs every extractor with timings,
   `/debug-pelis?id=…` walks the PelisPlus catalog/meta/servers/streams, and
   `/debug-mixdrop?url=` / `/debug-host?url=` probe a single embed — use them

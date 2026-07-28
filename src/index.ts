@@ -1900,17 +1900,16 @@ async function resolvePelisPlayer(token: string, env?: Env): Promise<string | nu
 }
 
 // emturbovid (the site's own "Plus" option, present on nearly every title) is
-// the one host here that hands back a plain HLS master:
-// <div id="video_player" data-hash="…m3u8">. That playlist carries no signature
-// and answers with Access-Control-Allow-Origin:* — verified playable from an IP
-// that never touched the embed — so it goes through the worker proxy like any
-// other portable HLS. The rest (vidhide/earnvids, upns, rpm, strp2p, luluvdo,
-// waaw) mint IP-bound links or gate on JS and stay externalUrl; extracting them
-// worker-side would hand Stremio a dead stream.
+// the one host here worth extracting: <div id="video_player" data-hash="…m3u8">
+// gives an unsigned HLS master, and both it and the variants/segments behind it
+// answer with Access-Control-Allow-Origin:* and need no referer — so a resolved
+// URL is handed to Stremio directly, no worker proxy and no IP binding. The rest
+// (vidhide/earnvids, upns, rpm, strp2p, luluvdo, waaw) mint IP-bound links or
+// gate on JS and stay externalUrl.
 // Retried once: the host stalls occasionally, and a null here is cached with the
 // rest of the stream response for TTL.stream — a transient miss would hide the
 // only playable stream for half an hour.
-async function extractTurbovid(embedUrl: string): Promise<string | null> {
+async function fetchTurbovidMaster(embedUrl: string): Promise<string | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const r = await fetch(embedUrl, {
@@ -1928,6 +1927,45 @@ async function extractTurbovid(embedUrl: string): Promise<string | null> {
   return null;
 }
 
+// The master is NOT trustworthy: turbovid hands out variant playlists on
+// rotating CDN hostnames, and its older `/data/` generation still lists domains
+// that have since lapsed — they NXDOMAIN, so they're dead for every client, not
+// just for us (only the newer `/data3/` masters point at live turbosplayer
+// hosts). Returning the master unchecked therefore advertises a stream that
+// plays the first few bytes and then stalls. So resolve one level deeper: probe
+// the variants and return the highest-bandwidth one that actually answers, or
+// null so the option falls through to an externalUrl.
+async function extractTurbovid(embedUrl: string): Promise<string | null> {
+  const master = await fetchTurbovidMaster(embedUrl);
+  if (!master) return null;
+  let playlist: string;
+  try {
+    const r = await fetch(master, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    playlist = await r.text();
+  } catch { return null; }
+  // Already a media playlist — the fetch above is all the proof needed.
+  if (!playlist.includes("#EXT-X-STREAM-INF")) return playlist.includes("#EXTINF") ? master : null;
+
+  const base = master.substring(0, master.lastIndexOf("/") + 1);
+  const variants: { url: string; bandwidth: number }[] = [];
+  const lines = playlist.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith("#")) continue;
+    const bandwidth = parseInt(lines[i - 1]?.match(/BANDWIDTH=(\d+)/i)?.[1] || "0", 10);
+    variants.push({ url: line.startsWith("http") ? line : base + line, bandwidth });
+  }
+  const probes = await Promise.allSettled(variants.slice(0, 4).map(async (v) => {
+    const r = await fetch(v.url, { headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(6000) });
+    if (!r.ok) throw new Error(`variant HTTP ${r.status}`);
+    return v;
+  }));
+  const live = probes.flatMap((p) => (p.status === "fulfilled" ? [p.value] : []));
+  if (live.length === 0) return null;
+  return live.reduce((best, v) => (v.bandwidth > best.bandwidth ? v : best)).url;
+}
+
 async function getPelisStreams(rawId: string, env: Env, request: Request) {
   // pp:{kind}:{slug} for a movie, pp:serie:{slug}:{season}:{episode} otherwise
   const [, kind, slug, season, episode] = rawId.split(":");
@@ -1942,7 +1980,6 @@ async function getPelisStreams(rawId: string, env: Env, request: Request) {
   const options = parsePelisServers(html).slice(0, 12);
   if (options.length === 0) return { streams: [] };
 
-  const workerBase = new URL(request.url).origin;
   const fileBase = kind === "serie" ? `${slug}-s${season}e${episode}` : slug;
   const embeds = await Promise.all(options.map((o) => resolvePelisPlayer(o.token, env)));
 
@@ -1955,10 +1992,12 @@ async function getPelisStreams(rawId: string, env: Env, request: Request) {
     if (!embed) continue;
     const { audio, server } = options[i];
     if (/turbovid/i.test(embed)) {
+      // Already validated and CORS-open — hand it over as-is rather than
+      // routing every segment through the Worker.
       const m3u8 = await extractTurbovid(embed);
       if (m3u8) {
         add({
-          url: `${workerBase}/proxy/m3u8?url=${encodeURIComponent(m3u8)}&ref=${encodeURIComponent("https://emturbovid.com/")}`,
+          url: m3u8,
           name: "PelisPlus HLS",
           title: `▶ ${server} — PelisPlus (${audio})`,
           behaviorHints: { notWebReady: false, filename: `${fileBase}.m3u8`, bingeGroup: `pelisplus-${server.toLowerCase()}` },
