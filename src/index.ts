@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 26067)
-Total output lines: 2030
-
 
 const ADDON_ID = "com.latanime.stremio";
 const BASE_URL = "https://latanime.org";
@@ -166,7 +163,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.2",
+  version: "4.15.3",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -757,18 +754,36 @@ function decodeVoe(encoded: string): { url: string; isHls: boolean } | null {
 // Pull a playable media URL out of rendered page HTML. VOE's encrypted JSON
 // first (domain-agnostic — its aliases rotate), then a bare HLS/MP4/MediaFire
 // link (some players build the src in JS, which the render surfaces).
+// Hosts (VOE especially) serve a placeholder video — Big Buck Bunny, usually from
+// test-videos.co.uk / commondatastorage — to bots and datacenter IPs instead of
+// the real file. Anything matching here is a decoy, never a real episode: skip
+// it so the extractor falls through to the next candidate or an externalUrl.
+const DECOY_RE = /big[_\-. ]?buck|test-videos\.co\.uk|sample-videos\.com|gtv-videos-bucket|commondatastorage\.googleapis\.com\/gtv|learningcontainer\.com|file-examples\.com|techslides\.com\/demos|download\.blender\.org\/peach|peach\.blender\.org/i;
+function isDecoyUrl(u: string): boolean {
+  let d = u;
+  try { d = decodeURIComponent(u); } catch { /* keep raw */ }
+  return DECOY_RE.test(u) || DECOY_RE.test(d);
+}
+
+function firstRealMatch(html: string, re: RegExp): string | null {
+  for (const m of html.matchAll(new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g"))) {
+    if (!isDecoyUrl(m[0])) return m[0];
+  }
+  return null;
+}
+
 function findMediaUrl(html: string): { url: string; isHls: boolean } | null {
   const jm = html.match(/<script\s+type="application\/json">([\s\S]*?)<\/script>/);
   if (jm) {
     const voe = decodeVoe(jm[1].trim());
-    if (voe) return voe;
+    if (voe && !isDecoyUrl(voe.url)) return voe;
   }
-  const m3u8 = html.match(/https?:\/\/[^"'\s\\<>]+\.m3u8[^"'\s\\<>]*/);
-  if (m3u8) return { url: m3u8[0], isHls: true };
-  const mf = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s\\<>]+/);
-  if (mf) return { url: mf[0], isHls: false };
-  const mp4 = html.match(/https?:\/\/[^"'\s\\<>]+\.mp4[^"'\s\\<>]*/);
-  if (mp4) return { url: mp4[0], isHls: false };
+  const m3u8 = firstRealMatch(html, /https?:\/\/[^"'\s\\<>]+\.m3u8[^"'\s\\<>]*/);
+  if (m3u8) return { url: m3u8, isHls: true };
+  const mf = firstRealMatch(html, /https:\/\/download\d+\.mediafire\.com[^"'\s\\<>]+/);
+  if (mf) return { url: mf, isHls: false };
+  const mp4 = firstRealMatch(html, /https?:\/\/[^"'\s\\<>]+\.mp4[^"'\s\\<>]*/);
+  if (mp4) return { url: mp4, isHls: false };
   return null;
 }
 
@@ -781,7 +796,7 @@ async function resolveViaRender(
   env: Env,
 ): Promise<{ url: string; isHls: boolean } | null> {
   if (!browserRenderingReady(env)) return null;
-  const key = `rr:${embedUrl}`;
+  const key = `rr:v2:${embedUrl}`;
   const cached = await cacheGet(key, env.STREAM_CACHE) as { url: string; isHls: boolean; miss?: boolean } | null;
   if (cached) return cached.miss ? null : cached;
   const html = await renderPage(embedUrl, env, { referer: embedUrl });
@@ -793,7 +808,495 @@ async function resolveViaRender(
 // ─── MEDIAFIRE RESOLVER ────────────────────────────────────────────────────
 // GET mediafire.com/file/{key}/{name}/file → the CDN URL used to be inline in
 // the HTML (download{n}.mediafire.com → 206, video/mp4, Accept-Ranges). As of
-// mid-2026 …6067 tokens truncated…r: number }[] = [];
+// mid-2026 MediaFire builds that link in JS, so plain fetch can only succeed
+// when the static URL is still present; otherwise it returns null and the
+// caller falls back to browser rendering. It never returns the page URL — a
+// non-video link that only produced a dead "stream".
+async function resolveMediafire(mfUrl: string): Promise<string | null> {
+  try {
+    const r = await fetch(mfUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+        "Referer": "https://www.mediafire.com/",
+        "Accept-Language": "es-MX,es;q=0.9",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) return null;
+    const html = await r.text();
+    const match = html.match(/https:\/\/download\d+\.mediafire\.com[^"'\s]+/);
+    return match ? match[0] : null;
+  } catch { return null; }
+}
+
+function parseEpisodeEmbeds(html: string) {
+  const embedUrls: { url: string; name: string }[] = [];
+  const seen = new Set<string>();
+
+  // The site has used two encodings for data-player:
+  //   • full base64 of the provider URL (current as of 2026-07, all players)
+  //   • literal path suffix appended to the data-key base64 prefix
+  // Decode-first handles both: a literal suffix never base64-decodes to a URL,
+  // and concatenating the current prefix ("…/reproductor?url=") only yields
+  // latanime's JS wrapper page, whose provider host the extractors below
+  // can never see.
+  const keyM = html.match(/data-key="([A-Za-z0-9+/=]+)"/);
+  const baseUrl = keyM ? (() => { try { return atob(keyM[1]); } catch { return ""; } })() : "";
+
+  for (const m of html.matchAll(/<a[^>]+data-player="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
+    const raw  = m[1].trim();
+    const name = m[2].replace(/<[^>]+>/g, "").trim() || "Player";
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+
+    let embedUrl = "";
+    try {
+      const decoded = atob(raw);
+      if (decoded.startsWith("http") || decoded.startsWith("//")) embedUrl = decoded;
+    } catch { }
+    if (!embedUrl && baseUrl) embedUrl = baseUrl + raw;
+
+    if (embedUrl.startsWith("//")) embedUrl = `https:${embedUrl}`;
+    if (!embedUrl.startsWith("http")) continue;
+    embedUrls.push({ url: embedUrl, name });
+  }
+
+  // Scrape download mirror links directly from episode page
+  const mirrors: { mediafire?: string; savefiles?: string; pixeldrain?: string; mega?: string; gofile?: string } = {};
+  for (const m of html.matchAll(/href=["']([^"']+)["']/gi)) {
+    const href = m[1].trim();
+    if (href.includes("mediafire.com") && href.includes("/file/") && !mirrors.mediafire) mirrors.mediafire = href;
+    else if (href.includes("savefiles.com") && !href.includes("/d/") && !mirrors.savefiles) mirrors.savefiles = href;
+    else if (href.includes("pixeldrain.com") && !mirrors.pixeldrain) mirrors.pixeldrain = href;
+    else if (href.includes("mega.nz") && !mirrors.mega) mirrors.mega = href;
+    else if (href.includes("gofile.io") && !mirrors.gofile) mirrors.gofile = href;
+  }
+
+  return { embedUrls, mirrors };
+}
+
+async function getStreams(rawId: string, env: Env, request: Request) {
+  if (rawId.startsWith("af:")) return getAfStreams(rawId, env, request);
+  if (rawId.startsWith("aon:")) return getAonStreams(rawId, env, request);
+  if (rawId.startsWith("av1:")) return getAv1Streams(rawId, env, request);
+  if (rawId.startsWith("dorama:")) return getDoramaStreams(DORAMA_SOURCES.dorama, rawId, env, request);
+  if (rawId.startsWith("dsub:")) return getDoramaStreams(DORAMA_SOURCES.dsub, rawId, env, request);
+  const parts = rawId.replace("latanime:", "").split(":");
+  if (parts.length < 2) return { streams: [] };
+  const [slug, epNum] = parts;
+
+  const html = await fetchHtml(`${BASE_URL}/ver/${slug}-episodio-${epNum}`, env);
+  const { embedUrls, mirrors } = parseEpisodeEmbeds(html);
+
+  if (embedUrls.length === 0 && Object.keys(mirrors).length === 0) return { streams: [] };
+
+  const mfpBase = (env.MFP_URL || "").trim().replace(/\/$/, "");
+  const mfpPass = (env.MFP_PASSWORD || "latanime").trim();
+  const workerBase = new URL(request.url).origin;
+
+  function hlsProxyUrl(m3u8Url: string, referer: string) {
+    // Use MFP if explicitly configured, otherwise use our own worker proxy
+    if (mfpBase) {
+      const params = new URLSearchParams({
+        d: m3u8Url,
+        h_Referer: referer,
+        h_Origin: new URL(referer).origin,
+        api_password: mfpPass,
+      });
+      return `${mfpBase}/proxy/hls/manifest.m3u8?${params}`;
+    }
+    return `${workerBase}/proxy/m3u8?url=${encodeURIComponent(m3u8Url)}&ref=${encodeURIComponent(referer)}`;
+  }
+
+  const streams: any[] = [];
+  const extractedNames = new Set<string>();
+
+  // Every extraction — mirrors and embeds — is a task yielding a playable URL
+  // plus the referer its HLS segments must be fetched with. Referer is decided
+  // where the host is known; the assembly loop below stays host-agnostic.
+  // `proxied` marks a URL that is already a finished, web-ready stream (e.g. the
+  // Deno savefiles HLS) so the assembly doesn't re-wrap it in the worker proxy.
+  type Extracted = { url: string; name: string; isHls: boolean; referer?: string; priority?: boolean; proxied?: boolean };
+  const tasks: Promise<Extracted | null>[] = [];
+
+  // Deno service base (FETCH_PROXY_URL is …/fetch); used for the savefiles HLS
+  // resolver, which must run extraction + playback from one stable IP.
+  const denoBase = (env.FETCH_PROXY_URL || "").trim().replace(/\/fetch\/?$/, "").replace(/\/$/, "");
+
+  // Priority: MediaFire — direct MP4, seekable, no expiry, ~185MB/ep.
+  // Manual first; if MediaFire's JS-built link defeats it, render the page.
+  if (mirrors.mediafire) {
+    tasks.push((async () => {
+      let cdnUrl = await resolveMediafire(mirrors.mediafire!);
+      if (!cdnUrl) {
+        const html = await renderPage(mirrors.mediafire!, env, { referer: "https://www.mediafire.com/" });
+        cdnUrl = html ? (findMediaUrl(html)?.url ?? null) : null;
+      }
+      if (!cdnUrl) return null;
+      return { url: cdnUrl, name: "🔥 MediaFire MP4", isHls: false, priority: true };
+    })());
+  }
+
+  // Priority: Pixeldrain — direct stream, Stremio fetches from user's residential IP
+  const pixeldrainSrc = mirrors.pixeldrain || embedUrls.find((e) => e.url.includes("pixeldrain.com"))?.url;
+  if (pixeldrainSrc) {
+    const idM = pixeldrainSrc.match(/pixeldrain\.com\/(?:u|l)\/([a-zA-Z0-9]+)/);
+    if (idM) tasks.push(Promise.resolve({ url: `https://pixeldrain.com/api/file/${idM[1]}`, name: "Pixeldrain", isHls: false, priority: true }));
+  }
+
+  // savefiles HLS via the Deno resolver — savefiles binds the signed URL to the
+  // extractor's IP, so the whole flow (extract + all segment fetches) runs on
+  // Deno's one stable IP and the token stays valid. Deno serves it web-ready.
+  const savefilesSrc = mirrors.savefiles || embedUrls.find((e) => e.url.includes("savefiles.com") || e.url.includes("streamhls.to"))?.url;
+  if (denoBase && savefilesSrc) {
+    const code = savefilesSrc.split(/savefiles\.com\/|streamhls\.to\//).pop()?.replace(/^e\//, "").split(/[/?]/)[0]?.trim();
+    if (code && code.length > 3) {
+      tasks.push(Promise.resolve({ url: `${denoBase}/savefiles?code=${encodeURIComponent(code)}`, name: "savefiles 1080p", isHls: true, proxied: true }));
+    }
+  }
+
+  for (const embed of embedUrls) {
+    if (embed.url.includes("pixeldrain.com")) { extractedNames.add(embed.name); continue; } // handled above
+    // savefiles/streamhls handled above via Deno (when configured); mark it
+    // extracted so it isn't also shown as an externalUrl. Without a Deno base it
+    // falls through to an externalUrl instead. mixdrop mints IP-bound signed
+    // URLs too but is a single MP4 — server-side extraction 403s from another
+    // IP, so skip it and let the user's own client resolve the externalUrl.
+    if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to")) {
+      if (denoBase) extractedNames.add(embed.name);
+      continue;
+    }
+    if (/mi+xdrop/.test(embed.url)) {
+      continue;
+    }
+    // StreamWish mints IP-bound HLS tokens — the premilkyway CDN 403s a fetch
+    // from any IP other than the one that resolved the /e/ embed (verified:
+    // same-IP extract+play = 200, cross-IP = 403). Same class as savefiles, so
+    // resolve AND serve it entirely on Deno's one stable IP; the Worker only
+    // points Stremio at ${denoBase}/streamwish. Never extract it Worker-side —
+    // that produces a dead stream. Without a Deno base it falls through to an
+    // externalUrl (the user's own client resolves it from their IP).
+    if (/streamwish|embedwish|wishfast|sfastwish|swishsrv|streamwis/i.test(embed.url)) {
+      if (denoBase) {
+        tasks.push(Promise.resolve({
+          url: `${denoBase}/streamwish?url=${encodeURIComponent(embed.url)}`,
+          name: embed.name, isHls: true, proxied: true,
+        }));
+      }
+      continue;
+    }
+    tasks.push((async () => {
+      if (embed.url.includes("hexload.com")) {
+        const url = await extractHexload(embed.url);
+        return url ? { url, name: embed.name, isHls: false } : null;
+      }
+      if (embed.url.includes("mp4upload.com")) {
+        const url = await extractMp4upload(embed.url);
+        return url ? { url, name: embed.name, isHls: false } : null;
+      }
+      // No manual extractor for this host (JS-challenge/SPA players like voe,
+      // dsvplay, bysekoze). Render it with Browser Rendering if configured
+      // (cached per embed); findMediaUrl decodes VOE's blob or a bare src.
+      const media = await resolveViaRender(embed.url, env);
+      if (media) return { url: media.url, name: embed.name, isHls: media.isHls, referer: embed.url };
+      // Still nothing — falls through to an externalUrl entry below, playable
+      // in the user's own client.
+      return null;
+    })());
+  }
+
+  const results = await Promise.allSettled(tasks);
+
+  for (const r of results) {
+    if (r.status === "fulfilled" && r.value) {
+      const { url: streamUrl, name, isHls, referer, priority, proxied } = r.value;
+      const hlsReferer = referer || "https://latanime.org/";
+      // proxied streams (Deno savefiles HLS) are already finished + web-ready;
+      // everything else HLS goes through the worker proxy.
+      const finalUrl = (isHls && !proxied) ? hlsProxyUrl(streamUrl, hlsReferer) : streamUrl;
+      if (!streams.some(s => s.url === finalUrl)) {
+        // title only, never title AND description: stremio-core deserializes
+        // title as a serde alias of description, and serde rejects an object
+        // carrying both as a duplicate field — every such stream is silently
+        // dropped by the new (Rust-core) Android/Web clients. Legacy clients
+        // read title directly.
+        const label = `▶ ${name} — Latino`;
+        const entry = {
+          url: finalUrl,
+          name: `Latanime ${isHls ? "HLS" : "MP4"}`,
+          title: label,
+          behaviorHints: {
+            // worker-proxied and Deno-proxied HLS are served with CORS over
+            // https, so the web player can use them; only externally proxied
+            // HLS (MFP) is opaque
+            notWebReady: isHls && !proxied && !finalUrl.startsWith(workerBase),
+            // filename drives format detection in Stremio's local streaming
+            // server — the proxied URLs carry no usable extension themselves
+            filename: `${slug}-e${epNum}.${isHls ? "m3u8" : "mp4"}`,
+            bingeGroup: `latanime-${name}`,
+          },
+        };
+        if (priority) streams.unshift(entry); else streams.push(entry);
+      }
+      extractedNames.add(name);
+    }
+  }
+
+  for (const embed of embedUrls) {
+    if (!extractedNames.has(embed.name)) {
+      const label = `🌐 ${embed.name} — Latino`;
+      // Embed pages are HTML, not video — externalUrl is the spec-correct
+      // field, and unlike notWebReady url streams it stays visible on
+      // Stremio Web even when every extractor above failed.
+      streams.push({
+        externalUrl: embed.url,
+        name: "Latanime 🌐",
+        title: label,
+      });
+    }
+  }
+
+  return { streams };
+}
+
+// ─── ANIMEFÉNIX scrapers ─────────────────────────────────────────────────────
+// Decode the handful of HTML entities that show up in AnimeFénix titles
+// (accented Spanish + the numeric ones). Not a full decoder — just enough.
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+    .replace(/&([a-z]+);/gi, (m, e) => (({
+      amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", hellip: "…",
+      eacute: "é", aacute: "á", iacute: "í", oacute: "ó", uacute: "ú", ntilde: "ñ",
+      Eacute: "É", Aacute: "Á", Iacute: "Í", Oacute: "Ó", Uacute: "Ú", Ntilde: "Ñ",
+      uuml: "ü", Uuml: "Ü", ordf: "ª", ordm: "º",
+    } as Record<string, string>)[e] ?? m));
+}
+
+// AnimeFénix is Cloudflare-fronted but serves content to server IPs (no JS
+// challenge). Race a direct Worker fetch against the Deno relay (allowlisted to
+// animefenix2.tv) and take whichever returns first — no 500-byte floor because
+// the episode-list fragments are legitimately small.
+async function fetchAf(url: string, env?: Env, timeoutMs = 12000): Promise<string> {
+  const proxyBase = env?.FETCH_PROXY_URL?.trim();
+  const pull = async (name: string, r: Promise<Response>) => {
+    const res = await r;
+    if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`);
+    const txt = await res.text();
+    if (!txt) throw new Error(`${name}: empty`);
+    return txt;
+  };
+  const racers: Promise<string>[] = [
+    pull("direct", fetch(url, { headers: CHROME_HEADERS, signal: AbortSignal.timeout(8000) })),
+  ];
+  if (proxyBase) {
+    racers.push(pull("relay", fetch(`${proxyBase}?url=${encodeURIComponent(url)}`, {
+      headers: { "User-Agent": CHROME_UA }, signal: AbortSignal.timeout(timeoutMs),
+    })));
+  }
+  return Promise.any(racers);
+}
+
+// Directory/search/home cards: <a href="/{slug}"><figure>…<img src="{poster}"
+// alt="{title}">…  The trailing <figure> requirement filters out nav links
+// (/directorio, /ver/…, /media) since those aren't card anchors.
+function parseAfCards(html: string) {
+  const results: { id: string; name: string; poster: string }[] = [];
+  const seen = new Set<string>();
+  for (const m of html.matchAll(/<a\s+href="\/([a-z0-9][a-z0-9-]+)"\s*>\s*<figure[\s\S]{0,600}?<img[^>]+src="([^"]+)"[^>]*alt="([^"]*)"/gi)) {
+    const slug = m[1];
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    const poster = m[2].startsWith("http") ? m[2] : `${AF_BASE}${m[2]}`;
+    const name = decodeEntities(m[3]).trim() || slug;
+    results.push({ id: `af:${slug}`, name, poster });
+  }
+  return results.slice(0, 100);
+}
+
+async function getAfCatalog(catalogId: string, extra: Record<string, string>, env?: Env) {
+  if (extra.search?.trim()) {
+    return { metas: parseAfCards(await fetchAf(`${AF_BASE}/directorio/anime?q=${encodeURIComponent(extra.search.trim())}`, env)).map(toMetaPreview) };
+  }
+  const page = Math.floor(parseInt(extra.skip || "0", 10) / 24) + 1;
+  return { metas: parseAfCards(await fetchAf(`${AF_BASE}/directorio/anime?p=${page}`, env)).map(toMetaPreview) };
+}
+
+async function getAfMeta(id: string, tmdbKey: string, env?: Env) {
+  const slug = id.replace("af:", "");
+  const html = await fetchAf(`${AF_BASE}/${slug}`, env);
+  const ogTitle = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i)?.[1]
+    || html.match(/<title>\s*(?:Ver\s+)?([\s\S]*?)\s*[-|]\s*AnimeF[eé]nix/i)?.[1] || slug;
+  const name = decodeEntities(ogTitle).replace(/^Ver\s+/i, "").trim();
+  const poster = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i)?.[1] || "";
+  const description = decodeEntities(html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/i)?.[1] || "").trim();
+
+  // Episode list is an infinite-scroll HTML fragment: ?id={slug}&load=episodes
+  // &start={n}. Each call returns from episode start+1 to the end; paginate by
+  // the count seen so far until no new episodes appear (cap the loop).
+  const episodes: { id: string; number: number }[] = [];
+  const seen = new Set<number>();
+  for (let pageN = 0; pageN < 25; pageN++) {
+    let frag: string;
+    try { frag = await fetchAf(`${AF_BASE}/${slug}?id=${encodeURIComponent(slug)}&load=episodes&start=${seen.size}`, env); }
+    catch { break; }
+    const before = seen.size;
+    for (const em of frag.matchAll(/href="\/ver\/([a-z0-9-]+)-(\d+(?:\.\d+)?)"/gi)) {
+      if (em[1] !== slug) continue;
+      const num = parseFloat(em[2]);
+      if (seen.has(num)) continue;
+      seen.add(num);
+      episodes.push({ id: `af:${slug}:${num}`, number: num });
+    }
+    if (seen.size === before) break;
+  }
+  episodes.sort((a, b) => a.number - b.number);
+
+  const tmdb = await fetchTmdb(name, tmdbKey);
+  return {
+    meta: {
+      id, type: "series", name,
+      poster: tmdb?.poster || poster,
+      background: tmdb?.background || poster,
+      description: tmdb?.description || description,
+      posterShape: "poster",
+      releaseInfo: tmdb?.year || "",
+      // no released date — AnimeFénix exposes none, and a fake epoch renders
+      // as "1969" in the apps (see the latanime videos note)
+      videos: episodes.map((ep) => ({ id: ep.id, title: `Episodio ${ep.number}`, season: 1, episode: ep.number })),
+    },
+  };
+}
+
+// Streamtape / uqload mint IP-bound signed URLs and voe is JS-gated, so those
+// stay externalUrl (the user's own client resolves them). mp4upload yields a
+// plain, cross-IP-playable MP4 — the one host worth extracting inline here.
+async function getAfStreams(rawId: string, env: Env, request: Request) {
+  const parts = rawId.replace("af:", "").split(":");
+  if (parts.length < 2) return { streams: [] };
+  const [slug, ep] = parts;
+  const html = await fetchAf(`${AF_BASE}/ver/${slug}-${ep}`, env);
+
+  // Real video hosts only — the page also lists ad-redirector layers
+  // (re.ironhentai.com/face.php etc.) that are not streams.
+  const KNOWN_HOSTS = /(mp4upload|voe|streamtape|uqload|streamwish|filemoon|filelions|vidhide|luluvid|doodstream|dood|okru|ok\.ru|yourupload|sendvid|mixdrop|savefiles|streamhls|hexload|mega\.nz|pixeldrain)/i;
+  const embeds: string[] = [];
+  const seenEmbed = new Set<string>();
+  for (const m of html.matchAll(/redirect\.php\?id=(https?:\/\/[^"'&\s<>]+)/gi)) {
+    let u = m[1];
+    try { u = decodeURIComponent(u); } catch { }
+    if (!KNOWN_HOSTS.test(u) || seenEmbed.has(u)) continue;
+    seenEmbed.add(u);
+    embeds.push(u);
+  }
+  if (embeds.length === 0) return { streams: [] };
+
+  const streams: any[] = [];
+  for (const embed of embeds) {
+    const host = (embed.match(/https?:\/\/(?:www\.)?([a-z0-9-]+\.[a-z.]+)/i)?.[1] || "host").split(".")[0];
+    if (embed.includes("mp4upload.com")) {
+      const url = await extractMp4upload(embed);
+      if (url) {
+        const label = `▶ mp4upload — AnimeFénix`;
+        streams.push({
+          url, name: "AnimeFénix MP4", title: label,
+          behaviorHints: { notWebReady: false, filename: `${slug}-e${ep}.mp4`, bingeGroup: "animefenix-mp4upload" },
+        });
+        continue;
+      }
+    }
+    // IP-bound or JS-gated host → externalUrl, playable in the user's own client
+    streams.push({ externalUrl: embed, name: "AnimeFénix 🌐", title: `🌐 ${host} — AnimeFénix` });
+  }
+  return { streams };
+}
+
+// ─── ANIME ONLINE NINJA (aon:) ───────────────────────────────────────────────
+// AON is a DooPlay site behind a site-wide Cloudflare managed challenge, so
+// every fetch here goes through fetchAon (Deno relay → Browser Rendering). That
+// makes each hit a metered ~20s render, so the design is render-frugal:
+//   • catalog is search-only (no idle home-grid renders — see MANIFEST),
+//   • a stream request spends exactly ONE render (the episode page, whose own JS
+//     injects the default player's iframe during the render); no second render
+//     on the cold path or the 30s Worker wall blows. Extra player options would
+//     need per-option dooplayer/v1/post renders — deliberately left for later.
+// The id carries the real page path (base64url) so we never guess DooPlay's
+// custom-post-type slug: search/episode links hand us the true permalinks and
+// we round-trip them. IDs are ASCII slug paths, so plain btoa/atob suffice.
+function aonEncodePath(pathname: string): string {
+  return btoa(pathname).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function aonDecodePath(token: string): string {
+  try { return atob(token.replace(/-/g, "+").replace(/_/g, "/")); } catch { return ""; }
+}
+
+// Walk arbitrary DooPlay search/glossary JSON collecting anime entries. Shapes
+// vary across DooPlay versions (array vs numeric-keyed object), so recurse and
+// pick any node carrying a title + an animeonline.ninja permalink that isn't an
+// episode/genre listing. Poster comes from img/image/thumbnail when present.
+function parseAonCards(jsonText: string): { id: string; name: string; poster: string }[] {
+  let data: unknown;
+  try { data = JSON.parse(jsonText); } catch { return []; }
+  const out: { id: string; name: string; poster: string }[] = [];
+  const seen = new Set<string>();
+  const visit = (node: any) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) { for (const v of node) visit(v); return; }
+    const url = typeof node.url === "string" ? node.url : "";
+    const title = typeof node.title === "string" ? node.title
+      : typeof node.name === "string" ? node.name : "";
+    if (url && title && /animeonline\.ninja/i.test(url) && !/\/(episodio|genero)\//i.test(url)) {
+      let pathname = "";
+      try { pathname = new URL(url).pathname; } catch { /* skip */ }
+      // Skip single-segment index pages (/inicio/, /online/, /temporada/ …)
+      if (pathname && pathname.replace(/^\/|\/$/g, "").includes("/")) {
+        const id = `aon:${aonEncodePath(pathname)}`;
+        if (!seen.has(id)) {
+          seen.add(id);
+          const raw = typeof node.img === "string" ? node.img
+            : typeof node.image === "string" ? node.image
+            : typeof node.thumbnail === "string" ? node.thumbnail : "";
+          const poster = raw.startsWith("http") ? raw : raw ? `${AON_BASE}${raw}` : "";
+          out.push({ id, name: decodeEntities(title).trim(), poster });
+        }
+      }
+    }
+    for (const k in node) if (node[k] && typeof node[k] === "object") visit(node[k]);
+  };
+  visit(data);
+  return out.slice(0, 60);
+}
+
+async function getAonCatalog(extra: Record<string, string>, env?: Env) {
+  const q = (extra.search || "").trim();
+  if (!q) return { metas: [] };
+  try {
+    const txt = await fetchAon(`/wp-json/dooplay/search?keyword=${encodeURIComponent(q)}`, env, 22000);
+    return { metas: parseAonCards(txt).map(toMetaPreview) };
+  } catch { return { metas: [] }; }
+}
+
+async function getAonMeta(id: string, tmdbKey: string, env?: Env) {
+  const path = aonDecodePath(id.slice("aon:".length));
+  if (!path) return { meta: null };
+  let html: string;
+  try { html = await fetchAon(path, env, 24000); } catch { return { meta: null }; }
+
+  const name = decodeEntities(
+    html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i)?.[1]
+    || html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1]?.replace(/<[^>]+>/g, "")
+    || html.match(/<title>([\s\S]*?)<\/title>/i)?.[1]
+    || path,
+  ).replace(/\s*[-|]\s*(Ver\s+Anime.*|Anime\s*Online.*|VerAnime.*)$/i, "").replace(/^Ver\s+/i, "").trim();
+  const poster = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i)?.[1] || "";
+  const description = decodeEntities(
+    html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/i)?.[1] || "",
+  ).trim();
+
+  // DooPlay lists episodes as /episodio/{slug}/ anchors (newest first). The
+  // episode number is the trailing number in the slug; fall back to encounter
+  // order if a slug carries none.
+  const episodes: { id: string; number: number }[] = [];
   const seen = new Set<string>();
   for (const m of html.matchAll(/href=["'](https?:\/\/[^"']*\/episodio\/([^"'/]+)\/?)["']/gi)) {
     const slug = m[2];
@@ -1440,7 +1943,7 @@ export default {
 
     if (path === "/cache-clear") {
       // Takes the full KV key incl. prefix — live prefixes are catalog:,
-      // meta:, stream:v2: and rr: (old br: and unversioned stream: are gone).
+      // meta:, stream:v3: and rr:v2: (older stream:/stream:v2:/rr: keys are abandoned).
       const key = url.searchParams.get("key");
       if (key && env.STREAM_CACHE) {
         await env.STREAM_CACHE.delete(key);
@@ -1479,13 +1982,16 @@ export default {
     const streamM = path.match(/^\/stream\/([^/]+)\/(.+)\.json$/);
     if (streamM) {
       const id = decodeURIComponent(streamM[2]);
-      // v2: pre-4.9.2 cached entries carry title+description, which Rust-core
-      // clients drop as invalid — keying past them instead of serving them out
-      const cached = await cacheGet(`stream:v2:${id}`, env.STREAM_CACHE);
+      // v3: v2 entries could hold a cached Big Buck Bunny decoy (pre-4.15.3), and
+      // pre-4.9.2 ones carried title+description, which Rust-core clients drop —
+      // keying past them instead of serving them out
+      const cached = await cacheGet(`stream:v3:${id}`, env.STREAM_CACHE);
       if (cached) return json(cached);
       try {
         const result = await getStreams(id, env, request);
-        if (result.streams.length > 0) await cacheSet(`stream:v2:${id}`, result, TTL.stream, env.STREAM_CACHE);
+        // safety net for every source: a decoy placeholder is never a real stream
+        result.streams = result.streams.filter((st: { url?: string; externalUrl?: string }) => !isDecoyUrl(st.url || st.externalUrl || ""));
+        if (result.streams.length > 0) await cacheSet(`stream:v3:${id}`, result, TTL.stream, env.STREAM_CACHE);
         return json(result);
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
