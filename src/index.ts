@@ -696,10 +696,10 @@ function browserRenderingReady(env: Env): boolean {
   return !!(env.CF_ACCOUNT_ID || "").trim() && !!(env.CF_API_TOKEN || "").trim();
 }
 
-async function renderPage(url: string, env: Env, opts: { referer?: string; wait?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2"; timeoutMs?: number; waitForSelector?: string } = {}): Promise<string | null> {
+async function renderPage(url: string, env: Env, opts: { referer?: string; wait?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2"; timeoutMs?: number; waitForSelector?: string; onDiagnostic?: (detail: { status?: number; code?: number; message?: string; retryAfter?: string }) => void } = {}): Promise<string | null> {
   const acct = (env.CF_ACCOUNT_ID || "").trim();
   const token = (env.CF_API_TOKEN || "").trim();
-  if (!acct || !token) return null;
+  if (!acct || !token) { opts.onDiagnostic?.({ message: "Browser Run credentials missing" }); return null; }
   const timeoutMs = opts.timeoutMs ?? 20000;
   try {
     const body: Record<string, unknown> = {
@@ -723,12 +723,24 @@ async function renderPage(url: string, env: Env, opts: { referer?: string; wait?
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!r.ok) return null;
+    if (!r.ok) {
+      let code: number | undefined;
+      let message = "Cloudflare API request failed";
+      try {
+        const errorData: any = await r.json();
+        const first = Array.isArray(errorData?.errors) ? errorData.errors[0] : null;
+        if (typeof first?.code === "number") code = first.code;
+        if (typeof first?.message === "string") message = first.message.slice(0, 200);
+      } catch { /* keep generic response */ }
+      opts.onDiagnostic?.({ status: r.status, code, message, retryAfter: r.headers.get("Retry-After") || undefined });
+      return null;
+    }
+    opts.onDiagnostic?.({ status: r.status });
     const data: any = await r.json();
     // REST envelope: { success, result: "<html>" } (result may also be an object)
     const html = typeof data?.result === "string" ? data.result : (data?.result?.html || "");
     return html && html.length > 200 ? html : null;
-  } catch { return null; }
+  } catch (e) { opts.onDiagnostic?.({ message: e instanceof Error ? e.name : "Request failed" }); return null; }
 }
 
 // VOE hides its real source in a <script type="application/json"> blob that a
@@ -1785,8 +1797,9 @@ export default {
       const t0 = Date.now();
       const wait = (url.searchParams.get("wait") as "load" | "domcontentloaded" | "networkidle0" | "networkidle2" | null) || undefined;
       const selector = url.searchParams.get("selector") || undefined;
-      const html = await renderPage(testUrl, env, { referer: url.searchParams.get("ref") || "https://latanime.org/", wait, waitForSelector: selector, timeoutMs: selector ? 28000 : undefined });
-      if (html == null) return json({ error: "render returned null — CF_ACCOUNT_ID/CF_API_TOKEN unset or render failed", ms: Date.now() - t0 });
+      let upstream: { status?: number; code?: number; message?: string; retryAfter?: string } = {};
+      const html = await renderPage(testUrl, env, { referer: url.searchParams.get("ref") || "https://latanime.org/", wait, waitForSelector: selector, timeoutMs: selector ? 28000 : undefined, onDiagnostic: (detail) => { upstream = detail; } });
+      if (html == null) return json({ error: "Browser Run failed", upstream, ms: Date.now() - t0 });
       return json({
         testUrl,
         wait: wait || "networkidle0",
