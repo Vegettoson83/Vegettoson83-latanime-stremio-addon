@@ -182,8 +182,9 @@ const MANIFEST = {
     { type: "series", id: "animeav1-directory", name: "AnimeAv1 — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
     { type: "series", id: "doramaslat-directory", name: "Doramas Latino — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
     { type: "series", id: "doramedplay-directory", name: "Doramas Sub — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
+    { type: "series", id: "kdramasplay-directory", name: "KDramas Play — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
   ],
-  idPrefixes: ["latanime:", "af:", "aon:", "av1:", "dorama:", "dsub:"],
+  idPrefixes: ["latanime:", "af:", "aon:", "av1:", "dorama:", "dsub:", "kdrama:"],
   stremioAddonsConfig: {
     issuer: "https://stremio-addons.net",
     signature: "eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..4WDWvTnhGYchX9Rc1o9Bag.YHFC6ACCxdIpApiv6xLMfXvadBCCRXT9T-L2ZNgDylI-VeD8M4UW_MV3y_AQd-BxtLeykl62PeGMNweKlwfWOl_ax4-Z5ADECeZWWubCOcnbPtzGvkLrTifY_qkIi0I3.Muzmn0vmvz4BCEGDPE1OHg",
@@ -480,6 +481,7 @@ async function getCatalog(catalogId: string, extra: Record<string, string>, env?
   if (catalogId.startsWith("animeav1")) return getAv1Catalog(extra, env);
   if (catalogId.startsWith("doramaslat")) return getDoramaCatalog(DORAMA_SOURCES.dorama, extra, env);
   if (catalogId.startsWith("doramedplay")) return getDoramaCatalog(DORAMA_SOURCES.dsub, extra, env);
+  if (catalogId.startsWith("kdramasplay")) return getDoramaCatalog(DORAMA_SOURCES.kdrama, extra, env);
   if (extra.search?.trim()) return { metas: (await searchAnimes(extra.search.trim(), env)).map(toMetaPreview) };
   if (catalogId === "latanime-airing") return { metas: parseAnimeCards(await fetchHtml(`${BASE_URL}/emision`, env)).map(toMetaPreview) };
   const page = Math.floor(parseInt(extra.skip || "0", 10) / 30) + 1;
@@ -505,6 +507,7 @@ async function getMeta(id: string, tmdbKey: string, env?: Env) {
   if (id.startsWith("av1:")) return getAv1Meta(id, tmdbKey, env);
   if (id.startsWith("dorama:")) return getDoramaMeta(DORAMA_SOURCES.dorama, id, tmdbKey, env);
   if (id.startsWith("dsub:")) return getDoramaMeta(DORAMA_SOURCES.dsub, id, tmdbKey, env);
+  if (id.startsWith("kdrama:")) return getDoramaMeta(DORAMA_SOURCES.kdrama, id, tmdbKey, env);
   const slug = id.replace("latanime:", "");
   const html = await fetchHtml(`${BASE_URL}/anime/${slug}`, env);
   const titleM = html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i) || html.match(/<title>(.*?)\s*[—\-|].*?<\/title>/i);
@@ -881,6 +884,7 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   if (rawId.startsWith("av1:")) return getAv1Streams(rawId, env, request);
   if (rawId.startsWith("dorama:")) return getDoramaStreams(DORAMA_SOURCES.dorama, rawId, env, request);
   if (rawId.startsWith("dsub:")) return getDoramaStreams(DORAMA_SOURCES.dsub, rawId, env, request);
+  if (rawId.startsWith("kdrama:")) return getDoramaStreams(DORAMA_SOURCES.kdrama, rawId, env, request);
   const parts = rawId.replace("latanime:", "").split(":");
   if (parts.length < 2) return { streams: [] };
   const [slug, epNum] = parts;
@@ -1567,10 +1571,11 @@ async function getAv1Streams(rawId: string, env: Env, request: Request) {
 //       POST /wp-admin/admin-ajax.php  action=doo_player_ajax&post&nume&type
 //       → {embed_url:"<iframe src=…>"}  (ok.ru, streamwish family, mp4upload…)
 // ID scheme: {prefix}:{tvshows-slug} series, {prefix}:{episode-slug} streams.
-interface DoramaSource { prefix: string; base: string; label: string }
+interface DoramaSource { prefix: string; base: string; label: string; seriesPath: string; episodePath: string }
 const DORAMA_SOURCES: Record<string, DoramaSource> = {
-  dorama: { prefix: "dorama", base: "https://doramaslat.com", label: "Doramas Latino" },
-  dsub: { prefix: "dsub", base: "https://doramedplay.net", label: "Doramas Sub" },
+  dorama: { prefix: "dorama", base: "https://doramaslat.com", label: "Doramas Latino", seriesPath: "tvshows", episodePath: "episodes" },
+  dsub: { prefix: "dsub", base: "https://doramedplay.net", label: "Doramas Sub", seriesPath: "tvshows", episodePath: "episodes" },
+  kdrama: { prefix: "kdrama", base: "https://kdramasplay.com", label: "KDramas Play", seriesPath: "series", episodePath: "episodios" },
 };
 
 async function fetchDorama(url: string, env?: Env, timeoutMs = 12000): Promise<string> {
@@ -1614,11 +1619,11 @@ function parseDoramaCards(html: string, src: DoramaSource) {
     results.push({ id: `${src.prefix}:${slug}`, name: cleanDoramaTitle(rawName) || slug, poster });
   };
   // Archive cards: <div class="poster"><img src alt>…<a href="…/tvshows/{slug}/">
-  for (const m of html.matchAll(/<img[^>]+(?:data-src|src)="([^"]+)"[^>]*alt="([^"]*)"[\s\S]{0,220}?\/tvshows\/([a-z0-9-]+)\//gi)) {
+  for (const m of html.matchAll(/<img[^>]+(?:data-src|src)="([^"]+)"[^>]*alt="([^"]*)"[\s\S]{0,220}?\/(?:tvshows|series)\/([a-z0-9-]+)\//gi)) {
     push(m[3], m[1], m[2]);
   }
   // Search cards: <a href="…/tvshows/{slug}/">…<img src alt>
-  for (const m of html.matchAll(/\/tvshows\/([a-z0-9-]+)\/"[^>]*>[\s\S]{0,80}?<img[^>]+(?:data-src|src)="([^"]+)"[^>]*alt="([^"]*)"/gi)) {
+  for (const m of html.matchAll(/\/(?:tvshows|series)\/([a-z0-9-]+)\/"[^>]*>[\s\S]{0,80}?<img[^>]+(?:data-src|src)="([^"]+)"[^>]*alt="([^"]*)"/gi)) {
     push(m[1], m[2], m[3]);
   }
   return results.slice(0, 100);
@@ -1630,13 +1635,13 @@ async function getDoramaCatalog(src: DoramaSource, extra: Record<string, string>
     return { metas: parseDoramaCards(await fetchDorama(`${src.base}/?s=${encodeURIComponent(q)}`, env), src).map(toMetaPreview) };
   }
   const page = Math.floor(parseInt(extra.skip || "0", 10) / 45) + 1;
-  const path = page > 1 ? `${src.base}/tvshows/page/${page}/` : `${src.base}/tvshows/`;
+  const path = page > 1 ? `${src.base}/${src.seriesPath}/page/${page}/` : `${src.base}/${src.seriesPath}/`;
   return { metas: parseDoramaCards(await fetchDorama(path, env), src).map(toMetaPreview) };
 }
 
 async function getDoramaMeta(src: DoramaSource, id: string, tmdbKey: string, env?: Env) {
   const slug = id.slice(src.prefix.length + 1);
-  const html = await fetchDorama(`${src.base}/tvshows/${slug}/`, env);
+  const html = await fetchDorama(`${src.base}/${src.seriesPath}/${slug}/`, env);
   const name = cleanDoramaTitle(
     html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i)?.[1]
     || html.match(/<title>([\s\S]*?)<\/title>/i)?.[1] || slug,
@@ -1653,7 +1658,7 @@ async function getDoramaMeta(src: DoramaSource, id: string, tmdbKey: string, env
   // the /tvshows/ slug, so read the real /episodes/… links off the page.
   const episodes: { slug: string; s: number; e: number }[] = [];
   const seen = new Set<string>();
-  for (const m of html.matchAll(/\/episodes\/([a-z0-9-]+-(\d+)x(\d+))\/?/gi)) {
+  for (const m of html.matchAll(/\/(?:episodes|episodios)\/([a-z0-9-]+-(\d+)x(\d+))\/?/gi)) {
     if (seen.has(m[1])) continue;
     seen.add(m[1]);
     episodes.push({ slug: m[1], s: parseInt(m[2], 10), e: parseInt(m[3], 10) });
@@ -1705,7 +1710,7 @@ async function getDoramaStreams(src: DoramaSource, rawId: string, env: Env, requ
   // id is {prefix}:{episodeSlug} where episodeSlug already ends in -{s}x{e}
   const epSlug = rawId.slice(src.prefix.length + 1);
   if (!/-\d+x\d+$/.test(epSlug)) return { streams: [] };
-  const html = await fetchDorama(`${src.base}/episodes/${epSlug}/`, env);
+  const html = await fetchDorama(`${src.base}/${src.episodePath}/${epSlug}/`, env);
 
   // Player options — attribute order varies, so pull each <li ...player_option...>
   // block then read its data-* individually. Quotes may be ' or ".
