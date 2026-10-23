@@ -788,9 +788,10 @@ function firstRealMatch(html: string, re: RegExp): string | null {
 }
 
 function findMediaUrl(html: string): { url: string; isHls: boolean } | null {
-  const jm = html.match(/<script\s+type="application\/json">([\s\S]*?)<\/script>/);
-  if (jm) {
-    const voe = decodeVoe(jm[1].trim());
+  // VOE pages can contain multiple JSON scripts and additional attributes.
+  // Scan every candidate; the first JSON block is not necessarily the video.
+  for (const m of html.matchAll(/<script\\b(?=[^>]*\\btype\\s*=\\s*["']application\\/json["'])[^>]*>([\\s\\S]*?)<\\/script>/gi)) {
+    const voe = decodeVoe(m[1].trim());
     if (voe && !isDecoyUrl(voe.url)) return voe;
   }
   const m3u8 = firstRealMatch(html, /https?:\/\/[^"'\s\\<>]+\.m3u8[^"'\s\\<>]*/);
@@ -1854,7 +1855,8 @@ export default {
           const media = second.html ? findMediaUrl(second.html) : null;
           result.second = {
             status: second.status, bytes: second.html.length, error: second.error,
-            encodedJson: /<script\s+type="application\/json">/i.test(second.html),
+            encodedJson: /<script\\b[^>]*type\\s*=\\s*["']application\\/json["']/i.test(second.html),
+            jsonCandidates: [...second.html.matchAll(/<script\\b(?=[^>]*\\btype\\s*=\\s*["']application\\/json["'])[^>]*>([\\s\\S]*?)<\\/script>/gi)].length,
             mediaDecoded: !!media,
             mediaType: media ? (media.isHls ? "HLS" : "MP4") : null,
           };
