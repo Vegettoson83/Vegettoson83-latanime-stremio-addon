@@ -1,0 +1,12 @@
+# Temporary Koyeb deployment of the existing Deno companion.
+# Cloudflare Worker remains deployed separately via wrangler.toml.
+FROM denoland/deno:alpine
+
+WORKDIR /app
+COPY deno/fetch.ts ./deno/fetch.ts
+
+ENV PORT=8000
+EXPOSE 8000
+
+USER deno
+CMD ["run", "--allow-net", "deno/fetch.ts"]
