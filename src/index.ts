@@ -717,7 +717,7 @@ async function renderPage(url: string, env: Env, opts: { referer?: string; wait?
     if (opts.waitForSelector) {
       body.waitForSelector = { selector: opts.waitForSelector, timeout: Math.min(16000, Math.max(4000, timeoutMs - 4000)) };
     }
-    const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acct}/browser-rendering/content`, {
+    const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acct}/browser-run/content`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
       body: JSON.stringify(body),
