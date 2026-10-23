@@ -1826,6 +1826,43 @@ export default {
       });
     }
 
+    if (path === "/debug-voe") {
+      // Fixed test file only: no arbitrary-URL fetches or signed URLs in output.
+      const code = "fpfhees65dvh";
+      const result: Record<string, unknown> = {};
+      const pull = async (target: string) => {
+        try {
+          const response = await fetch(target, {
+            headers: { "User-Agent": CHROME_UA, "Accept": "text/html,*/*;q=0.8" },
+            signal: AbortSignal.timeout(9000),
+          });
+          const html = response.ok ? await response.text() : "";
+          return { status: response.status, html, error: "" };
+        } catch (e) {
+          return { status: 0, html: "", error: e instanceof Error ? e.name : "fetch failed" };
+        }
+      };
+      const first = await pull(`https://voe.sx/e/${code}`);
+      result.first = { status: first.status, bytes: first.html.length, error: first.error };
+      const redirect = first.html.match(/window\.location\.href\s*=\s*['"](https:\/\/[^'"]+\/e\/[a-z0-9]+)['"]/i)?.[1];
+      result.redirectFound = !!redirect;
+      if (redirect) {
+        const target = new URL(redirect);
+        result.redirectHost = target.hostname;
+        if (target.protocol === "https:" && target.pathname === `/e/${code}` && target.hostname === "derricknationtop.com") {
+          const second = await pull(redirect);
+          const media = second.html ? findMediaUrl(second.html) : null;
+          result.second = {
+            status: second.status, bytes: second.html.length, error: second.error,
+            encodedJson: /<script\s+type="application\/json">/i.test(second.html),
+            mediaDecoded: !!media,
+            mediaType: media ? (media.isHls ? "HLS" : "MP4") : null,
+          };
+        }
+      }
+      return json(result);
+    }
+
     if (path === "/debug-render") {
       const testUrl = url.searchParams.get("url");
       if (!testUrl) return json({ error: "Missing ?url=" });
