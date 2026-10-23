@@ -749,20 +749,31 @@ async function renderPage(url: string, env: Env, opts: { referer?: string; wait?
 // Ported from StreamFlix's DecryptHelper.decryptF7. voe.sx DDoS-Guards server
 // egress, so this only fires on Browser-Rendering output (a real browser clears
 // the challenge); the decode itself is what plain regex can't do.
-function decodeVoe(encoded: string): { url: string; isHls: boolean } | null {
+function decodeVoe(encoded: string, trace?: (stage: string) => void): { url: string; isHls: boolean } | null {
+  let stage = "rot13";
   try {
     let v = encoded.replace(/[a-zA-Z]/g, (c) => {
       const base = c <= "Z" ? 65 : 97;
       return String.fromCharCode(((c.charCodeAt(0) - base + 13) % 26) + base);
     });
+    stage = "remove-markers";
     for (const p of ["@$", "^^", "~@", "%?", "*~", "!!", "#&"]) v = v.split(p).join("_");
     v = v.replace(/_/g, "");
+    stage = "first-base64";
     v = atob(v);
-    v = v.split("").map((c) => String.fromCharCode(c.charCodeAt(0) - 3)).join("");
+    stage = "shift-bytes";
+    v = v.split("").map((c) => String.fromCharCode((c.charCodeAt(0) + 253) % 256)).join("");
+    stage = "second-base64";
     v = atob(v.split("").reverse().join(""));
+    stage = "parse-json";
     const src = JSON.parse(v)?.source;
-    if (typeof src === "string" && src.startsWith("http")) return { url: src, isHls: src.includes(".m3u8") };
-  } catch { }
+    stage = "validate-source";
+    if (typeof src === "string" && src.startsWith("http")) {
+      trace?.("success");
+      return { url: src, isHls: src.includes(".m3u8") };
+    }
+  } catch { trace?.(stage); return null; }
+  trace?.(stage);
   return null;
 }
 
@@ -1853,6 +1864,11 @@ export default {
         if (target.protocol === "https:" && target.pathname === `/e/${code}` && target.hostname === "derricknationtop.com") {
           const second = await pull(redirect);
           const media = second.html ? findMediaUrl(second.html) : null;
+          const decodeStages: string[] = [];
+          for (const candidate of second.html.matchAll(/<script[^>]*type=["']application\\/json["'][^>]*>([\\s\\S]*?)<\\/script>/gi)) {
+            decodeVoe(candidate[1].trim(), (stage) => decodeStages.push(stage));
+          }
+          result.decodeStages = decodeStages;
           result.second = {
             status: second.status, bytes: second.html.length, error: second.error,
             encodedJson: /<script[^>]*type=["']application\/json["']/i.test(second.html),
