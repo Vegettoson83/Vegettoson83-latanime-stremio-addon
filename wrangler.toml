@@ -22,9 +22,9 @@ MFP_PASSWORD = "latanime"
 # blocks Cloudflare Worker egress; this relays its HTML from Deno's edge. See
 # deno/README.md to deploy your own, then set the URL here (+ /fetch).
 FETCH_PROXY_URL = "https://vegettoson83-latanime-stremi.vegettoson83.deno.net/fetch"
-# Cloudflare Browser Rendering (optional). Set CF_ACCOUNT_ID here and the
+# Cloudflare Browser Run (optional). Set CF_ACCOUNT_ID here and the
 # token as a secret:  wrangler secret put CF_API_TOKEN
-# Token needs the "Browser Rendering: Edit" permission. Leave blank to keep
+# Token needs the "Browser Run: Edit" permission. Leave blank to keep
 # extraction fully manual (no browser, no cost).
 CF_ACCOUNT_ID = "d955dcf5145dca9d036b7f70caae0f86"
 
