@@ -1865,7 +1865,7 @@ export default {
           const second = await pull(redirect);
           const media = second.html ? findMediaUrl(second.html) : null;
           const decodeStages: string[] = [];
-          for (const candidate of second.html.matchAll(/<script[^>]*type=["']application\\/json["'][^>]*>([\\s\\S]*?)<\\/script>/gi)) {
+          for (const candidate of second.html.matchAll(/<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
             decodeVoe(candidate[1].trim(), (stage) => decodeStages.push(stage));
           }
           result.decodeStages = decodeStages;
