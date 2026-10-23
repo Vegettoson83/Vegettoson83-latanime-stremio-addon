@@ -1747,7 +1747,7 @@ async function getDoramaStreams(src: DoramaSource, rawId: string, env: Env, requ
     // VOE and Do7go may expose playable media after browser rendering.
     // Reuse the existing resolver only when Browser Rendering is configured;
     // keep the original external URL when a playable source is unavailable.
-    if (/^https?:\\/\\/(?:[^/]+\\.)?(?:voe\\.sx|do7go\\.com)\\//i.test(embed) && browserRenderingReady(env)) {
+    if ((embed.startsWith("https://voe.sx/") || embed.startsWith("https://do7go.com/")) && browserRenderingReady(env)) {
       const media = await resolveViaRender(embed, env);
       if (media && !isDecoyUrl(media.url)) {
         add({ url: media.url, name: `${src.label} ${media.isHls ? "HLS" : "MP4"}`, title: `▶ ${host} — ${src.label}`, behaviorHints: { notWebReady: false, filename: `${epSlug}.${media.isHls ? "m3u8" : "mp4"}`, bingeGroup: `${src.prefix}-${host}` } });
