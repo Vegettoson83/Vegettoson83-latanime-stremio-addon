@@ -1856,7 +1856,7 @@ export default {
           result.second = {
             status: second.status, bytes: second.html.length, error: second.error,
             encodedJson: /<script[^>]*type=["']application\/json["']/i.test(second.html),
-  for (const m of html.matchAll(/<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+            jsonCandidates: [...second.html.matchAll(/<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi)].length,
             mediaDecoded: !!media,
             mediaType: media ? (media.isHls ? "HLS" : "MP4") : null,
           };
