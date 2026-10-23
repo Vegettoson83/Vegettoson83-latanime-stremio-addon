@@ -802,6 +802,32 @@ function findMediaUrl(html: string): { url: string; isHls: boolean } | null {
   return null;
 }
 
+// VOE commonly returns a short JS redirect to a rotating player host.
+// Resolve the public HTML first; Browser Run is only a fallback.
+async function resolveVoeDirect(embedUrl: string): Promise<{ url: string; isHls: boolean } | null> {
+  try {
+    const fetchPage = async (u: string) => {
+      const r = await fetch(u, {
+        headers: { "User-Agent": CHROME_UA, "Accept": "text/html,*/*;q=0.8" },
+        signal: AbortSignal.timeout(9000),
+      });
+      return r.ok ? await r.text() : "";
+    };
+    let html = await fetchPage(embedUrl);
+    if (!html) return null;
+    let media = findMediaUrl(html);
+    if (media) return media;
+    const redirect = html.match(/window\.location\.href\s*=\s*['"](https:\/\/[^'"]+\/e\/[a-z0-9]+)['"]/i)?.[1];
+    if (!redirect) return null;
+    const originalCode = new URL(embedUrl).pathname.match(/^\/e\/([a-z0-9]+)\/?$/i)?.[1];
+    const target = new URL(redirect);
+    if (!originalCode || target.pathname !== `/e/${originalCode}`) return null;
+    html = await fetchPage(redirect);
+    media = html ? findMediaUrl(html) : null;
+    return media && !isDecoyUrl(media.url) ? media : null;
+  } catch { return null; }
+}
+
 // Cached browser-render resolve: render an embed once and reuse the result.
 // Browser Rendering is slow (~10-20s) and metered, so the outcome — a resolved
 // { url, isHls } or a miss — is cached in KV per embed URL (short TTL because
@@ -1755,6 +1781,15 @@ async function getDoramaStreams(src: DoramaSource, rawId: string, env: Env, requ
     if (embed.includes("mp4upload.com")) {
       const u = await extractMp4upload(embed);
       if (u) { add({ url: u, name: `${src.label} MP4`, title: `▶ mp4upload — ${src.label}`, behaviorHints: { notWebReady: false, filename: `${epSlug}.mp4`, bingeGroup: `${src.prefix}-mp4upload` } }); continue; }
+    }
+    if (/^https:\/\/voe\.sx\/e\//i.test(embed)) {
+      const direct = await resolveVoeDirect(embed);
+      if (direct) {
+        add({ url: direct.url, name: `${src.label} ${direct.isHls ? "HLS" : "MP4"} (test)`, title: `▶ voe — ${src.label} (direct)`, behaviorHints: { notWebReady: false, filename: `${epSlug}.${direct.isHls ? "m3u8" : "mp4"}`, bingeGroup: `${src.prefix}-voe-direct` } });
+        // Keep external fallback: VOE signed URLs may be bound to the fetching IP.
+        ext();
+        continue;
+      }
     }
     // VOE and Do7go may expose playable media after browser rendering.
     // Reuse the existing resolver only when Browser Rendering is configured;
