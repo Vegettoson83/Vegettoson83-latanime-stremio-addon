@@ -760,7 +760,14 @@ function decodeVoe(encoded: string, trace?: (stage: string) => void): { url: str
     for (const p of ["@$", "^^", "~@", "%?", "*~", "!!", "#&"]) v = v.split(p).join("_");
     v = v.replace(/_/g, "");
     stage = "first-base64";
-    v = atob(v);
+    // Python's base64.b64decode ignores non-alphabet characters by default.
+    // atob is stricter, so normalize the encoded input first.
+    const cleanBase64 = (input: string): string => {
+      const characters = input.replace(/[^A-Za-z0-9+/=]/g, "");
+      const bare = characters.replace(/=/g, "");
+      return bare + "=".repeat((4 - bare.length % 4) % 4);
+    };
+    v = atob(cleanBase64(v));
     stage = "shift-bytes";
     v = v.split("").map((c) => String.fromCharCode((c.charCodeAt(0) + 253) % 256)).join("");
     stage = "second-base64";
