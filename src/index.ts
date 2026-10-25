@@ -163,7 +163,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.9",
+  version: "4.15.10",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -176,9 +176,13 @@ const MANIFEST = {
   ],
   types: ["series"],
   catalogs: [
-    { type: "series", id: "latanime-latest", name: "Latanime — Recientes", extra: [{ name: "search", isRequired: false }] },
+    // Only one catalog should run Latanime's live search. The old manifest
+    // issued identical search requests for Recientes and Directorio in parallel.
+    // Keep both browse feeds and provide a distinct search-only catalog.
+    { type: "series", id: "latanime-latest", name: "Latanime — Recientes", extra: [] },
+    { type: "series", id: "latanime-search", name: "Latanime — Buscar", extra: [{ name: "search", isRequired: true }] },
     { type: "series", id: "latanime-airing", name: "Latanime — En Emisión", extra: [] },
-    { type: "series", id: "latanime-directory", name: "Latanime — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }, { name: "genre", isRequired: false, options: Object.keys(DIR_FILTERS) }] },
+    { type: "series", id: "latanime-directory", name: "Latanime — Directorio", extra: [{ name: "skip", isRequired: false }, { name: "genre", isRequired: false, options: Object.keys(DIR_FILTERS) }] },
     { type: "series", id: "latanime-peliculas", name: "Latanime — Películas", extra: [{ name: "skip", isRequired: false }] },
     { type: "series", id: "animefenix-directory", name: "AnimeFénix — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
     // AON is search-only (isRequired) on purpose: every AON fetch is a metered
@@ -503,6 +507,12 @@ async function searchAnimes(query: string, env?: Env) {
 }
 
 async function getCatalog(catalogId: string, extra: Record<string, string>, env?: Env) {
+  // Search-only catalog: the Stremio client can request it independently
+  // of the much larger browse catalog set.
+  if (catalogId === "latanime-search") {
+    const q = extra.search?.trim();
+    return { metas: q ? (await searchAnimes(q, env)).map(toMetaPreview) : [] };
+  }
   if (catalogId.startsWith("animefenix-")) return getAfCatalog(catalogId, extra, env);
   if (catalogId === "aon-search") return getAonCatalog(extra, env);
   if (catalogId.startsWith("animeav1")) return getAv1Catalog(extra, env);
