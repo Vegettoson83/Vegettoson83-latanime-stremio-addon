@@ -163,7 +163,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.3",
+  version: "4.15.4",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -823,27 +823,27 @@ function findMediaUrl(html: string): { url: string; isHls: boolean } | null {
 
 // VOE commonly returns a short JS redirect to a rotating player host.
 // Resolve the public HTML first; Browser Run is only a fallback.
-async function resolveVoeDirect(embedUrl: string): Promise<{ url: string; isHls: boolean } | null> {
+async function resolveVoeDirect(embedUrl: string): Promise<{ url: string; isHls: boolean; referer: string } | null> {
   try {
     const fetchPage = async (u: string) => {
       const r = await fetch(u, {
         headers: { "User-Agent": CHROME_UA, "Accept": "text/html,*/*;q=0.8" },
-        signal: AbortSignal.timeout(9000),
+        signal: AbortSignal.timeout(5000),
       });
-      return r.ok ? await r.text() : "";
+      return { html: r.ok ? await r.text() : "", pageUrl: r.url || u };
     };
-    let html = await fetchPage(embedUrl);
-    if (!html) return null;
-    let media = findMediaUrl(html);
-    if (media) return media;
-    const redirect = html.match(/window\.location\.href\s*=\s*['"](https:\/\/[^'"]+\/e\/[a-z0-9]+)['"]/i)?.[1];
+    let page = await fetchPage(embedUrl);
+    if (!page.html) return null;
+    let media = findMediaUrl(page.html);
+    if (media && !isDecoyUrl(media.url)) return { ...media, referer: page.pageUrl };
+    const redirect = page.html.match(/window\.location\.href\s*=\s*['"](https:\/\/[^'"]+\/e\/[a-z0-9]+)['"]/i)?.[1];
     if (!redirect) return null;
     const originalCode = new URL(embedUrl).pathname.match(/^\/e\/([a-z0-9]+)\/?$/i)?.[1];
     const target = new URL(redirect);
-    if (!originalCode || target.pathname !== `/e/${originalCode}`) return null;
-    html = await fetchPage(redirect);
-    media = html ? findMediaUrl(html) : null;
-    return media && !isDecoyUrl(media.url) ? media : null;
+    if (!originalCode || target.protocol !== "https:" || target.pathname !== `/e/${originalCode}`) return null;
+    page = await fetchPage(redirect);
+    media = page.html ? findMediaUrl(page.html) : null;
+    return media && !isDecoyUrl(media.url) ? { ...media, referer: page.pageUrl } : null;
   } catch { return null; }
 }
 
@@ -1055,9 +1055,11 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         const url = await extractMp4upload(embed.url);
         return url ? { url, name: embed.name, isHls: false } : null;
       }
-      // No manual extractor for this host (JS-challenge/SPA players like voe,
-      // dsvplay, bysekoze). Render it with Browser Rendering if configured
-      // (cached per embed); findMediaUrl decodes VOE's blob or a bare src.
+      // Try public HTML first for VOE and keep browser rendering on a miss.
+      if (/^https:\/\/(?:www\.)?voe\.sx\/e\//i.test(embed.url)) {
+        const direct = await resolveVoeDirect(embed.url);
+        if (direct) return { url: direct.url, name: embed.name, isHls: direct.isHls, referer: direct.referer };
+      }
       const media = await resolveViaRender(embed.url, env);
       if (media) return { url: media.url, name: embed.name, isHls: media.isHls, referer: embed.url };
       // Still nothing — falls through to an externalUrl entry below, playable
@@ -1104,7 +1106,8 @@ async function getStreams(rawId: string, env: Env, request: Request) {
   }
 
   for (const embed of embedUrls) {
-    if (!extractedNames.has(embed.name)) {
+    const voeFallback = /^https:\/\/(?:www\.)?voe\.sx\/e\//i.test(embed.url);
+    if (voeFallback || !extractedNames.has(embed.name)) {
       const label = `🌐 ${embed.name} — Latino`;
       // Embed pages are HTML, not video — externalUrl is the spec-correct
       // field, and unlike notWebReady url streams it stays visible on
@@ -2068,7 +2071,7 @@ export default {
 
     if (path === "/cache-clear") {
       // Takes the full KV key incl. prefix — live prefixes are catalog:,
-      // meta:, stream:v3: and rr:v2: (older stream:/stream:v2:/rr: keys are abandoned).
+      // meta:, stream:v4: and rr:v2: (older stream:/stream:v2:/rr: keys are abandoned).
       const key = url.searchParams.get("key");
       if (key && env.STREAM_CACHE) {
         await env.STREAM_CACHE.delete(key);
@@ -2110,13 +2113,13 @@ export default {
       // v3: v2 entries could hold a cached Big Buck Bunny decoy (pre-4.15.3), and
       // pre-4.9.2 ones carried title+description, which Rust-core clients drop —
       // keying past them instead of serving them out
-      const cached = await cacheGet(`stream:v3:${id}`, env.STREAM_CACHE);
+      const cached = await cacheGet(`stream:v4:${id}`, env.STREAM_CACHE);
       if (cached) return json(cached);
       try {
         const result = await getStreams(id, env, request);
         // safety net for every source: a decoy placeholder is never a real stream
         result.streams = result.streams.filter((st: { url?: string; externalUrl?: string }) => !isDecoyUrl(st.url || st.externalUrl || ""));
-        if (result.streams.length > 0) await cacheSet(`stream:v3:${id}`, result, TTL.stream, env.STREAM_CACHE);
+        if (result.streams.length > 0) await cacheSet(`stream:v4:${id}`, result, TTL.stream, env.STREAM_CACHE);
         return json(result);
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
