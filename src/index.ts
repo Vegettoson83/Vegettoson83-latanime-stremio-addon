@@ -163,7 +163,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.8",
+  version: "4.15.9",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -464,24 +464,42 @@ function toMetaPreview(c: { id: string; name: string; poster: string }) {
   return { id: c.id, type: "series", name: c.name, poster: c.poster || `${BASE_URL}/img/anime.png`, posterShape: "poster" };
 }
 
-async function searchAnimes(query: string, env?: Env) {
-  const homeHtml = await fetchHtml(`${BASE_URL}/`, env);
-  const csrfM = homeHtml.match(/name="csrf-token"[^>]+content="([^"]+)"/i) || homeHtml.match(/content="([^"]+)"[^>]+name="csrf-token"/i);
-  const csrf = csrfM ? csrfM[1] : "";
-  try {
-    const r = await fetch(`${BASE_URL}/buscar_ajax`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "Referer": `${BASE_URL}/`, "Origin": BASE_URL, "User-Agent": "Mozilla/5.0" },
-      body: JSON.stringify({ q: query }),
-      signal: AbortSignal.timeout(8000),
+// Catalog searches are latency-sensitive: Stremio removes an empty/failed row
+// from Search. Do not fetch the homepage just to obtain a CSRF token before
+// searching, especially while the non-Cloudflare Deno relay is unavailable.
+async function fetchSearchPage(target: string, env?: Env): Promise<string> {
+  const load = async (source: string, label: string): Promise<string> => {
+    const response = await fetch(source, {
+      headers: label === "direct" ? CHROME_HEADERS : { "User-Agent": CHROME_UA },
+      signal: AbortSignal.timeout(8500),
     });
-    if (r.ok) {
-      const html = await r.text();
-      const results = parseAnimeCards(html);
-      if (results.length > 0) return results;
+    if (!response.ok) throw new Error(`${label}: HTTP ${response.status}`);
+    const html = await response.text();
+    if (html.length < 200 || isCfChallenge(html)) throw new Error(`${label}: invalid search HTML`);
+    return html;
+  };
+  const sources: Promise<string>[] = [load(target, "direct")];
+  const proxy = env?.FETCH_PROXY_URL?.trim();
+  if (proxy) sources.push(load(`${proxy}?url=${encodeURIComponent(target)}`, "relay"));
+  try {
+    return await Promise.any(sources);
+  } catch {
+    // Browser Rendering is optional and metered. Only spend a render if
+    // direct and relay both failed. Keep the entire search under ~20 seconds.
+    if (env && browserRenderingReady(env)) {
+      const html = await renderPage(target, env, { wait: "load", timeoutMs: 10000 });
+      if (html && html.length >= 200 && !isCfChallenge(html)) return html;
     }
-  } catch { }
-  return parseAnimeCards(await fetchHtml(`${BASE_URL}/buscar?q=${encodeURIComponent(query)}`, env));
+    throw new Error("Latanime search unavailable: direct site and relay failed");
+  }
+}
+
+async function searchAnimes(query: string, env?: Env) {
+  // This is the site's public GET search route. The previous implementation
+  // fetched / first for a CSRF token, then POSTed to /buscar_ajax even when
+  // its POST was blocked. That extra round trip made every search slow.
+  const html = await fetchSearchPage(`${BASE_URL}/buscar?q=${encodeURIComponent(query)}`, env);
+  return parseAnimeCards(html);
 }
 
 async function getCatalog(catalogId: string, extra: Record<string, string>, env?: Env) {
@@ -2229,11 +2247,21 @@ export default {
       if (extraStr) extraStr.split("&").forEach((p) => { const [k, v] = p.split("="); if (k && v) extra[k] = decodeURIComponent(v); });
       if (url.searchParams.get("search")) extra.search = url.searchParams.get("search")!;
       if (url.searchParams.get("genre")) extra.genre = url.searchParams.get("genre")!;
-      const cacheKey = `catalog:${catalogId}:${extra.search || ""}:${extra.genre || ""}:${extra.skip || ""}`;
+      const cacheKey = `catalog:v2:${catalogId}:${extra.search || ""}:${extra.genre || ""}:${extra.skip || ""}`;
       const cached = await cacheGet(cacheKey, env.STREAM_CACHE);
       if (cached) return json(cached);
-      try { const result = await getCatalog(catalogId, extra, env); await cacheSet(cacheKey, result, TTL.catalog, env.STREAM_CACHE); return json(result); }
-      catch (e) { return json({ metas: [], error: String(e) }); }
+      try {
+        const result = await getCatalog(catalogId, extra, env);
+        // A transient empty search should not be locked in KV for ten minutes.
+        if (!extra.search || result.metas.length > 0) {
+          await cacheSet(cacheKey, result, TTL.catalog, env.STREAM_CACHE);
+        }
+        return json(result);
+      } catch (e) {
+        // HTTP 502 lets Stremio show an actual load error, rather than
+        // silently hiding the catalog as if the query had no matches.
+        return json({ metas: [], error: String(e) }, 502);
+      }
     }
 
     const metaM = path.match(/^\/meta\/([^/]+)\/(.+)\.json$/);
