@@ -163,11 +163,17 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.6",
+  version: "4.15.7",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
-  resources: ["catalog", "meta", "stream"],
+  // Stremio filters stream providers by ID prefix. Accept Cinemeta/IMDb and
+  // TMDB video IDs for streams, but only our own IDs for metadata.
+  resources: [
+    "catalog",
+    { name: "meta", types: ["series"], idPrefixes: ["latanime:", "af:", "aon:", "av1:", "dorama:", "dsub:", "kdrama:"] },
+    { name: "stream", types: ["series"], idPrefixes: ["latanime:", "af:", "aon:", "av1:", "dorama:", "dsub:", "kdrama:", "tt", "tmdb:"] },
+  ],
   types: ["series"],
   catalogs: [
     { type: "series", id: "latanime-latest", name: "Latanime — Recientes", extra: [{ name: "search", isRequired: false }] },
@@ -935,7 +941,127 @@ function parseEpisodeEmbeds(html: string) {
   return { embedUrls, mirrors };
 }
 
+// Cinemeta series episode IDs: tt1234567:1:2. TMDB addons commonly use
+// tmdb:1234:1:2 or tmdb:tv:1234:1:2. Never treat a series' plain meta ID
+// as a video ID. Keep these mappings separate from our own catalog metadata.
+const EXTERNAL_EPISODE_RE = /^(tt\d{7,10}|tmdb:(?:tv:)?\d+):([1-9]\d?):([1-9]\d{0,3})$/i;
+
+function normalizedExternalTitle(title: string): string {
+  return title.normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/\b(?:\d{1,2}(?:st|nd|rd|th)\s+season|(?:season|temporada)\s+\d{1,2}|s\d{1,2})\b/gi, "")
+    .replace(/\b(?:latino|castellano|doblado|subtitulado|espanol)\b/gi, "")
+    .replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function externalSeasonLabel(title: string): number | null {
+  const m = title.match(/\b(?:season|temporada)[\s-]*(\d{1,2})\b|\b(\d{1,2})(?:st|nd|rd|th)[\s-]*season\b|\bs(\d{1,2})\b/i);
+  return m ? Number(m[1] || m[2] || m[3]) : null;
+}
+
+async function externalSeriesTitles(id: string, env: Env): Promise<string[]> {
+  const cacheKey = `ext:titles:${id}`;
+  const cached = await cacheGet(cacheKey, env.STREAM_CACHE);
+  if (Array.isArray(cached) && cached.every((x) => typeof x === "string")) return cached as string[];
+  let names: string[] = [];
+  try {
+    if (/^tt\d+$/i.test(id)) {
+      const r = await fetch(`https://v3-cinemeta.strem.io/meta/series/${id}.json`, {
+        headers: { Accept: "application/json" }, signal: AbortSignal.timeout(6500),
+      });
+      if (r.ok) {
+        const body: any = await r.json();
+        const m = body?.meta;
+        if (m && m.type === "series") {
+          names = [m.name, m.originalName, m.original_name, ...(Array.isArray(m.aliases) ? m.aliases : [])]
+            .filter((x): x is string => typeof x === "string" && x.trim().length > 2);
+        }
+      }
+    } else if ((env.TMDB_KEY || "").trim()) {
+      const tmdbId = id.match(/^tmdb:(?:tv:)?(\d+)$/i)?.[1];
+      if (!tmdbId) return [];
+      const r = await fetch(`${TMDB_BASE}/tv/${tmdbId}?api_key=${encodeURIComponent(env.TMDB_KEY.trim())}&language=en-US`, {
+        headers: { Accept: "application/json" }, signal: AbortSignal.timeout(6500),
+      });
+      if (r.ok) {
+        const m: any = await r.json();
+        names = [m.name, m.original_name].filter((x): x is string => typeof x === "string" && x.trim().length > 2);
+      }
+    }
+  } catch { return []; }
+  names = [...new Set(names.map((x) => x.trim()))].slice(0, 6);
+  if (names.length) await cacheSet(cacheKey, names, 24 * 3600, env.STREAM_CACHE);
+  return names;
+}
+
+// AniList supplies Japanese romaji titles where Cinemeta uses English names.
+// Validate that the returned anime identifies the same title before trusting
+// any alias; a fuzzy search result alone must not select an unrelated show.
+async function animeTitleAliases(englishName: string): Promise<string[]> {
+  try {
+    const r = await fetch("https://graphql.anilist.co/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        query: "query ($search:String) { Media(search:$search,type:ANIME) { title { english romaji } synonyms } }",
+        variables: { search: englishName },
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!r.ok) return [];
+    const data: any = await r.json();
+    const m = data?.data?.Media;
+    if (!m) return [];
+    const choices = [m.title?.english, m.title?.romaji, ...(Array.isArray(m.synonyms) ? m.synonyms : [])]
+      .filter((x): x is string => typeof x === "string" && x.trim().length > 2);
+    const expected = normalizedExternalTitle(englishName);
+    if (!choices.some((x) => normalizedExternalTitle(x) === expected)) return [];
+    return choices;
+  } catch { return []; }
+}
+
+async function getExternalStreams(rawId: string, env: Env, request: Request): Promise<{ streams: any[] }> {
+  const m = rawId.match(EXTERNAL_EPISODE_RE);
+  if (!m) return { streams: [] };
+  const [, externalId, seasonStr, episodeStr] = m;
+  const season = Number(seasonStr);
+  const episode = Number(episodeStr);
+  if (season > 50 || episode > 1000) return { streams: [] };
+
+  const mapKey = `ext:match:v1:${externalId.toLowerCase()}:${season}`;
+  const cached = await cacheGet(mapKey, env.STREAM_CACHE) as { slug?: string } | null;
+  if (cached?.slug && /^[a-z0-9-]+$/.test(cached.slug)) {
+    return getStreams(`latanime:${cached.slug}:${episode}`, env, request);
+  }
+  const names = await externalSeriesTitles(externalId, env);
+  if (!names.length) return { streams: [] };
+
+  const aliases = await animeTitleAliases(names[0]);
+  const titles = [...new Set([...aliases.filter((x) => x !== names[0]), ...names])];
+  const canonicals = new Set(titles.map(normalizedExternalTitle).filter(Boolean));
+  // Latanime search indexes the show's romanized name more often than its
+  // English localization. Run at most two bounded searches concurrently.
+  const queries = [...new Set([...aliases.slice(1, 2), ...names])].filter(Boolean).slice(0, 2);
+  const results = await Promise.allSettled(queries.map(async (query) =>
+    parseAnimeCards(await fetchHtml(`${BASE_URL}/buscar?q=${encodeURIComponent(query)}`, env))
+  ));
+  const matches = results.flatMap((r) => r.status === "fulfilled" ? r.value : [])
+    .filter((card) => {
+      const matchName = normalizedExternalTitle(card.name);
+      const matchSlug = normalizedExternalTitle(card.id.slice("latanime:".length).replace(/-/g, " "));
+      if (!canonicals.has(matchName) && !canonicals.has(matchSlug)) return false;
+      const explicitSeason = externalSeasonLabel(card.name) ??
+        externalSeasonLabel(card.id.slice("latanime:".length).replace(/-/g, " "));
+      // Avoid accidentally serving season 1 in place of later seasons.
+      return season === 1 ? explicitSeason == null || explicitSeason === 1 : explicitSeason === season;
+    });
+  const slug = matches[0]?.id.replace(/^latanime:/, "");
+  if (!slug) return { streams: [] };
+  await cacheSet(mapKey, { slug }, 6 * 3600, env.STREAM_CACHE);
+  return getStreams(`latanime:${slug}:${episode}`, env, request);
+}
+
 async function getStreams(rawId: string, env: Env, request: Request) {
+  if (EXTERNAL_EPISODE_RE.test(rawId)) return getExternalStreams(rawId, env, request);
   if (rawId.startsWith("af:")) return getAfStreams(rawId, env, request);
   if (rawId.startsWith("aon:")) return getAonStreams(rawId, env, request);
   if (rawId.startsWith("av1:")) return getAv1Streams(rawId, env, request);
@@ -2122,13 +2248,13 @@ export default {
       // v3: v2 entries could hold a cached Big Buck Bunny decoy (pre-4.15.3), and
       // pre-4.9.2 ones carried title+description, which Rust-core clients drop —
       // keying past them instead of serving them out
-      const cached = await cacheGet(`stream:v5:${id}`, env.STREAM_CACHE);
+      const cached = await cacheGet(`stream:v6:${id}`, env.STREAM_CACHE);
       if (cached) return json(cached);
       try {
         const result = await getStreams(id, env, request);
         // safety net for every source: a decoy placeholder is never a real stream
         result.streams = result.streams.filter((st: { url?: string; externalUrl?: string }) => !isDecoyUrl(st.url || st.externalUrl || ""));
-        if (result.streams.length > 0) await cacheSet(`stream:v5:${id}`, result, TTL.stream, env.STREAM_CACHE);
+        if (result.streams.length > 0) await cacheSet(`stream:v6:${id}`, result, TTL.stream, env.STREAM_CACHE);
         return json(result);
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
