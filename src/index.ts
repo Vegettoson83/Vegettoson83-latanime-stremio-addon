@@ -163,7 +163,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.7",
+  version: "4.15.8",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -190,7 +190,10 @@ const MANIFEST = {
     { type: "series", id: "doramedplay-directory", name: "Doramas Sub — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
     { type: "series", id: "kdramasplay-directory", name: "KDramas Play — Directorio", extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] },
   ],
-  idPrefixes: ["latanime:", "af:", "aon:", "av1:", "dorama:", "dsub:", "kdrama:"],
+  // Compatibility: clients that check only global prefixes must also
+  // request streams for Cinemeta and TMDB content. The resource-specific
+  // "meta" prefixes above continue restricting metadata to our own IDs.
+  idPrefixes: ["latanime:", "af:", "aon:", "av1:", "dorama:", "dsub:", "kdrama:", "tt", "tmdb:"],
   stremioAddonsConfig: {
     issuer: "https://stremio-addons.net",
     signature: "eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..4WDWvTnhGYchX9Rc1o9Bag.YHFC6ACCxdIpApiv6xLMfXvadBCCRXT9T-L2ZNgDylI-VeD8M4UW_MV3y_AQd-BxtLeykl62PeGMNweKlwfWOl_ax4-Z5ADECeZWWubCOcnbPtzGvkLrTifY_qkIi0I3.Muzmn0vmvz4BCEGDPE1OHg",
