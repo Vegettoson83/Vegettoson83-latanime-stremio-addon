@@ -163,7 +163,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.10",
+  version: "4.15.11",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -498,12 +498,78 @@ async function fetchSearchPage(target: string, env?: Env): Promise<string> {
   }
 }
 
+// The site's /buscar GET page returns complete search results, but a long
+// localized title (e.g. "Re: Zero - Starting Life in Another World") may have
+// no substring match for its Japanese/romanized catalog title. Try a shorter,
+// distinctive title variant and the site's original AJAX endpoint on a miss.
+// Do not fetch a CSRF token or request AJAX when GET already succeeds.
+function searchTitleVariants(query: string): string[] {
+  const normalized = query.trim().replace(/:\s+/g, ":");
+  const variants: string[] = [];
+  if (normalized !== query.trim()) variants.push(normalized);
+  const short = normalized.split(/\s+[-–—]\s+/)[0].trim();
+  if (short.length >= 5 && short.length < normalized.length && !variants.includes(short)) variants.push(short);
+  return variants.slice(0, 2);
+}
+
+async function searchAnimeAjax(query: string, env?: Env): Promise<ReturnType<typeof parseAnimeCards>> {
+  try {
+    // The AJAX search expects a CSRF token from the site homepage.
+    const homepage = await fetchSearchPage(BASE_URL + "/", env);
+    const match = homepage.match(/name=["']csrf-token["'][^>]+content=["']([^"']+)["']/i) ||
+      homepage.match(/content=["']([^"']+)["'][^>]+name=["']csrf-token["']/i);
+    if (!match) return [];
+    const response = await fetch(BASE_URL + "/buscar_ajax", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-TOKEN": match[1],
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": BASE_URL + "/",
+        "Origin": BASE_URL,
+        "Accept": "text/html,application/json",
+        "User-Agent": CHROME_UA,
+      },
+      body: JSON.stringify({ q: query }),
+      signal: AbortSignal.timeout(6500),
+    });
+    if (!response.ok) return [];
+    const content = await response.text();
+    let html = content;
+    // Some revisions wrap the result fragment in JSON.
+    if (content.trimStart().startsWith("{")) {
+      try {
+        const data: unknown = JSON.parse(content);
+        if (data && typeof data === "object") {
+          const value = data as Record<string, unknown>;
+          html = [value.html, value.results, value.data].find((x): x is string => typeof x === "string") || "";
+        }
+      } catch { /* not JSON; parse the raw HTML below */ }
+    }
+    return parseAnimeCards(html);
+  } catch { return []; }
+}
+
 async function searchAnimes(query: string, env?: Env) {
-  // This is the site's public GET search route. The previous implementation
-  // fetched / first for a CSRF token, then POSTed to /buscar_ajax even when
-  // its POST was blocked. That extra round trip made every search slow.
-  const html = await fetchSearchPage(`${BASE_URL}/buscar?q=${encodeURIComponent(query)}`, env);
-  return parseAnimeCards(html);
+  const search = async (term: string) =>
+    parseAnimeCards(await fetchSearchPage(BASE_URL + "/buscar?q=" + encodeURIComponent(term), env));
+  // Preserve verified GET behavior and its low-latency path for regular names.
+  let initial: ReturnType<typeof parseAnimeCards> = [];
+  try { initial = await search(query); } catch { /* try the fallback paths */ }
+  if (initial.length) return initial;
+
+  const variants = searchTitleVariants(query);
+  const attempts: Promise<ReturnType<typeof parseAnimeCards>>[] =
+    variants.map(async (term) => {
+      const found = await search(term);
+      if (!found.length) throw new Error("No matching title");
+      return found;
+    });
+  attempts.push(searchAnimeAjax(query, env).then((found) => {
+    if (!found.length) throw new Error("No matching AJAX results");
+    return found;
+  }));
+  try { return await Promise.any(attempts); } catch { return []; }
 }
 
 async function getCatalog(catalogId: string, extra: Record<string, string>, env?: Env) {
