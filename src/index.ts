@@ -163,7 +163,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.4",
+  version: "4.15.5",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -2131,31 +2131,37 @@ export default {
       try {
         // searchParams.get() already percent-decodes — decoding again would
         // corrupt upstream URLs that carry literal %-sequences (signed tokens)
-        const base = m3u8Url.substring(0, m3u8Url.lastIndexOf("/") + 1);
         const workerBase = new URL(request.url).origin;
-        const proxied = (absUrl: string, forceM3u8 = false) => {
-          const route = forceM3u8 || absUrl.includes(".m3u8") ? "m3u8" : "seg";
-          return `${workerBase}/proxy/${route}?url=${encodeURIComponent(absUrl)}&ref=${encodeURIComponent(referer)}`;
+        const proxied = (resource: string, forceM3u8 = false) => {
+          // Resolve root-relative, ../, ?query, and protocol-relative HLS links.
+          // Concatenating strings corrupts URLs like ../720p/playlist.m3u8.
+          const absUrl = new URL(resource, m3u8Url);
+          if (absUrl.protocol !== "https:" && absUrl.protocol !== "http:") throw new Error("Invalid HLS resource protocol");
+          const route = forceM3u8 || absUrl.pathname.toLowerCase().endsWith(".m3u8") ? "m3u8" : "seg";
+          return `${workerBase}/proxy/${route}?url=${encodeURIComponent(absUrl.href)}&ref=${encodeURIComponent(referer)}`;
         };
         const r = await fetch(m3u8Url, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" }, signal: AbortSignal.timeout(15000) });
-        if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
+        if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status, headers: { "Access-Control-Allow-Origin": "*" } });
         const m3u8Text = await r.text();
+        // Some hosts return a 200 HTML challenge/error page instead of video.
+        // Never label HTML as HLS: Stremio would report "Video is not supported".
+        if (!m3u8Text.trimStart().startsWith("#EXTM3U")) {
+          return new Response("Upstream did not return an HLS playlist", { status: 502, headers: { "Access-Control-Allow-Origin": "*" } });
+        }
         const isMaster = m3u8Text.includes("#EXT-X-STREAM-INF");
         const rewritten = m3u8Text.split("\n").map((line) => {
           const trimmed = line.trim();
-          if (trimmed === "") return line;
+          if (!trimmed) return line;
           if (trimmed.startsWith("#")) {
-            // EXT-X-KEY / EXT-X-MAP / EXT-X-MEDIA reference URLs via URI="…" —
-            // they need the same referer treatment as segments
             const uriM = line.match(/URI="([^"]+)"/);
             if (!uriM) return line;
-            const absUri = uriM[1].startsWith("http") ? uriM[1] : base + uriM[1];
-            return line.replace(uriM[1], proxied(absUri));
+            // Audio renditions and iframe streams are playlists, even when
+            // their URL lacks a .m3u8 extension.
+            const playlistUri = /^#EXT-X-(?:MEDIA|I-FRAME-STREAM-INF|RENDITION-REPORT)\b/i.test(trimmed);
+            return line.replace(uriM[1], proxied(uriM[1], playlistUri));
           }
-          const absUrl = trimmed.startsWith("http") ? trimmed : base + trimmed;
-          // in a master playlist every non-# line is a variant playlist,
-          // whatever its extension
-          return proxied(absUrl, isMaster);
+          // Master playlist entries are variants regardless of extension.
+          return proxied(trimmed, isMaster);
         }).join("\n");
         return new Response(rewritten, { headers: { "Content-Type": "application/vnd.apple.mpegurl", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache" } });
       } catch (e) { return new Response(String(e), { status: 500 }); }
@@ -2169,8 +2175,13 @@ export default {
         // deliberately no AbortSignal here: the response body is streamed, and
         // a timeout signal would abort slow segment downloads mid-stream
         const r = await fetch(segUrl, { headers: { "Referer": referer, "Origin": new URL(referer).origin, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" } });
-        if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status });
-        return new Response(r.body, { headers: { "Content-Type": r.headers.get("Content-Type") || "video/MP2T", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600" } });
+        if (!r.ok) return new Response(`Upstream ${r.status}`, { status: r.status, headers: { "Access-Control-Allow-Origin": "*" } });
+        const contentType = r.headers.get("Content-Type") || "video/MP2T";
+        if (/text\/html/i.test(contentType)) {
+          await r.body?.cancel();
+          return new Response("Upstream returned HTML instead of media", { status: 502, headers: { "Access-Control-Allow-Origin": "*" } });
+        }
+        return new Response(r.body, { headers: { "Content-Type": contentType, "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600" } });
       } catch (e) { return new Response(String(e), { status: 500 }); }
     }
 
