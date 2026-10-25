@@ -163,7 +163,7 @@ async function cacheSet(key: string, data: unknown, ttlSec: number, kv: KVNamesp
 
 const MANIFEST = {
   id: ADDON_ID,
-  version: "4.15.5",
+  version: "4.15.6",
   name: "Latanime",
   description: "Anime Latino y Castellano desde latanime.org",
   logo: "https://latanime.org/img/logito.png",
@@ -1005,26 +1005,30 @@ async function getStreams(rawId: string, env: Env, request: Request) {
     if (idM) tasks.push(Promise.resolve({ url: `https://pixeldrain.com/api/file/${idM[1]}`, name: "Pixeldrain", isHls: false, priority: true }));
   }
 
-  // savefiles HLS via the Deno resolver — savefiles binds the signed URL to the
-  // extractor's IP, so the whole flow (extract + all segment fetches) runs on
-  // Deno's one stable IP and the token stays valid. Deno serves it web-ready.
+  // Savefiles URLs are IP-bound. The relay must return real HLS, not an HTML
+  // error page, before this can be advertised as a Stremio video.
   const savefilesSrc = mirrors.savefiles || embedUrls.find((e) => e.url.includes("savefiles.com") || e.url.includes("streamhls.to"))?.url;
   if (denoBase && savefilesSrc) {
-    const code = savefilesSrc.split(/savefiles\.com\/|streamhls\.to\//).pop()?.replace(/^e\//, "").split(/[/?]/)[0]?.trim();
-    if (code && code.length > 3) {
-      tasks.push(Promise.resolve({ url: `${denoBase}/savefiles?code=${encodeURIComponent(code)}`, name: "savefiles 1080p", isHls: true, proxied: true }));
-    }
+    const code = savefilesSrc.match(/(?:savefiles\.com\/(?:e\/)?|streamhls\.to\/(?:e\/)?)([a-z0-9]{6,})(?:[/?#]|$)/i)?.[1];
+    if (code) tasks.push((async () => {
+      const relayUrl = `${denoBase}/savefiles?code=${encodeURIComponent(code)}`;
+      try {
+        const r = await fetch(relayUrl, {
+          headers: { "Accept": "application/vnd.apple.mpegurl,application/x-mpegurl" },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!r.ok || /(?:text\/html|application\/json)/i.test(r.headers.get("Content-Type") || "")) return null;
+        const playlist = await r.text();
+        if (!playlist.trimStart().startsWith("#EXTM3U")) return null;
+        return { url: relayUrl, name: "savefiles 1080p", isHls: true, proxied: true };
+      } catch { return null; }
+    })());
   }
 
   for (const embed of embedUrls) {
     if (embed.url.includes("pixeldrain.com")) { extractedNames.add(embed.name); continue; } // handled above
-    // savefiles/streamhls handled above via Deno (when configured); mark it
-    // extracted so it isn't also shown as an externalUrl. Without a Deno base it
-    // falls through to an externalUrl instead. mixdrop mints IP-bound signed
-    // URLs too but is a single MP4 — server-side extraction 403s from another
-    // IP, so skip it and let the user's own client resolve the externalUrl.
+    // Preserve the original player as fallback when the relay is unavailable.
     if (embed.url.includes("savefiles.com") || embed.url.includes("streamhls.to")) {
-      if (denoBase) extractedNames.add(embed.name);
       continue;
     }
     if (/mi+xdrop/.test(embed.url)) {
@@ -1118,6 +1122,11 @@ async function getStreams(rawId: string, env: Env, request: Request) {
         title: label,
       });
     }
+  }
+
+  // The mirror may not have a corresponding data-player embed.
+  if (savefilesSrc && !streams.some((st) => st.externalUrl === savefilesSrc)) {
+    streams.push({ externalUrl: savefilesSrc, name: "Latanime 🌐", title: "🌐 savefiles — Latino" });
   }
 
   return { streams };
@@ -2071,7 +2080,7 @@ export default {
 
     if (path === "/cache-clear") {
       // Takes the full KV key incl. prefix — live prefixes are catalog:,
-      // meta:, stream:v4: and rr:v2: (older stream:/stream:v2:/rr: keys are abandoned).
+      // meta:, stream:v5: and rr:v2: (older stream:/stream:v2:/rr: keys are abandoned).
       const key = url.searchParams.get("key");
       if (key && env.STREAM_CACHE) {
         await env.STREAM_CACHE.delete(key);
@@ -2113,13 +2122,13 @@ export default {
       // v3: v2 entries could hold a cached Big Buck Bunny decoy (pre-4.15.3), and
       // pre-4.9.2 ones carried title+description, which Rust-core clients drop —
       // keying past them instead of serving them out
-      const cached = await cacheGet(`stream:v4:${id}`, env.STREAM_CACHE);
+      const cached = await cacheGet(`stream:v5:${id}`, env.STREAM_CACHE);
       if (cached) return json(cached);
       try {
         const result = await getStreams(id, env, request);
         // safety net for every source: a decoy placeholder is never a real stream
         result.streams = result.streams.filter((st: { url?: string; externalUrl?: string }) => !isDecoyUrl(st.url || st.externalUrl || ""));
-        if (result.streams.length > 0) await cacheSet(`stream:v4:${id}`, result, TTL.stream, env.STREAM_CACHE);
+        if (result.streams.length > 0) await cacheSet(`stream:v5:${id}`, result, TTL.stream, env.STREAM_CACHE);
         return json(result);
       } catch (e) { return json({ streams: [], error: String(e) }); }
     }
