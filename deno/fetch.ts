@@ -153,7 +153,8 @@ async function handleStreamwish(embedUrl: string, selfBase: string): Promise<Res
     });
     if (!r.ok) return jsonError(`upstream ${r.status}`, 502);
     const text = await r.text();
-    return cors(rewriteM3u8(text, master, selfBase, STREAMWISH_REFERER), {
+    if (!text.trimStart().startsWith("#EXTM3U")) return jsonError("upstream did not return an HLS playlist", 502);
+    return cors(rewriteM3u8(text, r.url || master, selfBase, STREAMWISH_REFERER), {
       headers: { "Content-Type": "application/vnd.apple.mpegurl", "Cache-Control": "no-cache" },
     });
   } catch (e) {
@@ -189,23 +190,20 @@ async function resolveSavefiles(code: string): Promise<string | null> {
 }
 
 function rewriteM3u8(text: string, sourceUrl: string, selfBase: string, referer: string): string {
-  const base = sourceUrl.substring(0, sourceUrl.lastIndexOf("/") + 1);
-  const isMaster = text.includes("#EXT-X-STREAM-INF");
-  const proxied = (abs: string) =>
-    `${selfBase}/hls?u=${encodeURIComponent(abs)}&r=${encodeURIComponent(referer)}`;
+  const proxied = (resource: string): string => {
+    // Relative paths may contain ../, /root, or a query string; joining
+    // strings breaks signed segments and leads to unsupported video errors.
+    const u = new URL(resource, sourceUrl);
+    if (u.protocol !== "https:" && u.protocol !== "http:") throw new Error("invalid HLS resource protocol");
+    return `${selfBase}/hls?u=${encodeURIComponent(u.href)}&r=${encodeURIComponent(referer)}`;
+  };
   return text.split("\n").map((line) => {
-    const t = line.trim();
-    if (t === "") return line;
-    if (t.startsWith("#")) {
-      const uriM = line.match(/URI="([^"]+)"/);
-      if (!uriM) return line;
-      const absUri = uriM[1].startsWith("http") ? uriM[1] : base + uriM[1];
-      return line.replace(uriM[1], proxied(absUri));
+    const trimmed = line.trim();
+    if (!trimmed) return line;
+    if (trimmed.startsWith("#")) {
+      return line.replace(/URI="([^"]+)"/g, (_match, uri: string) => `URI="${proxied(uri)}"`);
     }
-    // in a master every non-# line is a variant playlist; in a media playlist
-    // it's a segment. Either way, resolve relative → absolute and proxy it.
-    const abs = t.startsWith("http") ? t : base + t;
-    return proxied(abs);
+    return proxied(trimmed);
   }).join("\n");
 }
 
@@ -221,7 +219,8 @@ async function handleSavefiles(code: string, selfBase: string): Promise<Response
     });
     if (!r.ok) return jsonError(`upstream ${r.status}`, 502);
     const text = await r.text();
-    return cors(rewriteM3u8(text, master, selfBase, STREAMHLS_REFERER), {
+    if (!text.trimStart().startsWith("#EXTM3U")) return jsonError("upstream did not return an HLS playlist", 502);
+    return cors(rewriteM3u8(text, r.url || master, selfBase, STREAMHLS_REFERER), {
       headers: { "Content-Type": "application/vnd.apple.mpegurl", "Cache-Control": "no-cache" },
     });
   } catch (e) {
@@ -240,26 +239,34 @@ async function handleHls(rawUrl: string, referer: string, selfBase: string): Pro
   }
   if (!hlsHostAllowed(u.hostname)) return jsonError("host not allowed", 403);
   try {
-    const r = await fetch(rawUrl, {
-      headers: { "User-Agent": MOBILE_UA, "Referer": referer || STREAMHLS_REFERER, "Origin": new URL(referer || STREAMHLS_REFERER).origin },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!r.ok) return new Response(`upstream ${r.status}`, { status: r.status, headers: { "Access-Control-Allow-Origin": "*" } });
+    // Limit time to the response headers, not the complete video body:
+    // aborting the fetch after 15s also aborts a slow segment mid-stream.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    let r: Response;
+    try {
+      r = await fetch(rawUrl, {
+        headers: { "User-Agent": MOBILE_UA, "Referer": referer || STREAMHLS_REFERER, "Origin": new URL(referer || STREAMHLS_REFERER).origin },
+        signal: controller.signal,
+      });
+    } finally { clearTimeout(timer); }
+    if (!r.ok) return cors(`upstream ${r.status}`, { status: r.status });
     const ct = r.headers.get("Content-Type") || "";
-    const isPlaylist = rawUrl.includes(".m3u8") || ct.includes("mpegurl");
+    if (/text\/html/i.test(ct)) {
+      await r.body?.cancel();
+      return jsonError("upstream returned HTML instead of video", 502);
+    }
+    const isPlaylist = new URL(r.url || rawUrl).pathname.toLowerCase().endsWith(".m3u8") ||
+      rawUrl.includes(".m3u8") || /(?:mpegurl|application\/vnd\.apple\.mpegurl)/i.test(ct);
     if (isPlaylist) {
       const text = await r.text();
-      return cors(rewriteM3u8(text, rawUrl, selfBase, referer || STREAMHLS_REFERER), {
+      if (!text.trimStart().startsWith("#EXTM3U")) return jsonError("upstream did not return an HLS playlist", 502);
+      return cors(rewriteM3u8(text, r.url || rawUrl, selfBase, referer || STREAMHLS_REFERER), {
         headers: { "Content-Type": "application/vnd.apple.mpegurl", "Cache-Control": "no-cache" },
       });
     }
-    // segment — stream bytes through
-    return new Response(r.body, {
-      headers: {
-        "Content-Type": ct || "video/MP2T",
-        "Access-Control-Allow-Origin": "*",
-        "Cache-Control": "public, max-age=3600",
-      },
+    return cors(r.body, {
+      headers: { "Content-Type": ct || "video/MP2T", "Cache-Control": "public, max-age=3600" },
     });
   } catch (e) {
     return new Response(String(e), { status: 502, headers: { "Access-Control-Allow-Origin": "*" } });
